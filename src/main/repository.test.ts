@@ -23,6 +23,10 @@ import {
   githubRepoSlugFromRemoteUrl,
   readGitObject,
   isPathWithinApprovedRoots,
+  isolateFirstPathspec,
+  isolateFirstPathspecGroup,
+  pathspecGroupForFile,
+  chunkPathspecGroups,
   isPullRequestDiffTooLargeError,
   isSameGitHubLogin,
   limitPatchFileSize,
@@ -933,6 +937,36 @@ describe('chunkPathspecs', () => {
   })
 })
 
+describe('isolateFirstPathspec', () => {
+  it('pulls the first visible path out so it can be emitted alone', () => {
+    expect(isolateFirstPathspec([])).toEqual({ first: null, rest: [] })
+    expect(isolateFirstPathspec(['a.ts'])).toEqual({ first: 'a.ts', rest: [] })
+    expect(isolateFirstPathspec(['a.ts', 'b.ts', 'c.ts'])).toEqual({ first: 'a.ts', rest: ['b.ts', 'c.ts'] })
+  })
+})
+
+describe('pathspec groups', () => {
+  it('keeps a rename pair atomic and literal', () => {
+    expect(pathspecGroupForFile({ path: 'new.ts' })).toEqual([':(literal)new.ts'])
+    expect(pathspecGroupForFile({ path: 'new.ts', previousPath: 'old.ts' }))
+      .toEqual([':(literal)old.ts', ':(literal)new.ts'])
+    expect(isolateFirstPathspecGroup([
+      [':(literal)old.ts', ':(literal)new.ts'],
+      [':(literal)other.ts']
+    ])).toEqual({
+      first: [':(literal)old.ts', ':(literal)new.ts'],
+      rest: [[':(literal)other.ts']]
+    })
+    expect(chunkPathspecGroups([
+      [':(literal)a.ts', ':(literal)b.ts'],
+      [':(literal)c.ts']
+    ], 40)).toEqual([
+      [':(literal)a.ts', ':(literal)b.ts'],
+      [':(literal)c.ts']
+    ])
+  })
+})
+
 describe('replaceStatusEntry', () => {
   const tracked = (path: string): { path: string; status: 'modified' } => ({ path, status: 'modified' })
   const untracked = (path: string): { path: string; status: 'untracked' } => ({ path, status: 'untracked' })
@@ -1390,7 +1424,7 @@ describe('RepositoryService', () => {
       const diffStarts = events.filter((event) =>
         event.event === 'start' && event.argv?.includes('diff') === true
       )
-      expect(diffStarts).toHaveLength(2)
+      expect(diffStarts).toHaveLength(4)
     } finally {
       if (previousTrace == null) delete process.env.GIT_TRACE2_EVENT
       else process.env.GIT_TRACE2_EVENT = previousTrace
@@ -1415,6 +1449,139 @@ describe('RepositoryService', () => {
       const current = repository.getWorkingTreePatch(['b.ts'])
       await expect(superseded).rejects.toThrow(COMMAND_ABORTED_MESSAGE)
       expect((await current).patch).toContain('export const b = 2')
+    } finally {
+      repository.dispose()
+      await rm(repositoryPath, { recursive: true, force: true })
+    }
+  })
+
+  it('emits the first working-tree file before the joined patch resolves', async () => {
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'better-code-diff-patch-first-'))
+    const repository = new RepositoryService()
+    try {
+      await initRepository(repositoryPath)
+      await writeFile(join(repositoryPath, 'a.ts'), 'export const a = 1\n', 'utf8')
+      await writeFile(join(repositoryPath, 'b.ts'), 'export const b = 1\n', 'utf8')
+      await commitAll(repositoryPath, 'Initial commit')
+      await writeFile(join(repositoryPath, 'a.ts'), 'export const a = 2\n', 'utf8')
+      await writeFile(join(repositoryPath, 'b.ts'), 'export const b = 2\n', 'utf8')
+      await repository.open(repositoryPath)
+      await repository.refresh()
+
+      const pages: Array<{ patch: string; omittedFiles: { path: string }[] }> = []
+      let resolved = false
+      const result = await repository.getWorkingTreePatch(['a.ts', 'b.ts'], (page) => {
+        expect(resolved).toBe(false)
+        pages.push(page)
+      })
+      resolved = true
+
+      expect(pages.length).toBeGreaterThanOrEqual(1)
+      expect(filesFromPatch(pages[0]!.patch).map((file) => file.path)).toEqual(['a.ts'])
+      expect(filesFromPatch(result.patch).map((file) => file.path)).toEqual(['a.ts', 'b.ts'])
+      expect(result.patch).toContain('export const a = 2')
+      expect(result.patch).toContain('export const b = 2')
+    } finally {
+      repository.dispose()
+      await rm(repositoryPath, { recursive: true, force: true })
+    }
+  })
+
+  it('emits an empty untracked first file, then the remaining tracked patch', async () => {
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'better-code-diff-patch-empty-first-'))
+    const repository = new RepositoryService()
+    try {
+      await initRepository(repositoryPath)
+      await writeFile(join(repositoryPath, 'kept.ts'), 'kept\n', 'utf8')
+      await commitAll(repositoryPath, 'Initial commit')
+      await writeFile(join(repositoryPath, 'empty-new.ts'), '', 'utf8')
+      await writeFile(join(repositoryPath, 'kept.ts'), 'changed\n', 'utf8')
+      await repository.open(repositoryPath)
+      await repository.refresh()
+
+      const pages: Array<{ patch: string; omittedFiles: { path: string }[] }> = []
+      const result = await repository.getWorkingTreePatch(['empty-new.ts', 'kept.ts'], (page) => {
+        pages.push(page)
+      })
+      expect(pages[0]?.patch).toBe(createNewFilePatch('empty-new.ts', ''))
+      expect(result.patch).toContain('empty-new.ts')
+      expect(result.patch).toContain('+changed')
+    } finally {
+      repository.dispose()
+      await rm(repositoryPath, { recursive: true, force: true })
+    }
+  })
+
+  it('replays streamed working-tree pages to a second caller of the same path set', async () => {
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'better-code-diff-patch-join-'))
+    const repository = new RepositoryService()
+    try {
+      await initRepository(repositoryPath)
+      await writeFile(join(repositoryPath, 'a.ts'), 'export const a = 1\n', 'utf8')
+      await writeFile(join(repositoryPath, 'b.ts'), 'export const b = 1\n', 'utf8')
+      await commitAll(repositoryPath, 'Initial commit')
+      await writeFile(join(repositoryPath, 'a.ts'), 'export const a = 2\n', 'utf8')
+      await writeFile(join(repositoryPath, 'b.ts'), 'export const b = 2\n', 'utf8')
+      await repository.open(repositoryPath)
+      await repository.refresh()
+
+      const firstPages: Array<{ patch: string }> = []
+      const secondPages: Array<{ patch: string }> = []
+      const first = repository.getWorkingTreePatch(['a.ts', 'b.ts'], (page) => {
+        firstPages.push(page)
+      })
+      const second = repository.getWorkingTreePatch(['b.ts', 'a.ts'], (page) => {
+        secondPages.push(page)
+      })
+      const [left, right] = await Promise.all([first, second])
+      expect(secondPages.length).toBeGreaterThanOrEqual(1)
+      expect(filesFromPatch(secondPages[0]!.patch).map((file) => file.path)).toEqual(['a.ts'])
+      expect(left).toEqual(right)
+      expect(filesFromPatch(left.patch).map((file) => file.path)).toEqual(['a.ts', 'b.ts'])
+    } finally {
+      repository.dispose()
+      await rm(repositoryPath, { recursive: true, force: true })
+    }
+  })
+
+  it('diffs a glob-looking working-tree filename as a literal pathspec', async () => {
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'better-code-diff-desk-glob-'))
+    const repository = new RepositoryService()
+    try {
+      await initRepository(repositoryPath)
+      await writeFile(join(repositoryPath, '[test].txt'), 'base\n', 'utf8')
+      await commitAll(repositoryPath, 'Base')
+      await writeFile(join(repositoryPath, '[test].txt'), 'base\ndesk\n', 'utf8')
+      await repository.open(repositoryPath)
+      await repository.refresh()
+
+      const patch = await repository.getWorkingTreePatch(['[test].txt'])
+      expect(filesFromPatch(patch.patch).map((file) => file.path)).toEqual(['[test].txt'])
+      expect(patch.patch).toContain('+desk')
+    } finally {
+      repository.dispose()
+      await rm(repositoryPath, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps a working-tree rename as a rename hunk instead of a full-file add', async () => {
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'better-code-diff-desk-rename-'))
+    const repository = new RepositoryService()
+    try {
+      await initRepository(repositoryPath)
+      await writeFile(join(repositoryPath, 'old.txt'), 'same\n', 'utf8')
+      await writeFile(join(repositoryPath, 'kept.txt'), 'kept\n', 'utf8')
+      await commitAll(repositoryPath, 'Base')
+      await runGit(repositoryPath, 'mv', 'old.txt', 'new.txt')
+      await writeFile(join(repositoryPath, 'kept.txt'), 'kept\nchanged\n', 'utf8')
+      await repository.open(repositoryPath)
+      await repository.refresh()
+
+      const patch = await repository.getWorkingTreePatch(['new.txt', 'kept.txt'])
+      expect(patch.patch).toContain('rename from old.txt')
+      expect(patch.patch).toContain('rename to new.txt')
+      expect(patch.patch).not.toMatch(/^new file mode/m)
+      expect(patch.patch).toContain('+changed')
     } finally {
       repository.dispose()
       await rm(repositoryPath, { recursive: true, force: true })
@@ -1776,7 +1943,13 @@ describe('RepositoryService', () => {
       const repository = new RepositoryService()
       await repository.open(repositoryPath)
       await repository.refresh()
-      const workingTreePatch = await repository.getWorkingTreePatch(['generated.txt', 'huge.txt', 'new.txt'])
+      const pages: Array<{ patch: string; omittedFiles: { path: string }[] }> = []
+      const workingTreePatch = await repository.getWorkingTreePatch(
+        ['generated.txt', 'huge.txt', 'new.txt'],
+        (page) => pages.push(page)
+      )
+      expect(pages[0]?.omittedFiles.map((file) => file.path)).toEqual(['generated.txt'])
+      expect(pages[0]?.patch).toBe('')
       const gitNewFilePatch = await runGitAllowingDifferences(
         repositoryPath,
         'diff', '--no-index', '--no-color', '--unified=3', '--', '/dev/null', 'new.txt'
@@ -1892,6 +2065,198 @@ describe('RepositoryService', () => {
       expect(rootCommitReview.files[0]?.headBlobOid).toMatch(/^[0-9a-f]{40}$/)
       expect(rootCommitReview.patch).toContain('+base')
     } finally {
+      await rm(repositoryPath, { recursive: true, force: true })
+    }
+  })
+
+  it('emits the first local-branch file before the review promise settles', async () => {
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'better-code-diff-branch-first-'))
+    const repository = new RepositoryService()
+    try {
+      await initRepository(repositoryPath)
+      await runGit(repositoryPath, 'branch', '-M', 'main')
+      await writeFile(join(repositoryPath, 'a.txt'), 'base-a\n', 'utf8')
+      await writeFile(join(repositoryPath, 'b.txt'), 'base-b\n', 'utf8')
+      await commitAll(repositoryPath, 'Base')
+      await runGit(repositoryPath, 'switch', '--quiet', '-c', 'feature')
+      await writeFile(join(repositoryPath, 'a.txt'), 'base-a\nfeature-a\n', 'utf8')
+      await writeFile(join(repositoryPath, 'b.txt'), 'base-b\nfeature-b\n', 'utf8')
+      await commitAll(repositoryPath, 'Feature')
+      await repository.open(repositoryPath)
+
+      const pages: Array<{ kind: string; review?: { files: { path: string }[]; patch: string } }> = []
+      let resolved = false
+      const review = await repository.getLocalBranchReview('main', 'feature', (progress) => {
+        expect(resolved).toBe(false)
+        pages.push(progress)
+      })
+      resolved = true
+
+      expect(pages[0]?.kind).toBe('metadata')
+      expect(pages[0]?.review?.files.map((file) => file.path)).toEqual(['a.txt'])
+      expect(pages[0]?.review?.patch).toContain('+feature-a')
+      expect(pages[0]?.review?.patch).not.toContain('+feature-b')
+      expect(review.patch).toBe('')
+      expect(review.files.map((file) => file.path)).toEqual(['a.txt', 'b.txt'])
+      expect(review.expectedFileCount).toBe(2)
+    } finally {
+      repository.dispose()
+      await rm(repositoryPath, { recursive: true, force: true })
+    }
+  })
+
+  it('emits the first commit file and aborts a superseded local review', async () => {
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'better-code-diff-commit-first-'))
+    const repository = new RepositoryService()
+    try {
+      await initRepository(repositoryPath)
+      await runGit(repositoryPath, 'branch', '-M', 'main')
+      await writeFile(join(repositoryPath, 'a.txt'), 'base-a\n', 'utf8')
+      await writeFile(join(repositoryPath, 'b.txt'), 'base-b\n', 'utf8')
+      await commitAll(repositoryPath, 'Base')
+      await runGit(repositoryPath, 'switch', '--quiet', '-c', 'feature')
+      await writeFile(join(repositoryPath, 'a.txt'), 'base-a\nfeature-a\n', 'utf8')
+      await writeFile(join(repositoryPath, 'b.txt'), 'base-b\nfeature-b\n', 'utf8')
+      await commitAll(repositoryPath, 'Feature')
+      await runGit(repositoryPath, 'switch', '--quiet', '-c', 'other')
+      await writeFile(join(repositoryPath, 'a.txt'), 'base-a\nother-a\n', 'utf8')
+      await commitAll(repositoryPath, 'Other')
+      await repository.open(repositoryPath)
+      const integration = await repository.getGitIntegration()
+      const featureOid = integration.commits.find((commit) => commit.subject === 'Feature')?.oid
+      expect(featureOid).toBeString()
+
+      const superseded = repository.getLocalBranchReview('main', 'feature')
+      const pages: Array<{ kind: string }> = []
+      const current = repository.getCommitReview(featureOid!, (progress) => {
+        pages.push(progress)
+      })
+      await expect(superseded).rejects.toThrow(COMMAND_ABORTED_MESSAGE)
+      const review = await current
+      expect(pages[0]?.kind).toBe('metadata')
+      expect(review.patch).toBe('')
+      expect(review.files.map((file) => file.path)).toEqual(['a.txt', 'b.txt'])
+    } finally {
+      repository.dispose()
+      await rm(repositoryPath, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps a branch rename as a rename hunk instead of a full-file add', async () => {
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'better-code-diff-branch-rename-'))
+    const repository = new RepositoryService()
+    try {
+      await initRepository(repositoryPath)
+      await runGit(repositoryPath, 'branch', '-M', 'main')
+      await writeFile(join(repositoryPath, 'old.txt'), 'same\n', 'utf8')
+      await writeFile(join(repositoryPath, 'kept.txt'), 'kept\n', 'utf8')
+      await commitAll(repositoryPath, 'Base')
+      await runGit(repositoryPath, 'switch', '--quiet', '-c', 'feature')
+      await runGit(repositoryPath, 'mv', 'old.txt', 'new.txt')
+      await writeFile(join(repositoryPath, 'kept.txt'), 'kept\nchanged\n', 'utf8')
+      await commitAll(repositoryPath, 'Rename')
+      await repository.open(repositoryPath)
+
+      const review = await repository.getLocalBranchReview('main', 'feature')
+      const renamed = review.files.find((file) => file.path === 'new.txt')
+      expect(renamed?.previousPath).toBe('old.txt')
+      expect(review.patch).toContain('rename from old.txt')
+      expect(review.patch).toContain('rename to new.txt')
+      expect(review.patch).not.toMatch(/^new file mode/m)
+    } finally {
+      repository.dispose()
+      await rm(repositoryPath, { recursive: true, force: true })
+    }
+  })
+
+  it('replays streamed pages to a second caller of the same local review', async () => {
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'better-code-diff-branch-join-'))
+    const repository = new RepositoryService()
+    try {
+      await initRepository(repositoryPath)
+      await runGit(repositoryPath, 'branch', '-M', 'main')
+      await writeFile(join(repositoryPath, 'a.txt'), 'base-a\n', 'utf8')
+      await writeFile(join(repositoryPath, 'b.txt'), 'base-b\n', 'utf8')
+      await commitAll(repositoryPath, 'Base')
+      await runGit(repositoryPath, 'switch', '--quiet', '-c', 'feature')
+      await writeFile(join(repositoryPath, 'a.txt'), 'base-a\nfeature-a\n', 'utf8')
+      await writeFile(join(repositoryPath, 'b.txt'), 'base-b\nfeature-b\n', 'utf8')
+      await commitAll(repositoryPath, 'Feature')
+      await repository.open(repositoryPath)
+
+      const firstPages: Array<{ kind: string }> = []
+      const secondPages: Array<{ kind: string }> = []
+      const first = repository.getLocalBranchReview('main', 'feature', (progress) => {
+        firstPages.push(progress)
+      })
+      const second = repository.getLocalBranchReview('main', 'feature', (progress) => {
+        secondPages.push(progress)
+      })
+      const [left, right] = await Promise.all([first, second])
+      expect(secondPages.some((page) => page.kind === 'metadata')).toBe(true)
+      expect(left.patch).toBe('')
+      expect(right.patch).toBe('')
+      expect(left.files.map((file) => file.path)).toEqual(['a.txt', 'b.txt'])
+      expect(right.files.map((file) => file.path)).toEqual(['a.txt', 'b.txt'])
+    } finally {
+      repository.dispose()
+      await rm(repositoryPath, { recursive: true, force: true })
+    }
+  })
+
+  it('counts omitted files in expectedFileCount so streamed reviews can finish', async () => {
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'better-code-diff-branch-omit-'))
+    const repository = new RepositoryService()
+    try {
+      await initRepository(repositoryPath)
+      await runGit(repositoryPath, 'branch', '-M', 'main')
+      await writeFile(join(repositoryPath, 'small.txt'), 'base\n', 'utf8')
+      await writeFile(join(repositoryPath, 'huge.txt'), 'base\n', 'utf8')
+      await commitAll(repositoryPath, 'Base')
+      await runGit(repositoryPath, 'switch', '--quiet', '-c', 'feature')
+      await writeFile(join(repositoryPath, 'small.txt'), 'base\nsmall\n', 'utf8')
+      await writeFile(
+        join(repositoryPath, 'huge.txt'),
+        `${'base\n'}${Array.from({ length: 20_001 }, (_unused, index) => `line ${index}`).join('\n')}\n`,
+        'utf8'
+      )
+      await commitAll(repositoryPath, 'Huge')
+      await repository.open(repositoryPath)
+
+      let metadataFiles: string[] = []
+      const review = await repository.getLocalBranchReview('main', 'feature', (progress) => {
+        if (progress.kind === 'metadata') {
+          metadataFiles = progress.review.files.map((file) => file.path)
+        }
+      })
+      expect(review.expectedFileCount).toBe(2)
+      expect(review.omittedFiles.map((file) => file.path)).toEqual(['huge.txt'])
+      expect(metadataFiles).toContain('huge.txt')
+      expect(metadataFiles).toContain('small.txt')
+    } finally {
+      repository.dispose()
+      await rm(repositoryPath, { recursive: true, force: true })
+    }
+  })
+
+  it('diffs a glob-looking filename as a literal pathspec', async () => {
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'better-code-diff-branch-glob-'))
+    const repository = new RepositoryService()
+    try {
+      await initRepository(repositoryPath)
+      await runGit(repositoryPath, 'branch', '-M', 'main')
+      await writeFile(join(repositoryPath, '[test].txt'), 'base\n', 'utf8')
+      await commitAll(repositoryPath, 'Base')
+      await runGit(repositoryPath, 'switch', '--quiet', '-c', 'feature')
+      await writeFile(join(repositoryPath, '[test].txt'), 'base\nfeature\n', 'utf8')
+      await commitAll(repositoryPath, 'Glob')
+      await repository.open(repositoryPath)
+
+      const review = await repository.getLocalBranchReview('main', 'feature')
+      expect(review.files.map((file) => file.path)).toEqual(['[test].txt'])
+      expect(review.patch).toContain('+feature')
+    } finally {
+      repository.dispose()
       await rm(repositoryPath, { recursive: true, force: true })
     }
   })

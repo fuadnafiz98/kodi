@@ -62,6 +62,16 @@ describe('reviewProgress', () => {
     expect(reviewProgress({ ...BASE, hasExternalReview: true, stablePathCount: 30 }))
       .toEqual({ loading: false, targetPathCount: 30 })
   })
+
+  test('a streamed local review climbs towards expectedFileCount', () => {
+    expect(reviewProgress({
+      ...BASE,
+      hasExternalReview: true,
+      streamingFileCount: 12,
+      streamedFileCount: 1,
+      stablePathCount: 1
+    })).toEqual({ loading: true, targetPathCount: 12 })
+  })
 })
 
 describe('reviewLoadStateFromExternalItems', () => {

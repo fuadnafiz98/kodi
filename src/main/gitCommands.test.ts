@@ -7,6 +7,8 @@ import {
   comparePaths,
   MAX_BACKGROUND_COMMANDS,
   MAX_CONCURRENT_COMMANDS,
+  awaitAll,
+  mapWithConcurrency,
   runCommand,
   splitNullDelimited
 } from './gitCommands.js'
@@ -186,5 +188,38 @@ describe('splitNullDelimited', () => {
 describe('comparePaths', () => {
   it('orders by byte value so git and the snapshot agree', () => {
     expect(['b', 'A', 'a'].sort(comparePaths)).toEqual(['A', 'a', 'b'])
+  })
+})
+
+describe('awaitAll', () => {
+  it('does not leave sibling rejections unhandled when every promise fails', async () => {
+    const abort = new AbortController()
+    const first = runCommand('/bin/sh', ['-c', 'sleep 5'], undefined, [], undefined, abort.signal)
+    const second = runCommand('/bin/sh', ['-c', 'sleep 5'], undefined, [], undefined, abort.signal)
+    const third = runCommand('/bin/sh', ['-c', 'sleep 5'], undefined, [], undefined, abort.signal)
+    abort.abort()
+    await expect(awaitAll([first, second, third])).rejects.toThrow(COMMAND_ABORTED_MESSAGE)
+  })
+})
+
+describe('mapWithConcurrency', () => {
+  it('does not leave sibling rejections unhandled when every worker fails', async () => {
+    const abort = new AbortController()
+    const started: Promise<void>[] = []
+    const work = mapWithConcurrency([1, 2, 3, 4], 4, () => {
+      const command = runCommand(
+        '/bin/sh',
+        ['-c', 'sleep 5'],
+        undefined,
+        [],
+        undefined,
+        abort.signal
+      )
+      started.push(command.then(() => undefined, () => undefined))
+      return command.then(() => undefined)
+    })
+    abort.abort()
+    await expect(work).rejects.toThrow(COMMAND_ABORTED_MESSAGE)
+    await Promise.all(started)
   })
 })

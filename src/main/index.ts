@@ -3,12 +3,13 @@ import { isAbsolute, join } from 'node:path'
 import { stat } from 'node:fs/promises'
 import { readFile, writeFile } from 'node:fs/promises'
 
-import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, nativeTheme, screen, shell, type RenderProcessGoneDetails } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, nativeTheme, screen, shell, type RenderProcessGoneDetails, type WebContents } from 'electron'
 
 import {
   IPC_CHANNELS,
   type MainStartupMetrics,
   type PerformanceMetricsDetail,
+  type LocalReviewProgress,
   type PullRequestFolderPreview,
   type RendererTermination,
   type RepositorySnapshot
@@ -734,6 +735,18 @@ function computeRestoreHint(): SessionRestoreHint {
   })
 }
 
+function localReviewProgressSender(
+  sender: WebContents,
+  requestId: unknown
+): ((progress: LocalReviewProgress) => void) | undefined {
+  if (typeof requestId !== 'string' || requestId === '' || requestId.length > 200) return undefined
+  return (progress) => {
+    if (!sender.isDestroyed()) {
+      sender.send(IPC_CHANNELS.localReviewProgress, { ...progress, requestId })
+    }
+  }
+}
+
 function registerIpcHandlers(): void {
   ipcMain.on(IPC_CHANNELS.getRestoreHint, (event) => {
     event.returnValue = currentRestoreHint()
@@ -854,9 +867,23 @@ function registerIpcHandlers(): void {
     if (snapshot != null) trackSnapshot(snapshot)
     return comparison
   })
-  ipcMain.handle(IPC_CHANNELS.getWorkingTreePatch, (_event, paths: unknown) =>
-    repositorySessions.requireActive().getWorkingTreePatch(paths)
-  )
+  ipcMain.handle(IPC_CHANNELS.getWorkingTreePatch, (event, paths: unknown, requestId: unknown) => {
+    const send = localReviewProgressSender(event.sender, requestId)
+    return repositorySessions.requireActive().getWorkingTreePatch(
+      paths,
+      send == null
+        ? undefined
+        : (page) => {
+          send({
+            kind: 'files',
+            selector: 'working-tree',
+            patch: page.patch,
+            files: [],
+            omittedFiles: page.omittedFiles
+          })
+        }
+    )
+  })
   ipcMain.handle(IPC_CHANNELS.searchContent, (_event, query: string, forOpenPath: unknown) =>
     repositorySessions.requireActive().searchContent(
       query,
@@ -949,11 +976,18 @@ function registerIpcHandlers(): void {
   ipcMain.handle(IPC_CHANNELS.switchBranch, (_event, name: string) =>
     repositorySessions.requireActive().switchBranch(name).then(trackSnapshot)
   )
-  ipcMain.handle(IPC_CHANNELS.getLocalBranchReview, (_event, baseRef: string, headRef: string) =>
-    repositorySessions.requireActive().getLocalBranchReview(baseRef, headRef)
+  ipcMain.handle(IPC_CHANNELS.getLocalBranchReview, (event, baseRef: string, headRef: string, requestId: unknown) =>
+    repositorySessions.requireActive().getLocalBranchReview(
+      baseRef,
+      headRef,
+      localReviewProgressSender(event.sender, requestId)
+    )
   )
-  ipcMain.handle(IPC_CHANNELS.getCommitReview, (_event, oid: string) =>
-    repositorySessions.requireActive().getCommitReview(oid)
+  ipcMain.handle(IPC_CHANNELS.getCommitReview, (event, oid: string, requestId: unknown) =>
+    repositorySessions.requireActive().getCommitReview(
+      oid,
+      localReviewProgressSender(event.sender, requestId)
+    )
   )
   ipcMain.handle(IPC_CHANNELS.fetchRemote, () => repositorySessions.requireActive().fetchRemote())
   ipcMain.handle(IPC_CHANNELS.pullCurrentBranch, () =>

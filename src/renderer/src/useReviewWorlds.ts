@@ -210,7 +210,7 @@ export function createPatchWorld(
   loadStatus: PatchWorld['loadStatus'],
   requestId: string | null = null
 ): PatchWorld {
-  const patchPages = review.patch === '' ? [] : [review.patch]
+  const patchPages = review.patchPages ?? (review.patch === '' ? [] : [review.patch])
   return {
     source: 'patch',
     worldId: patchWorldId(review),
@@ -445,7 +445,8 @@ export function reduceWorldRegistry(
   }
   if (action.type === 'append-patch-page') {
     return updatePatchWorld(state, action.worldId, action.generation, (world) => {
-      if (world.review.kind !== 'github' || world.review.selector !== action.progress.selector) return world
+      const selector = world.review.kind === 'github' ? world.review.selector : world.review.id
+      if (selector !== action.progress.selector) return world
       return {
         ...world,
         patchPages: [...world.patchPages, action.progress.patch],
@@ -487,9 +488,7 @@ export function reduceWorldRegistry(
   }
   if (action.type === 'set-patch-expected-file-count') {
     return updatePatchWorld(state, action.worldId, action.generation, (world) =>
-      world.review.kind === 'github'
-        ? { ...world, review: { ...world.review, expectedFileCount: action.fileCount } }
-        : world)
+      ({ ...world, review: { ...world.review, expectedFileCount: action.fileCount } }))
   }
   if (action.type === 'set-patch-checks') {
     return updatePatchWorld(state, action.worldId, action.generation, (world) =>
@@ -523,7 +522,7 @@ export function reduceWorldRegistry(
   }
   if (action.type === 'set-patch-status') {
     return updatePatchWorld(state, action.worldId, action.generation, (world) => {
-      const review = action.loadStatus !== 'ready' && world.review.kind === 'github'
+      const review = action.loadStatus !== 'ready'
         ? { ...world.review, expectedFileCount: world.review.files.length }
         : world.review
       return {
@@ -937,8 +936,6 @@ export function useReviewWorlds({
   const activeWorld = state.worlds.find((world) => world.worldId === state.activeWorldId) ?? null
   const activeReview = useMemo<RepositoryReview | null>(() => {
     if (activeWorld == null || activeWorld.source === 'desk' || activeWorld.source === 'new') return null
-    if ((activeWorld.source !== 'patch' && activeWorld.source !== 'since')
-      || activeWorld.review.kind !== 'github') return activeWorld.review
     return {
       ...activeWorld.review,
       patchPages: activeWorld.patchPages,

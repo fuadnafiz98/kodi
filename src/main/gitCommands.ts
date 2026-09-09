@@ -1,9 +1,12 @@
 import { execFile, spawn } from 'node:child_process'
 import { cpus } from 'node:os'
 
+import { COMMAND_ABORTED_MESSAGE } from '../shared/contracts.js'
+
+export { COMMAND_ABORTED_MESSAGE }
+
 export const MAX_DIFF_FILE_BYTES = 2 * 1024 * 1024
 export const MAX_GIT_OUTPUT_BYTES = 64 * 1024 * 1024
-export const COMMAND_ABORTED_MESSAGE = 'The command was cancelled before it finished.'
 
 /**
  * A plain `git status` takes the optional index lock and rewrites `.git/index`,
@@ -453,6 +456,17 @@ function spawnCommand(
   })
 }
 
+/** Wait for every promise so a shared abort cannot leave sibling rejections unhandled. */
+export async function awaitAll<Values extends readonly unknown[]>(
+  promises: [...{ [Index in keyof Values]: Promise<Values[Index]> }]
+): Promise<Values> {
+  const settled = await Promise.allSettled(promises)
+  for (const item of settled) {
+    if (item.status === 'rejected') throw item.reason
+  }
+  return settled.map((item) => (item as PromiseFulfilledResult<unknown>).value) as unknown as Values
+}
+
 export async function mapWithConcurrency<Value, Result>(
   values: readonly Value[],
   concurrency: number,
@@ -461,16 +475,27 @@ export async function mapWithConcurrency<Value, Result>(
   const results: Result[] = []
   results.length = values.length
   let nextIndex = 0
+  let failed = false
+  let firstError: unknown
   const runNext = async (): Promise<void> => {
-    const index = nextIndex
-    nextIndex += 1
-    if (index >= values.length) return
-    const value = values[index]!
-    results[index] = await transform(value)
-    return runNext()
+    while (true) {
+      const index = nextIndex
+      nextIndex += 1
+      if (index >= values.length) return
+      try {
+        results[index] = await transform(values[index]!)
+      } catch (error) {
+        if (!failed) {
+          failed = true
+          firstError = error
+        }
+        return
+      }
+    }
   }
   await Promise.all(
     Array.from({ length: Math.min(concurrency, values.length) }, () => runNext())
   )
+  if (failed) throw firstError
   return results
 }

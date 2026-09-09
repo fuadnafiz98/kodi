@@ -3,6 +3,9 @@ import type { CachedFileText, WorkspaceCache, WorkspaceUiState } from './workspa
 
 export type { CachedFileText, SessionRestoreHint, WorkspaceCache, WorkspaceUiState }
 
+/** Thrown when a newer review or command supersedes in-flight work. */
+export const COMMAND_ABORTED_MESSAGE = 'The command was cancelled before it finished.'
+
 export type RepositoryFileStatus =
   | 'added'
   | 'conflicted'
@@ -312,8 +315,39 @@ export interface LocalBranchReview {
   headOid: string
   files: PullRequestFile[]
   patch: string
+  /** Renderer-only streamed storage. IPC replies leave this field undefined. */
+  patchPages?: readonly string[]
+  /** Sum of the streamed page lengths without joining them. */
+  patchLength?: number
+  /** Files this comparison touches. Streamed `files` climb toward this count. */
+  expectedFileCount: number
   omittedFiles: OmittedDiffFile[]
 }
+
+/**
+ * Desk / branch / commit reviews emit the first dirty file as soon as its
+ * `git diff` returns. Remaining chunks ride later `files` events, then `done`.
+ */
+export type LocalReviewProgress =
+  | {
+      kind: 'metadata'
+      review: LocalBranchReview
+      requestId?: string
+    }
+  | {
+      kind: 'files'
+      selector: string
+      patch: string
+      files: PullRequestFile[]
+      omittedFiles: OmittedDiffFile[]
+      requestId?: string
+    }
+  | {
+      kind: 'done'
+      selector: string
+      fileCount: number
+      requestId?: string
+    }
 
 export type RepositoryReview = PullRequestReview | LocalBranchReview
 
@@ -587,7 +621,7 @@ export interface RepositoryApi {
   refresh(): Promise<RepositorySnapshot>
   getComparison(path: string): Promise<FileComparison>
   saveWorkingFile(request: WorkingFileSaveRequest): Promise<FileComparison>
-  getWorkingTreePatch(paths: string[]): Promise<WorkingTreePatch>
+  getWorkingTreePatch(paths: string[], requestId?: string): Promise<WorkingTreePatch>
   /**
    * `forOpenPath` asks for a second, wider pass over that one file so the diff can
    * mark every hit in it; the repository-wide list stays short.
@@ -599,8 +633,8 @@ export interface RepositoryApi {
   getPullRequestInbox(): Promise<PullRequestInboxSnapshot>
   getClosedPullRequests(): Promise<PullRequestSummary[]>
   switchBranch(name: string): Promise<RepositorySnapshot>
-  getLocalBranchReview(baseRef: string, headRef: string): Promise<LocalBranchReview>
-  getCommitReview(oid: string): Promise<LocalBranchReview>
+  getLocalBranchReview(baseRef: string, headRef: string, requestId?: string): Promise<LocalBranchReview>
+  getCommitReview(oid: string, requestId?: string): Promise<LocalBranchReview>
   fetchRemote(): Promise<GitIntegrationSnapshot>
   pullCurrentBranch(): Promise<RepositorySnapshot>
   pushCurrentBranch(): Promise<GitIntegrationSnapshot>
@@ -646,6 +680,7 @@ export interface RepositoryApi {
   onFullscreenChange(listener: (fullscreen: boolean) => void): () => void
   onDidChange(listener: (event: RepositoryChangeEvent) => void): () => void
   onPullRequestReviewProgress(listener: (progress: PullRequestReviewProgress) => void): () => void
+  onLocalReviewProgress(listener: (progress: LocalReviewProgress) => void): () => void
 }
 
 export const IPC_CHANNELS = {
@@ -716,5 +751,6 @@ export const IPC_CHANNELS = {
   foundInPage: 'app:found-in-page',
   fullscreenChange: 'app:fullscreen-change',
   didChange: 'repository:did-change',
-  pullRequestReviewProgress: 'repository:pull-request-review-progress'
+  pullRequestReviewProgress: 'repository:pull-request-review-progress',
+  localReviewProgress: 'repository:local-review-progress'
 } as const

@@ -102,6 +102,43 @@ test('a patch page only updates its matching world generation', () => {
   expect(current.worlds[0]?.source === 'patch' ? current.worlds[0].review.patch : null).toBe('')
 })
 
+test('a local review appends file pages the same way a streamed pull request does', () => {
+  const localReview: LocalBranchReview = {
+    kind: 'local',
+    id: 'main...feature:base:head',
+    title: 'feature compared with main',
+    baseRefName: 'main',
+    headRefName: 'feature',
+    baseOid: 'base',
+    headOid: 'head',
+    files: [{ path: 'a.txt', additions: 1, deletions: 0 }],
+    patch: 'first-page',
+    expectedFileCount: 2,
+    omittedFiles: []
+  }
+  const patch = createPatchWorld(snapshot(), localReview, 2, 'loading')
+  const current = reduceWorldRegistry(
+    { worlds: [patch], activeWorldId: patch.worldId },
+    {
+      type: 'append-patch-page',
+      worldId: patch.worldId,
+      generation: 2,
+      progress: {
+        kind: 'files',
+        selector: localReview.id,
+        files: [{ path: 'b.txt', additions: 1, deletions: 0 }],
+        patch: 'second-page',
+        omittedFiles: []
+      }
+    }
+  )
+  const world = current.worlds[0]
+  expect(world?.source === 'patch' ? world.review.kind : null).toBe('local')
+  expect(world?.source === 'patch' ? world.patchPages : []).toEqual(['first-page', 'second-page'])
+  expect(world?.source === 'patch' ? world.review.files.map((file) => file.path) : []).toEqual(['a.txt', 'b.txt'])
+  expect(world?.source === 'patch' ? world.review.patch : null).toBe('first-page')
+})
+
 test('the terminal stream count updates metadata without replacing patch pages', () => {
   const patch = createPatchWorld(snapshot(), { ...review(), files: [] }, 2, 'loading')
   const state = reduceWorldRegistry(
@@ -347,6 +384,7 @@ test('local branch-compare and loading GitHub worlds stay outside the budget', (
     headOid: 'head',
     files: [{ path: 'src/a.ts', additions: 1, deletions: 0 }],
     patch: 'y'.repeat(80 * 1024 * 1024),
+    expectedFileCount: 1,
     omittedFiles: []
   }
   const local = createPatchWorld(snapshot(), localReview, 1, 'ready')

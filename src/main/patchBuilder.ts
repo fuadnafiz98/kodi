@@ -49,6 +49,59 @@ export function chunkPathspecs(
   return chunks
 }
 
+function literalPathspec(path: string): string {
+  return `:(literal)${path}`
+}
+
+/** Keep a rename's old and new paths on the same git invocation. */
+export function pathspecGroupForFile(file: { path: string; previousPath?: string }): string[] {
+  if (file.previousPath != null && file.previousPath !== file.path) {
+    return [literalPathspec(file.previousPath), literalPathspec(file.path)]
+  }
+  return [literalPathspec(file.path)]
+}
+
+export function isolateFirstPathspecGroup(groups: readonly string[][]): {
+  first: string[] | null
+  rest: string[][]
+} {
+  const first = groups[0]
+  if (first == null) return { first: null, rest: [] }
+  return { first, rest: groups.slice(1) }
+}
+
+/** Chunk argv without splitting a rename pair across invocations. */
+export function chunkPathspecGroups(
+  groups: readonly string[][],
+  maxBytes: number = MAX_PATHSPEC_ARGV_BYTES
+): string[][] {
+  const chunks: string[][] = []
+  let current: string[] = []
+  let bytes = 0
+  for (const group of groups) {
+    const cost = group.reduce((total, path) => total + Buffer.byteLength(path, 'utf8') + 1, 0)
+    if (current.length > 0 && bytes + cost > maxBytes) {
+      chunks.push(current)
+      current = []
+      bytes = 0
+    }
+    current.push(...group)
+    bytes += cost
+  }
+  if (current.length > 0) chunks.push(current)
+  return chunks
+}
+
+/** First visible path is its own git invocation so the renderer can paint it. */
+export function isolateFirstPathspec(paths: readonly string[]): {
+  first: string | null
+  rest: string[]
+} {
+  const first = paths[0]
+  if (first == null) return { first: null, rest: [] }
+  return { first, rest: paths.slice(1) }
+}
+
 export interface DiffChurnEntry {
   path: string
   previousPath?: string

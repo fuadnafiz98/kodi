@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 
 import type { PullRequestReview, PullRequestReviewProgress } from '../shared/contracts.js'
-import { PullRequestReviewFlight } from './pullRequestFlights.js'
+import { PullRequestReviewFlight, ReviewFlight } from './pullRequestFlights.js'
 
 const review = (overrides: Partial<PullRequestReview> = {}): PullRequestReview => ({
   kind: 'github',
@@ -200,5 +200,29 @@ describe('PullRequestReviewFlight', () => {
     const flight = new PullRequestReviewFlight()
     flight.detach('warmup')
     expect(flight.abort.signal.aborted).toBe(false)
+  })
+})
+
+describe('ReviewFlight', () => {
+  test('replays already-emitted pages to a late joiner', async () => {
+    const flight = new ReviewFlight<string, string>()
+    const first: string[] = []
+    const run = flight.start(async (emit) => {
+      emit('a')
+      emit('b')
+      return 'done'
+    })
+    flight.join((page) => first.push(page))
+    const second: string[] = []
+    const joined = flight.join((page) => second.push(page))
+    expect(await run).toBe('done')
+    expect(await joined).toBe('done')
+    expect(first).toEqual(['a', 'b'])
+    expect(second).toEqual(['a', 'b'])
+  })
+
+  test('throws when join is called before start', () => {
+    const flight = new ReviewFlight<string, string>()
+    expect(() => flight.join()).toThrow('This review flight has not started.')
   })
 })

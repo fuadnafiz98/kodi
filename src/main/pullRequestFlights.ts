@@ -1,13 +1,50 @@
 import type { PullRequestReview, PullRequestReviewProgress } from '../shared/contracts.js'
 
 export type PullRequestProgressListener = (progress: PullRequestReviewProgress) => void
+export type ReviewProgressListener<Progress> = (progress: Progress) => void
 
-function deliver(listener: PullRequestProgressListener, progress: PullRequestReviewProgress): void {
+function deliver<Progress>(listener: ReviewProgressListener<Progress>, progress: Progress): void {
   try {
     listener(progress)
   } catch {
     // One subscriber's failure — a window closed mid-send, say — must not stop the
     // fetch or starve the readers who are still watching the same review.
+  }
+}
+
+/**
+ * One in-flight load per key, with multicast and replay. Desk patches and local
+ * branch/commit reviews share this. Pull requests keep {@link PullRequestReviewFlight}
+ * because their replay has to collapse pages behind a replacement and track warmup
+ * attach/detach.
+ */
+export class ReviewFlight<Progress, Result> {
+  readonly abort = new AbortController()
+  #listeners = new Set<ReviewProgressListener<Progress>>()
+  #events: Progress[] = []
+  #promise: Promise<Result> | null = null
+
+  start(
+    run: (emit: ReviewProgressListener<Progress>, signal: AbortSignal) => Promise<Result>
+  ): Promise<Result> {
+    this.#promise ??= run((progress) => {
+      this.#events.push(progress)
+      for (const listener of Array.from(this.#listeners)) {
+        deliver(listener, progress)
+      }
+    }, this.abort.signal)
+    return this.#promise
+  }
+
+  join(listener?: ReviewProgressListener<Progress>): Promise<Result> {
+    const promise = this.#promise
+    if (promise == null) throw new Error('This review flight has not started.')
+    if (listener == null) return promise
+    this.#listeners.add(listener)
+    for (const progress of this.#events) {
+      deliver(listener, progress)
+    }
+    return promise
   }
 }
 

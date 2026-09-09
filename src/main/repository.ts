@@ -18,6 +18,7 @@ import type {
   InboxPullRequest,
   LocalBranch,
   LocalBranchReview,
+  LocalReviewProgress,
   OmittedDiffFile,
   PullRequestChecks,
   PullRequestFile,
@@ -44,6 +45,7 @@ import { normalizeGitHubPullRequestUrl } from '../shared/pullRequestUrl.js'
 import { MAX_CACHED_PATHS } from '../shared/workspaceCache.js'
 import {
   COMMAND_ABORTED_MESSAGE,
+  awaitAll,
   comparePaths,
   GitObjectReader,
   MAX_DIFF_FILE_BYTES,
@@ -57,8 +59,11 @@ import {
 import {
   buildPullRequestPatchFromFiles,
   chunkPatchByFileCount,
-  chunkPathspecs,
+  chunkPathspecGroups,
   createNewFilePatch,
+  isolateFirstPathspec,
+  isolateFirstPathspecGroup,
+  pathspecGroupForFile,
   diffFilesFromChurn,
   filesFromPatch,
   isPullRequestDiffTooLargeError,
@@ -78,6 +83,7 @@ import {
 } from './agentReviewBundle.js'
 import {
   PullRequestReviewFlight,
+  ReviewFlight,
   type PullRequestProgressListener
 } from './pullRequestFlights.js'
 import {
@@ -99,8 +105,12 @@ export {
 export {
   buildPullRequestPatchFromFiles,
   chunkPatchByFileCount,
+  chunkPathspecGroups,
   chunkPathspecs,
   createNewFilePatch,
+  isolateFirstPathspec,
+  isolateFirstPathspecGroup,
+  pathspecGroupForFile,
   diffFilesFromChurn,
   filesFromPatch,
   isPullRequestDiffTooLargeError,
@@ -1325,6 +1335,8 @@ export class PullRequestReviewCache {
   }
 }
 
+type LocalReviewListener = (progress: LocalReviewProgress) => void
+
 export class RepositoryService {
   #root: string | null = null
   #kind: RepositorySnapshot['kind'] = 'folder'
@@ -1355,8 +1367,8 @@ export class RepositoryService {
   #workingFileCache = new Map<string, { read: WorkingFileRead; bytes: number }>()
   #workingFileCacheBytes = 0
   #pendingComparisons = new Map<string, Promise<FileComparison>>()
-  #pendingWorkingTreePatches = new Map<string, Promise<WorkingTreePatch>>()
-  #workingTreePatchAbort: AbortController | null = null
+  #pendingWorkingTreePatches = new Map<string, ReviewFlight<WorkingTreePatch, WorkingTreePatch>>()
+  #pendingLocalReviews = new Map<string, ReviewFlight<LocalReviewProgress, LocalBranchReview>>()
   #selfWriteObserver: ((path: string) => void) | null = null
   #snapshotObserver: ((snapshot: RepositorySnapshot) => void) | null = null
   #checkFieldsSupported = true
@@ -1460,9 +1472,10 @@ export class RepositoryService {
     this.#workingFileCache.clear()
     this.#workingFileCacheBytes = 0
     this.#pendingComparisons.clear()
-    this.#workingTreePatchAbort?.abort()
-    this.#workingTreePatchAbort = null
+    for (const flight of this.#pendingWorkingTreePatches.values()) flight.abort.abort()
     this.#pendingWorkingTreePatches.clear()
+    for (const flight of this.#pendingLocalReviews.values()) flight.abort.abort()
+    this.#pendingLocalReviews.clear()
     this.#pullRequestIdentities.clear()
     this.#ignoredRun?.abort()
     this.#ignoredRun = null
@@ -1890,7 +1903,10 @@ export class RepositoryService {
     return true
   }
 
-  async getWorkingTreePatch(pathsValue: unknown): Promise<WorkingTreePatch> {
+  async getWorkingTreePatch(
+    pathsValue: unknown,
+    onProgress?: (page: WorkingTreePatch) => void
+  ): Promise<WorkingTreePatch> {
     this.#requireGitRepository()
     if (!Array.isArray(pathsValue) || pathsValue.length > this.#pathSet.size) {
       throw new Error('Working tree patch paths must be a valid list.')
@@ -1905,27 +1921,73 @@ export class RepositoryService {
     // path list stays the same. Include its revision so a newer edit aborts an
     // older same-path build instead of reusing a stale patch.
     const key = `${this.#snapshotRevision}\0${[...paths].sort().join('\0')}`
-    const pending = this.#pendingWorkingTreePatches.get(key)
-    if (pending != null) return pending
-
-    this.#workingTreePatchAbort?.abort()
-    const abort = new AbortController()
-    this.#workingTreePatchAbort = abort
-    const patch = this.#loadWorkingTreePatch(paths, abort.signal).finally(() => {
-      if (this.#pendingWorkingTreePatches.get(key) === patch) {
-        this.#pendingWorkingTreePatches.delete(key)
-      }
-      if (this.#workingTreePatchAbort === abort) this.#workingTreePatchAbort = null
-    })
-    this.#pendingWorkingTreePatches.set(key, patch)
-    return patch
+    return this.#runKeyedFlight(
+      this.#pendingWorkingTreePatches,
+      key,
+      (signal, emit) => this.#loadWorkingTreePatch(paths, signal, emit),
+      onProgress
+    )
   }
 
-  async #loadWorkingTreePatch(paths: string[], signal: AbortSignal): Promise<WorkingTreePatch> {
+  async #loadWorkingTreePatch(
+    paths: string[],
+    signal: AbortSignal,
+    onProgress?: (page: WorkingTreePatch) => void
+  ): Promise<WorkingTreePatch> {
     if (paths.length === 0) return { patch: '', omittedFiles: [] }
 
     const root = this.#requireRoot()
     const snapshot = this.#requireSnapshot()
+    const { first, rest } = isolateFirstPathspec(paths)
+    const firstWork = this.#loadWorkingTreePathsPatch([first!], root, snapshot, signal)
+    const restWork = rest.length === 0
+      ? Promise.resolve({ patch: '', omittedFiles: [] as OmittedDiffFile[] })
+      : this.#loadWorkingTreePathsPatch(rest, root, snapshot, signal)
+    try {
+      const firstPage = await firstWork
+      this.#emitWorkingTreePage(firstPage, signal, onProgress)
+      const restPage = await restWork
+      this.#emitWorkingTreePage(restPage, signal, onProgress)
+      return this.#joinWorkingTreePages([firstPage, restPage])
+    } catch (error) {
+      await restWork.catch(() => {})
+      throw error
+    }
+  }
+
+  #emitWorkingTreePage(
+    page: WorkingTreePatch,
+    signal: AbortSignal,
+    onProgress?: (page: WorkingTreePatch) => void
+  ): void {
+    if (signal.aborted) throw new Error(COMMAND_ABORTED_MESSAGE)
+    if (onProgress == null || (page.patch === '' && page.omittedFiles.length === 0)) return
+    onProgress(page)
+  }
+
+  #joinWorkingTreePages(pages: readonly WorkingTreePatch[]): WorkingTreePatch {
+    const omittedFiles = pages.flatMap((page) => page.omittedFiles)
+    const limited = limitPatchFileSize(
+      pages.flatMap((page) => page.patch === '' ? [] : [page.patch]).join('\n'),
+      MAX_DIFF_FILE_BYTES
+    )
+    return { patch: limited.patch, omittedFiles: [...omittedFiles, ...limited.omittedFiles] }
+  }
+
+  #workingTreePathspecGroups(paths: readonly string[]): string[][] {
+    return paths.map((path) =>
+      pathspecGroupForFile({ path, previousPath: this.#statusByPath.get(path)?.previousPath })
+    )
+  }
+
+  async #loadWorkingTreePathsPatch(
+    paths: string[],
+    root: string,
+    snapshot: RepositorySnapshot,
+    signal: AbortSignal
+  ): Promise<WorkingTreePatch> {
+    if (paths.length === 0) return { patch: '', omittedFiles: [] }
+
     const untrackedPaths = paths.filter((path) => this.#statusByPath.get(path)?.status === 'untracked')
     const trackedPaths = snapshot.head == null
       ? []
@@ -1936,7 +1998,7 @@ export class RepositoryService {
     if (trackedPaths.length > 0) {
       const head = snapshot.head!
       const churnChunks = await mapWithConcurrency(
-        chunkPathspecs(trackedPaths),
+        chunkPathspecGroups(this.#workingTreePathspecGroups(trackedPaths)),
         MAX_PATCH_COMMAND_CONCURRENCY,
         async (chunk) => parseNumstat(
           (await this.#git(['diff', '--numstat', '-z', '--find-renames', head, '--', ...chunk], signal)).stdout
@@ -1947,7 +2009,7 @@ export class RepositoryService {
       const oversizedPaths = new Set(oversized.omittedFiles.map((file) => file.path))
       const includedPaths = trackedPaths.filter((path) => !oversizedPaths.has(path))
       const patchChunks = await mapWithConcurrency(
-        chunkPathspecs(includedPaths),
+        chunkPathspecGroups(this.#workingTreePathspecGroups(includedPaths)),
         MAX_PATCH_COMMAND_CONCURRENCY,
         async (chunk) => (
           await this.#git(['diff', '--no-color', '--find-renames', '--unified=3', head, '--', ...chunk], signal)
@@ -2421,50 +2483,71 @@ export class RepositoryService {
     return this.refresh()
   }
 
-  async getLocalBranchReview(baseRef: string, headRef: string): Promise<LocalBranchReview> {
+  async getLocalBranchReview(
+    baseRef: string,
+    headRef: string,
+    onProgress?: (progress: LocalReviewProgress) => void
+  ): Promise<LocalBranchReview> {
     this.#requireGitRepository()
-    const branchResult = await this.#git(['for-each-ref', '--format=%(refname:short)', 'refs/heads'])
+    return this.#runLocalReview(
+      `branch:${baseRef}\0${headRef}`,
+      (signal, emit) => this.#loadLocalBranchReview(baseRef, headRef, signal, emit),
+      onProgress
+    )
+  }
+
+  async #loadLocalBranchReview(
+    baseRef: string,
+    headRef: string,
+    signal: AbortSignal,
+    onProgress?: (progress: LocalReviewProgress) => void
+  ): Promise<LocalBranchReview> {
+    const branchResult = await this.#git(['for-each-ref', '--format=%(refname:short)', 'refs/heads'], signal)
     const branches = new Set(branchResult.stdout.toString('utf8').split('\n').filter(Boolean))
     if (!branches.has(baseRef) || !branches.has(headRef)) throw new Error('Both comparison refs must be local branches.')
     if (baseRef === headRef) throw new Error('Select two different branches to compare.')
     const comparison = `${baseRef}...${headRef}`
-    const [churnResult, baseResult, headResult] = await Promise.all([
-      this.#git(['diff', '--numstat', '-z', '--find-renames', comparison, '--']),
-      this.#git(['merge-base', baseRef, headRef]),
-      this.#git(['rev-parse', headRef])
+    const [churnResult, baseResult, headResult] = await awaitAll([
+      this.#git(['diff', '--numstat', '-z', '--find-renames', comparison, '--'], signal),
+      this.#git(['merge-base', baseRef, headRef], signal),
+      this.#git(['rev-parse', headRef], signal)
     ])
     const baseOid = baseResult.stdout.toString('utf8').trim()
     const headOid = headResult.stdout.toString('utf8').trim()
-    const entries = parseNumstat(churnResult.stdout)
-    const oversized = selectOversizedDiffFiles(entries)
-    const patchResult = await this.#git([
-      'diff', '--no-color', '--full-index', '--find-renames', comparison, '--', ...oversized.excludePathspecs
-    ])
-    const patch = patchResult.stdout.toString('utf8')
-    const patchFiles = new Map(filesFromPatch(patch).map((file) => [file.path, file]))
-    const files = diffFilesFromChurn(entries).map((file) => ({ ...file, ...patchFiles.get(file.path) }))
-    const limited = limitPatchFileSize(patch, MAX_DIFF_FILE_BYTES)
-    const review = {
-      kind: 'local' as const,
-      id: `${comparison}:${baseOid}:${headOid}`,
+    return this.#loadFileFirstReview({
+      churnEntries: parseNumstat(churnResult.stdout),
+      patchArgs: ['diff', '--no-color', '--full-index', '--find-renames', comparison, '--'],
+      signal,
+      onProgress,
+      reviewId: `${comparison}:${baseOid}:${headOid}`,
       title: `${headRef} compared with ${baseRef}`,
       baseRefName: baseRef,
       headRefName: headRef,
       baseOid,
-      headOid,
-      files,
-      patch: limited.patch,
-      omittedFiles: [...oversized.omittedFiles, ...limited.omittedFiles]
-    }
-    this.#rememberAgentReview(review)
-    return review
+      headOid
+    })
   }
 
-  async getCommitReview(oid: string): Promise<LocalBranchReview> {
+  async getCommitReview(
+    oid: string,
+    onProgress?: (progress: LocalReviewProgress) => void
+  ): Promise<LocalBranchReview> {
     this.#requireGitRepository()
     if (!/^[0-9a-f]{7,40}$/i.test(oid)) throw new Error('Commit ID is invalid.')
-    await this.#git(['cat-file', '-e', `${oid}^{commit}`])
-    const commitResult = await this.#git(['rev-list', '--parents', '-n', '1', oid])
+    return this.#runLocalReview(
+      `commit:${oid.toLowerCase()}`,
+      (signal, emit) => this.#loadCommitReview(oid, signal, emit),
+      onProgress
+    )
+  }
+
+  async #loadCommitReview(
+    oid: string,
+    signal: AbortSignal,
+    onProgress?: (progress: LocalReviewProgress) => void
+  ): Promise<LocalBranchReview> {
+    await this.#git(['cat-file', '-e', `${oid}^{commit}`], signal)
+    const commitResult = await this.#git(['rev-list', '--parents', '-n', '1', oid], signal)
     const [commitOid, firstParent] = commitResult.stdout.toString('utf8').trim().split(' ')
     if (commitOid == null) throw new Error('Commit could not be resolved.')
     const churnArgs = firstParent == null
@@ -2473,32 +2556,185 @@ export class RepositoryService {
     const patchArgs = firstParent == null
       ? ['show', '--format=', '--no-color', '--full-index', '--find-renames', commitOid, '--']
       : ['diff', '--no-color', '--full-index', '--find-renames', firstParent, commitOid, '--']
-    const [churnResult, metadataResult] = await Promise.all([
-      this.#git(churnArgs),
-      this.#git(['show', '-s', '--format=%h%x1f%s', commitOid])
+    const [churnResult, metadataResult] = await awaitAll([
+      this.#git(churnArgs, signal),
+      this.#git(['show', '-s', '--format=%h%x1f%s', commitOid], signal)
     ])
     const [shortOid = commitOid.slice(0, 8), subject = 'Commit'] = metadataResult.stdout.toString('utf8').trim().split('\x1f')
-    const entries = parseNumstat(churnResult.stdout)
-    const oversized = selectOversizedDiffFiles(entries)
-    const patchResult = await this.#git([...patchArgs, ...oversized.excludePathspecs])
-    const patch = patchResult.stdout.toString('utf8')
-    const patchFiles = new Map(filesFromPatch(patch).map((file) => [file.path, file]))
-    const files = diffFilesFromChurn(entries).map((file) => ({ ...file, ...patchFiles.get(file.path) }))
-    const limited = limitPatchFileSize(patch, MAX_DIFF_FILE_BYTES)
-    const review = {
-      kind: 'local' as const,
-      id: `commit:${commitOid}`,
+    return this.#loadFileFirstReview({
+      churnEntries: parseNumstat(churnResult.stdout),
+      patchArgs,
+      signal,
+      onProgress,
+      reviewId: `commit:${commitOid}`,
       title: `${shortOid} ${subject}`,
       baseRefName: firstParent?.slice(0, 8) ?? 'Empty tree',
       headRefName: shortOid,
       baseOid: firstParent ?? EMPTY_TREE_OID,
-      headOid: commitOid,
-      files,
-      patch: limited.patch,
-      omittedFiles: [...oversized.omittedFiles, ...limited.omittedFiles]
-    }
+      headOid: commitOid
+    })
+  }
+
+  #runKeyedFlight<Progress, Result>(
+    flights: Map<string, ReviewFlight<Progress, Result>>,
+    key: string,
+    load: (signal: AbortSignal, emit: (progress: Progress) => void) => Promise<Result>,
+    listener?: (progress: Progress) => void
+  ): Promise<Result> {
+    const pending = flights.get(key)
+    if (pending != null) return pending.join(listener)
+    for (const flight of flights.values()) flight.abort.abort()
+    const flight = new ReviewFlight<Progress, Result>()
+    flights.set(key, flight)
+    flight.start((emit, signal) =>
+      load(signal, emit).finally(() => {
+        if (flights.get(key) === flight) flights.delete(key)
+      })
+    )
+    return flight.join(listener)
+  }
+
+  #runLocalReview(
+    key: string,
+    load: (signal: AbortSignal, emit: LocalReviewListener) => Promise<LocalBranchReview>,
+    onProgress?: LocalReviewListener
+  ): Promise<LocalBranchReview> {
+    return this.#runKeyedFlight(
+      this.#pendingLocalReviews,
+      key,
+      load,
+      onProgress
+    ).then((review) => this.#localReviewReply(review, onProgress != null))
+  }
+
+  #mergeChurnPatchFiles(churnFiles: PullRequestFile[], patch: string): PullRequestFile[] {
+    const patchFiles = new Map(filesFromPatch(patch).map((file) => [file.path, file]))
+    if (patchFiles.size === 0) return []
+    return churnFiles.flatMap((file) => {
+      const fromPatch = patchFiles.get(file.path)
+      return fromPatch == null ? [] : [{ ...file, ...fromPatch }]
+    })
+  }
+
+  #localReviewReply(review: LocalBranchReview, streamed: boolean): LocalBranchReview {
     this.#rememberAgentReview(review)
-    return review
+    return streamed ? { ...review, patch: '' } : review
+  }
+
+  async #diffPathspecPatch(
+    args: readonly string[],
+    paths: readonly string[],
+    signal: AbortSignal
+  ): Promise<string> {
+    if (paths.length === 0) return ''
+    return (await this.#git([...args, ...paths], signal)).stdout.toString('utf8')
+  }
+
+  async #loadFileFirstReview(options: {
+    churnEntries: ReturnType<typeof parseNumstat>
+    patchArgs: readonly string[]
+    signal: AbortSignal
+    onProgress?: (progress: LocalReviewProgress) => void
+    reviewId: string
+    title: string
+    baseRefName: string
+    headRefName: string
+    baseOid: string
+    headOid: string
+  }): Promise<LocalBranchReview> {
+    const { churnEntries, patchArgs, signal, onProgress, reviewId } = options
+    const oversized = selectOversizedDiffFiles(churnEntries)
+    const churnFiles = diffFilesFromChurn(churnEntries)
+    const omittedPaths = new Set(oversized.omittedFiles.map((file) => file.path))
+    const omittedFiles = churnFiles.filter((file) => omittedPaths.has(file.path))
+    const includedGroups = churnFiles.flatMap((file) =>
+      omittedPaths.has(file.path) ? [] : [pathspecGroupForFile(file)]
+    )
+    const streamed = onProgress != null
+    const expectedFileCount = churnFiles.length
+    const buildReview = (
+      files: PullRequestFile[],
+      patch: string,
+      reviewOmitted: OmittedDiffFile[]
+    ): LocalBranchReview => ({
+      kind: 'local',
+      id: reviewId,
+      title: options.title,
+      baseRefName: options.baseRefName,
+      headRefName: options.headRefName,
+      baseOid: options.baseOid,
+      headOid: options.headOid,
+      files,
+      patch,
+      omittedFiles: reviewOmitted,
+      expectedFileCount
+    })
+    if (includedGroups.length === 0) {
+      const review = buildReview(churnFiles, '', oversized.omittedFiles)
+      if (streamed) {
+        onProgress({ kind: 'metadata', review })
+        onProgress({ kind: 'done', selector: reviewId, fileCount: expectedFileCount })
+      }
+      return review
+    }
+
+    const { first, rest } = isolateFirstPathspecGroup(includedGroups)
+    const firstWork = this.#diffPathspecPatch(patchArgs, first ?? [], signal)
+    const restWork = mapWithConcurrency(
+      chunkPathspecGroups(rest),
+      MAX_PATCH_COMMAND_CONCURRENCY,
+      (chunk) => this.#diffPathspecPatch(patchArgs, chunk, signal)
+    )
+    try {
+      const firstLimited = limitPatchFileSize(await firstWork, MAX_DIFF_FILE_BYTES)
+      if (signal.aborted) throw new Error(COMMAND_ABORTED_MESSAGE)
+      const firstOmitted = [...oversized.omittedFiles, ...firstLimited.omittedFiles]
+      const firstFiles = [
+        ...this.#mergeChurnPatchFiles(churnFiles, firstLimited.patch),
+        ...omittedFiles
+      ]
+      if (streamed) {
+        onProgress({
+          kind: 'metadata',
+          review: buildReview(firstFiles, firstLimited.patch, firstOmitted)
+        })
+      }
+
+      const restPatches = await restWork
+      if (signal.aborted) throw new Error(COMMAND_ABORTED_MESSAGE)
+      const restOmitted: OmittedDiffFile[] = []
+      const restParts: string[] = []
+      for (const part of restPatches) {
+        const limited = limitPatchFileSize(part, MAX_DIFF_FILE_BYTES)
+        restOmitted.push(...limited.omittedFiles)
+        if (limited.patch === '' && limited.omittedFiles.length === 0) continue
+        if (limited.patch !== '') restParts.push(limited.patch)
+        if (streamed) {
+          onProgress({
+            kind: 'files',
+            selector: reviewId,
+            patch: limited.patch,
+            files: this.#mergeChurnPatchFiles(churnFiles, limited.patch),
+            omittedFiles: limited.omittedFiles
+          })
+        }
+      }
+
+      const joined = [firstLimited.patch, ...restParts].filter((part) => part !== '').join('\n')
+      const limited = limitPatchFileSize(joined, MAX_DIFF_FILE_BYTES)
+      const patchFiles = new Map(filesFromPatch(limited.patch).map((file) => [file.path, file]))
+      const files = churnFiles.map((file) => ({ ...file, ...patchFiles.get(file.path) }))
+      const review = buildReview(files, limited.patch, [
+        ...firstOmitted,
+        ...restOmitted,
+        ...limited.omittedFiles
+      ])
+      if (streamed) onProgress({ kind: 'done', selector: reviewId, fileCount: expectedFileCount })
+      return review
+    } catch (error) {
+      await restWork.catch(() => {})
+      throw error
+    }
   }
 
   async fetchRemote(): Promise<GitIntegrationSnapshot> {

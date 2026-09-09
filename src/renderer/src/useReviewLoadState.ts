@@ -44,7 +44,7 @@ export const FOLDER_REVIEW_PAGE_SIZE = 50
 export const STREAM_STALL_MS = 25_000
 
 export interface ReviewProgressInput {
-  /** GitHub's own file count for a streamed review; null for anything else. */
+  /** Expected file count while a review is still streaming; null when there is none. */
   streamingFileCount: number | null
   /** Files the streamed review has actually delivered so far. */
   streamedFileCount: number
@@ -73,7 +73,7 @@ export function reviewProgress({
   loadLimit
 }: ReviewProgressInput): ReviewProgress {
   // A streamed review knows how many files to expect before it has them, so the
-  // count it is climbing towards is GitHub's, not what has arrived.
+  // count it is climbing towards is that total, not what has arrived.
   const targetPathCount = streamingFileCount != null
     ? Math.max(streamingFileCount, stablePathCount)
     : paged
@@ -233,15 +233,13 @@ export function useReviewLoadState({
   const [folderLoadState, setFolderLoadState] = useState<ReviewLoadState>(EMPTY_LOAD_STATE)
   const [pagination, setPagination] = useState({ key: '', limit: FOLDER_REVIEW_PAGE_SIZE })
   const loadLimit = pagination.key === pathsKey ? pagination.limit : FOLDER_REVIEW_PAGE_SIZE
-  const streamingFileCount = repositoryReview?.kind === 'github'
-    ? repositoryReview.expectedFileCount
-    : null
+  const streamingFileCount = repositoryReview?.expectedFileCount ?? null
   const streamedFileCount = repositoryReview?.files.length ?? 0
   // The key moves whenever the stream makes progress, which restarts the timer;
   // it only fires when nothing has arrived for the whole window.
-  const streamKey = repositoryReview?.kind === 'github'
-    ? `${repositoryReview.selector}:${streamedFileCount}:${streamingFileCount}`
-    : null
+  const streamKey = repositoryReview == null || streamingFileCount == null
+    ? null
+    : `${repositoryReview.kind === 'github' ? repositoryReview.selector : repositoryReview.id}:${streamedFileCount}:${streamingFileCount}`
   const [stalledStreamKey, setStalledStreamKey] = useState<string | null>(null)
   const streamStalled = streamKey != null && stalledStreamKey === streamKey
 
@@ -260,7 +258,7 @@ export function useReviewLoadState({
       ? `pr-${repositoryReview.pullRequest.number}-${repositoryReview.pullRequest.updatedAt}`
       : repositoryReview.id
     const seeded = parsedWorldIdRef.current !== worldId ? seedParsedCache(worldId) : null
-    if (repositoryReview.kind === 'github' && repositoryReview.patchPages != null) {
+    if (repositoryReview.patchPages != null) {
       const pagesBase = seeded?.pages ?? parsedPatchPagesRef.current
       if (
         pagesBase.key === key
@@ -359,6 +357,7 @@ export function useReviewLoadState({
 
   useEffect(() => {
     let cancelled = false
+    let stopProgress: (() => void) | undefined
     if (externalReviewItems != null) return
     const isNewPathSet = loadedPathsKeyRef.current !== pathsKey
     loadedPathsKeyRef.current = pathsKey
@@ -385,12 +384,59 @@ export function useReviewLoadState({
       }
 
       if (isNewPathSet) {
+        const requestId = crypto.randomUUID()
+        let streamed = false
+        stopProgress = repository.onLocalReviewProgress?.((progress) => {
+          if (cancelled || progress.requestId !== requestId || progress.kind !== 'files') return
+          streamed = true
+          const incoming = progress.patch === ''
+            ? []
+            : createPatchReviewItems<ReviewAnnotationMetadata>(progress.patch, `working-tree-${requestId}`)
+          startTransition(() => {
+            setFolderLoadState((current) => {
+              const omittedFiles = [...current.omittedFiles, ...progress.omittedFiles]
+              const loadedPaths = new Set(current.loadedPaths)
+              for (const item of incoming) loadedPaths.add(pathFromItemId(item.id))
+              for (const file of progress.omittedFiles) loadedPaths.add(file.path)
+              return {
+                items: orderReviewItems(mergeReviewItems(current.items, incoming), stablePaths),
+                loadedPaths,
+                omittedFiles,
+                failedCount: 0,
+                skippedCount: Math.max(0, stablePaths.length - loadedPaths.size),
+                paged: false
+              }
+            })
+          })
+        })
         try {
-          const workingTreePatch = await repository.getWorkingTreePatch(stablePaths)
+          const workingTreePatch = await repository.getWorkingTreePatch(stablePaths, requestId)
           if (cancelled) return
+          if (streamed) {
+            setFolderLoadState((current) => {
+              const items = current.items.length > 0
+                ? orderReviewItems(current.items, stablePaths)
+                : orderReviewItems(createPatchReviewItems<ReviewAnnotationMetadata>(
+                  workingTreePatch.patch,
+                  `working-tree-${requestId}`
+                ), stablePaths)
+              return {
+                items,
+                loadedPaths: new Set(stablePaths),
+                omittedFiles: workingTreePatch.omittedFiles,
+                failedCount: 0,
+                skippedCount: Math.max(
+                  0,
+                  stablePaths.length - items.length - workingTreePatch.omittedFiles.length
+                ),
+                paged: false
+              }
+            })
+            return
+          }
           const items = orderReviewItems(createPatchReviewItems<ReviewAnnotationMetadata>(
             workingTreePatch.patch,
-            `working-tree-${Date.now()}`
+            `working-tree-${requestId}`
           ), stablePaths)
           if (items.length > 0 || stablePaths.length === 0) {
             setFolderLoadState({
@@ -408,6 +454,8 @@ export function useReviewLoadState({
           }
         } catch {
           // A plain folder has no Git patch. Load its files through the paged fallback below.
+        } finally {
+          stopProgress?.()
         }
       }
 
@@ -457,6 +505,7 @@ export function useReviewLoadState({
     void loadComparisons().then(() => { loaded = true })
     return () => {
       cancelled = true
+      stopProgress?.()
       // An interrupted first pass must not look like a completed one to the next run.
       if (isNewPathSet && !loaded) loadedPathsKeyRef.current = null
     }

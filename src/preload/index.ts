@@ -5,6 +5,7 @@ import type {
   FindInPageResult,
   PerformanceMetrics,
   PerformanceMetricsDetail,
+  LocalReviewProgress,
   PullRequestReviewProgress,
   RepositoryApi,
   RepositoryChangeEvent,
@@ -88,7 +89,8 @@ const repositoryApi: RepositoryApi = {
   refresh: () => ipcRenderer.invoke(IPC_CHANNELS.refresh),
   getComparison: (path) => ipcRenderer.invoke(IPC_CHANNELS.getComparison, path),
   saveWorkingFile: (request) => ipcRenderer.invoke(IPC_CHANNELS.saveWorkingFile, request),
-  getWorkingTreePatch: (paths) => ipcRenderer.invoke(IPC_CHANNELS.getWorkingTreePatch, paths),
+  getWorkingTreePatch: (paths, requestId) =>
+    ipcRenderer.invoke(IPC_CHANNELS.getWorkingTreePatch, paths, requestId ?? null),
   searchContent: (query, forOpenPath) => ipcRenderer.invoke(IPC_CHANNELS.searchContent, query, forOpenPath ?? null),
   cancelContentSearch: () => ipcRenderer.send(IPC_CHANNELS.cancelContentSearch),
   getMarkdownMedia: (url) => ipcRenderer.invoke(IPC_CHANNELS.getMarkdownMedia, url),
@@ -104,8 +106,10 @@ const repositoryApi: RepositoryApi = {
   mergePullRequest: (root, selector, strategy) => ipcRenderer.invoke(IPC_CHANNELS.mergePullRequest, root, selector, strategy),
   markPullRequestReady: (root, selector) => ipcRenderer.invoke(IPC_CHANNELS.markPullRequestReady, root, selector),
   switchBranch: (name) => ipcRenderer.invoke(IPC_CHANNELS.switchBranch, name),
-  getLocalBranchReview: (baseRef, headRef) => ipcRenderer.invoke(IPC_CHANNELS.getLocalBranchReview, baseRef, headRef),
-  getCommitReview: (oid) => ipcRenderer.invoke(IPC_CHANNELS.getCommitReview, oid),
+  getLocalBranchReview: (baseRef, headRef, requestId) =>
+    ipcRenderer.invoke(IPC_CHANNELS.getLocalBranchReview, baseRef, headRef, requestId ?? null),
+  getCommitReview: (oid, requestId) =>
+    ipcRenderer.invoke(IPC_CHANNELS.getCommitReview, oid, requestId ?? null),
   fetchRemote: () => ipcRenderer.invoke(IPC_CHANNELS.fetchRemote),
   pullCurrentBranch: () => ipcRenderer.invoke(IPC_CHANNELS.pullCurrentBranch),
   pushCurrentBranch: () => ipcRenderer.invoke(IPC_CHANNELS.pushCurrentBranch),
@@ -204,6 +208,13 @@ const repositoryApi: RepositoryApi = {
     }
     ipcRenderer.on(IPC_CHANNELS.pullRequestReviewProgress, handleProgress)
     return () => ipcRenderer.removeListener(IPC_CHANNELS.pullRequestReviewProgress, handleProgress)
+  },
+  onLocalReviewProgress: (listener) => {
+    const handleProgress = (_event: Electron.IpcRendererEvent, progress: LocalReviewProgress): void => {
+      listener(progress)
+    }
+    ipcRenderer.on(IPC_CHANNELS.localReviewProgress, handleProgress)
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.localReviewProgress, handleProgress)
   }
 }
 

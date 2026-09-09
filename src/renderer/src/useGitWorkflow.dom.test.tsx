@@ -1,11 +1,12 @@
 import { afterEach, expect, mock, test } from 'bun:test'
 import { act, cleanup, renderHook, waitFor } from '@testing-library/react'
 
-import type {
-  PullRequestReview,
-  PullRequestReviewProgress,
-  RepositoryApi,
-  RepositorySnapshot
+import {
+  COMMAND_ABORTED_MESSAGE,
+  type PullRequestReview,
+  type PullRequestReviewProgress,
+  type RepositoryApi,
+  type RepositorySnapshot
 } from '../../shared/contracts'
 import { useGitWorkflow } from './useGitWorkflow'
 
@@ -466,4 +467,19 @@ test('a successful submitted review advances the checkpoint', async () => {
   )
   expect(result.current.reviewCheckpoint?.headOid).toBe('5'.repeat(40))
   expect(result.current.submissionMessage).toBe('Review submitted to GitHub. Checkpoint advanced.')
+})
+
+test('a superseded local review does not raise a cancelled error banner', async () => {
+  const errors: Array<string | null> = []
+  const onError = (message: string | null): void => { errors.push(message) }
+  window.repository = {
+    getCommitReview: () => Promise.reject(new Error(COMMAND_ABORTED_MESSAGE)),
+    onLocalReviewProgress: () => () => {}
+  } as unknown as RepositoryApi
+  const { result } = renderHook(() => useGitWorkflow({ ...workflowOptions(), onError }))
+
+  await act(() => result.current.reviewCommit('abc1234'))
+
+  expect(errors.filter((message) => message != null)).toEqual([])
+  expect(result.current.worlds.filter((world) => world.source === 'patch')).toHaveLength(0)
 })

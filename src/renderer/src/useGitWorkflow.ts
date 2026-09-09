@@ -1,16 +1,19 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
-import type {
-  GitIntegrationSnapshot,
-  OmittedDiffFile,
-  PullRequestFile,
-  PullRequestFolderPreview,
-  PullRequestInboxSnapshot,
-  PullRequestMergeStrategy,
-  PullRequestReviewComment,
-  PullRequestReviewEvent,
-  PullRequestSummary,
-  RepositorySnapshot
+import {
+  COMMAND_ABORTED_MESSAGE,
+  type GitIntegrationSnapshot,
+  type LocalBranchReview,
+  type LocalReviewProgress,
+  type OmittedDiffFile,
+  type PullRequestFile,
+  type PullRequestFolderPreview,
+  type PullRequestInboxSnapshot,
+  type PullRequestMergeStrategy,
+  type PullRequestReviewComment,
+  type PullRequestReviewEvent,
+  type PullRequestSummary,
+  type RepositorySnapshot
 } from '../../shared/contracts'
 import { extractGitHubPullRequestUrl } from '../../shared/pullRequestUrl'
 import type { WorkspaceView } from './AppView'
@@ -675,43 +678,75 @@ export function useGitWorkflow({
     return openPullRequestReview(pullRequest.number)
   }, [openPullRequestReview])
 
-  const reviewLocalBranch = useCallback(async (baseRef: string, headRef: string) => {
+  const openLocalStreamedReview = useCallback(async (
+    actionKey: string,
+    load: (requestId: string) => Promise<LocalBranchReview>
+  ) => {
     if (snapshot == null) return
     const repositorySnapshot = snapshot
     const originWorldId = activeReviewWorld?.worldId ?? null
     const generation = ++reviewGenerationRef.current
-    setActionKey(`compare:${headRef}`)
+    const requestId = crypto.randomUUID()
+    setActionKey(actionKey)
     onError(null)
+    let streamed = false
+    let worldId: string | null = null
+    const stopListening = requireRepositoryApi().onLocalReviewProgress((progress: LocalReviewProgress) => {
+      if (progress.requestId !== requestId) return
+      if (progress.kind === 'metadata') {
+        streamed = true
+        worldId = openPatchWorld(
+          repositorySnapshot,
+          progress.review,
+          generation,
+          true,
+          requestId,
+          originWorldId
+        )
+        setSubmissionMessage(null)
+        setPanelOpen(false)
+        setActionKey((current) => current === actionKey ? null : current)
+        return
+      }
+      if (worldId == null) return
+      if (progress.kind === 'done') {
+        setPatchExpectedFileCount(worldId, generation, progress.fileCount)
+        return
+      }
+      appendPatchPage(worldId, generation, progress)
+      const firstPath = progress.files[0]?.path
+      if (firstPath != null) selectInitialPath(worldId, firstPath)
+    })
     try {
-      const review = await requireRepositoryApi().getLocalBranchReview(baseRef, headRef)
-      openPatchWorld(repositorySnapshot, review, generation, false, null, originWorldId)
+      const review = await load(requestId)
+      if (streamed && worldId != null) {
+        setPatchExpectedFileCount(worldId, generation, review.expectedFileCount)
+        setPatchLoadStatus(worldId, generation, 'ready')
+        return
+      }
+      openPatchWorld(repositorySnapshot, review, generation, false, requestId, originWorldId)
       setSubmissionMessage(null)
       setPanelOpen(false)
     } catch (error) {
+      if (getErrorMessage(error) === COMMAND_ABORTED_MESSAGE) return
       onError(getErrorMessage(error))
+      if (streamed && worldId != null) setPatchLoadStatus(worldId, generation, 'error', getErrorMessage(error))
     } finally {
-      setActionKey((current) => current === `compare:${headRef}` ? null : current)
+      stopListening()
+      setActionKey((current) => current === actionKey ? null : current)
     }
-  }, [activeReviewWorld, onError, openPatchWorld, snapshot])
+  }, [activeReviewWorld, appendPatchPage, onError, openPatchWorld, selectInitialPath,
+    setPatchExpectedFileCount, setPatchLoadStatus, snapshot])
+
+  const reviewLocalBranch = useCallback(async (baseRef: string, headRef: string) => {
+    await openLocalStreamedReview(`compare:${headRef}`, (requestId) =>
+      requireRepositoryApi().getLocalBranchReview(baseRef, headRef, requestId))
+  }, [openLocalStreamedReview])
 
   const reviewCommit = useCallback(async (oid: string) => {
-    if (snapshot == null) return
-    const repositorySnapshot = snapshot
-    const originWorldId = activeReviewWorld?.worldId ?? null
-    const generation = ++reviewGenerationRef.current
-    setActionKey(`commit:${oid}`)
-    onError(null)
-    try {
-      const review = await requireRepositoryApi().getCommitReview(oid)
-      openPatchWorld(repositorySnapshot, review, generation, false, null, originWorldId)
-      setSubmissionMessage(null)
-      setPanelOpen(false)
-    } catch (error) {
-      onError(getErrorMessage(error))
-    } finally {
-      setActionKey((current) => current === `commit:${oid}` ? null : current)
-    }
-  }, [activeReviewWorld, onError, openPatchWorld, snapshot])
+    await openLocalStreamedReview(`commit:${oid}`, (requestId) =>
+      requireRepositoryApi().getCommitReview(oid, requestId))
+  }, [openLocalStreamedReview])
 
   const checkoutPullRequest = useCallback(async (pullRequest: PullRequestSummary) => {
     if (!(await confirmWorkingTreeChange('pull request checkout'))) return
