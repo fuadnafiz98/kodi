@@ -84,6 +84,22 @@ const repositoryApi: RepositoryApi = {
     ipcRenderer.on(IPC_CHANNELS.openExternalPullRequest, handler)
     return () => ipcRenderer.removeListener(IPC_CHANNELS.openExternalPullRequest, handler)
   },
+  onHibernateRequest: (listener) => {
+    const handler = (): void => {
+      // The answer rides straight back on its own channel: main has no reply
+      // path for a pushed event, and it needs the refusal reason, not just the
+      // fact of one.
+      let blockedBy: string | null = 'the window did not answer'
+      try {
+        blockedBy = listener()
+      } catch (error) {
+        blockedBy = error instanceof Error ? error.message : 'the window failed to hibernate'
+      }
+      ipcRenderer.send(IPC_CHANNELS.hibernationState, blockedBy)
+    }
+    ipcRenderer.on(IPC_CHANNELS.hibernateRequest, handler)
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.hibernateRequest, handler)
+  },
   readClipboardText: (type) => ipcRenderer.invoke(IPC_CHANNELS.readClipboardText, type),
   revealPath: (path) => ipcRenderer.invoke(IPC_CHANNELS.revealPath, path),
   refresh: () => ipcRenderer.invoke(IPC_CHANNELS.refresh),
@@ -110,6 +126,8 @@ const repositoryApi: RepositoryApi = {
   switchBranch: (name) => ipcRenderer.invoke(IPC_CHANNELS.switchBranch, name),
   getLocalBranchReview: (baseRef, headRef, requestId) =>
     ipcRenderer.invoke(IPC_CHANNELS.getLocalBranchReview, baseRef, headRef, requestId ?? null),
+  getLocalSnapshotReview: (baseOid, headOid, baseRefName, headRefName) =>
+    ipcRenderer.invoke(IPC_CHANNELS.getLocalSnapshotReview, baseOid, headOid, baseRefName, headRefName),
   getCommitReview: (oid, requestId) =>
     ipcRenderer.invoke(IPC_CHANNELS.getCommitReview, oid, requestId ?? null),
   fetchRemote: () => ipcRenderer.invoke(IPC_CHANNELS.fetchRemote),

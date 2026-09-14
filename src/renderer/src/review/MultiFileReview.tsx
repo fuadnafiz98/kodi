@@ -390,6 +390,23 @@ export function reviewScrollAnchorTarget(anchor: ReviewScrollAnchor, itemTop: nu
   return Math.max(0, itemTop - anchor.viewportOffset)
 }
 
+/**
+ * Where to land after a file swaps between its diff and its rendered markdown:
+ * the top of that same file.
+ *
+ * Holding the old scroll offset is the wrong instinct here, and measurably so —
+ * the rendered preview is roughly half the height of the two-column diff it
+ * replaces, so the old offset points past the end of the file and the scroller
+ * clamps, dumping the reader on the next file. Line 300 of a diff has no
+ * counterpart in rendered prose anyway. The file you just clicked is the only
+ * position that still means something.
+ */
+export function markdownPreviewScrollAnchor(
+  itemId: string | null | undefined
+): ReviewScrollAnchor | null {
+  return itemId == null ? null : { itemId, viewportOffset: 0 }
+}
+
 function captureReviewScrollAnchor(
   viewer: CodeViewInstance<ReviewAnnotationMetadata> | undefined
 ): ReviewScrollAnchor | null {
@@ -399,6 +416,56 @@ function captureReviewScrollAnchor(
   const itemTop = viewer.getTopForItem(itemId)
   if (itemTop == null) return null
   return { itemId, viewportOffset: itemTop - viewer.getScrollTop() }
+}
+
+/**
+ * Hold `anchor`'s item at its captured viewport offset while the rows around it
+ * settle, and stop the moment the reader scrolls: heights arrive over several
+ * frames, so one correction is not enough and fighting a real scroll is worse
+ * than not correcting at all. Returns the cleanup for the frame loop.
+ */
+function restoreReviewScrollAnchor(
+  anchor: ReviewScrollAnchor | null,
+  viewerRef: RefObject<CodeViewHandle<ReviewAnnotationMetadata> | null>,
+  scrollContainerRef: RefObject<HTMLDivElement | null>
+): () => void {
+  let frame = 0
+  let settledFrames = 0
+  let cancelled = false
+  const startedAt = performance.now()
+  const cancel = (): void => {
+    cancelled = true
+  }
+  const stopObservingScrollTakeover = anchor == null
+    ? () => {}
+    : observeScrollTakeover(scrollContainerRef.current, cancel)
+
+  const restore = (): void => {
+    if (cancelled || anchor == null) return
+    const viewer = viewerRef.current
+    const instance = viewer?.getInstance()
+    const itemTop = instance?.getTopForItem(anchor.itemId)
+    const current = instance?.getScrollTop()
+    if (viewer == null || itemTop == null || current == null) return
+    const target = reviewScrollAnchorTarget(anchor, itemTop)
+    if (Math.abs(current - target) <= 1) {
+      settledFrames += 1
+      if (settledFrames >= SCROLL_RESTORE_SETTLED_FRAMES) return
+    } else {
+      settledFrames = 0
+      viewer.scrollTo({ type: 'position', position: target, behavior: 'instant' })
+    }
+    if (performance.now() - startedAt < SCROLL_RESTORE_TIMEOUT_MS) {
+      frame = window.requestAnimationFrame(restore)
+    }
+  }
+  restore()
+
+  return () => {
+    cancelled = true
+    window.cancelAnimationFrame(frame)
+    stopObservingScrollTakeover()
+  }
 }
 
 function useBackgroundScrollAnchor(
@@ -421,42 +488,10 @@ function useBackgroundScrollAnchor(
     }
     const anchor = anchorRef.current
     anchorRef.current = null
-    let frame = 0
-    let settledFrames = 0
-    let cancelled = false
-    const startedAt = performance.now()
-    const cancel = (): void => {
-      cancelled = true
-    }
-    const stopObservingScrollTakeover = anchor == null
-      ? () => {}
-      : observeScrollTakeover(scrollContainerRef.current, cancel)
-
-    const restore = (): void => {
-      if (cancelled || anchor == null) return
-      const viewer = viewerRef.current
-      const instance = viewer?.getInstance()
-      const itemTop = instance?.getTopForItem(anchor.itemId)
-      const current = instance?.getScrollTop()
-      if (viewer == null || itemTop == null || current == null) return
-      const target = reviewScrollAnchorTarget(anchor, itemTop)
-      if (Math.abs(current - target) <= 1) {
-        settledFrames += 1
-        if (settledFrames >= SCROLL_RESTORE_SETTLED_FRAMES) return
-      } else {
-        settledFrames = 0
-        viewer.scrollTo({ type: 'position', position: target, behavior: 'instant' })
-      }
-      if (performance.now() - startedAt < SCROLL_RESTORE_TIMEOUT_MS) {
-        frame = window.requestAnimationFrame(restore)
-      }
-    }
-    restore()
+    const stop = restoreReviewScrollAnchor(anchor, viewerRef, scrollContainerRef)
 
     return () => {
-      cancelled = true
-      window.cancelAnimationFrame(frame)
-      stopObservingScrollTakeover()
+      stop()
       // Cleanup must capture the latest imperative viewer, not the handle from effect setup.
       // oxlint-disable-next-line react/exhaustive-deps
       anchorRef.current = captureReviewScrollAnchor(viewerRef.current?.getInstance())
@@ -1094,6 +1129,7 @@ const MultiFileReview = memo(function MultiFileReview({
   const viewerRef = useRef<CodeViewHandle<ReviewAnnotationMetadata> | null>(null)
   const scrollContainerRef = useRef<HTMLDivElement | null>(null)
   const viewedAdvanceFrameRef = useRef(0)
+  const markdownPreviewPinRef = useRef<ReviewScrollAnchor | null>(null)
   const handledNavigationRevisionRef = useRef(navigationRevision)
   const stablePaths = paths
   const {
@@ -1204,6 +1240,7 @@ const MultiFileReview = memo(function MultiFileReview({
       showToast('Only markdown files can be previewed')
       return
     }
+    markdownPreviewPinRef.current = markdownPreviewScrollAnchor(itemsByPath.get(path)?.id)
     const enabling = !markdownPreviewPaths.has(path)
     setMarkdownPreviewPaths((current) => {
       const next = new Set(current)
@@ -1230,6 +1267,43 @@ const MultiFileReview = memo(function MultiFileReview({
       })
     }).catch(() => {})
   }, [itemsByPath, markdownPreviewPaths, markdownSources, previewableMarkdownPaths, repositoryReview])
+
+  // Land on the toggled file. Deliberately not `restoreReviewScrollAnchor`: that
+  // one aborts on `pointerdown`, which is the very click that starts this, and
+  // it gives up for good if the viewer has not published an instance on the
+  // first tick. Both are right for a background refresh the reader did not ask
+  // for, and both are wrong for a scroll the reader just requested.
+  useLayoutEffect(() => {
+    const pin = markdownPreviewPinRef.current
+    markdownPreviewPinRef.current = null
+    if (pin == null) return
+    let frame = 0
+    let settledFrames = 0
+    const startedAt = performance.now()
+    const step = (): void => {
+      const viewer = viewerRef.current
+      const instance = viewer?.getInstance()
+      const itemTop = instance?.getTopForItem(pin.itemId)
+      const current = instance?.getScrollTop()
+      // A null here means the viewer has not settled yet, so wait for it rather
+      // than treating it as nothing to do.
+      if (viewer != null && itemTop != null && current != null) {
+        const target = reviewScrollAnchorTarget(pin, itemTop)
+        if (Math.abs(current - target) <= 1) {
+          settledFrames += 1
+          if (settledFrames >= SCROLL_RESTORE_SETTLED_FRAMES) return
+        } else {
+          settledFrames = 0
+          viewer.scrollTo({ type: 'position', position: target, behavior: 'instant' })
+        }
+      }
+      if (performance.now() - startedAt < SCROLL_RESTORE_TIMEOUT_MS) {
+        frame = window.requestAnimationFrame(step)
+      }
+    }
+    step()
+    return () => window.cancelAnimationFrame(frame)
+  }, [markdownPreviewPaths, markdownSources])
 
   // Stale entries are filtered out rather than deleted, so a file whose contents
   // changed reads as unviewed without writing to state during render.

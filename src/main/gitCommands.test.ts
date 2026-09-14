@@ -2,6 +2,8 @@ import { describe, expect, it } from 'bun:test'
 
 import {
   COMMAND_ABORTED_MESSAGE,
+  COMMAND_EXECUTION_TIMEOUT_MESSAGE,
+  COMMAND_QUEUE_TIMEOUT_MESSAGE,
   commandSemaphore,
   CommandSemaphore,
   comparePaths,
@@ -49,6 +51,18 @@ describe('runCommand', () => {
     abort.abort()
 
     await expect(command).rejects.toThrow(COMMAND_ABORTED_MESSAGE)
+  })
+
+  it('kills a child at its execution deadline and releases the command slot', async () => {
+    const runningBefore = commandSemaphore.running
+    const command = runCommand(
+      '/bin/sh', ['-c', 'sleep 5'], undefined, [], undefined, undefined, 'interactive',
+      { executionMs: 20 }
+    )
+    await expect(command).rejects.toThrow(COMMAND_EXECUTION_TIMEOUT_MESSAGE)
+    // Other test files also use the process-wide semaphore and can finish while
+    // this command runs. This command must not leave an additional slot occupied.
+    expect(commandSemaphore.running).toBeLessThanOrEqual(runningBefore)
   })
 })
 
@@ -200,6 +214,22 @@ describe('runCommand admission', () => {
       for (const release of held) release()
       await command
       expect(state.done()).toBe(true)
+    } finally {
+      for (const release of held) release()
+    }
+  })
+
+  it('expires while queued without spawning or consuming a slot', async () => {
+    const held = await Promise.all(
+      Array.from({ length: MAX_CONCURRENT_COMMANDS }, () => commandSemaphore.acquire('interactive'))
+    )
+    try {
+      const command = runCommand(
+        '/bin/sh', ['-c', 'exit 0'], undefined, [], undefined, undefined, 'interactive',
+        { queueMs: 20 }
+      )
+      await expect(command).rejects.toThrow(COMMAND_QUEUE_TIMEOUT_MESSAGE)
+      expect(commandSemaphore.running).toBe(MAX_CONCURRENT_COMMANDS)
     } finally {
       for (const release of held) release()
     }

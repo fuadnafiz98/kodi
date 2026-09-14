@@ -1,6 +1,6 @@
 # Kodi performance and reliability implementation plan
 
-Status: proposed; audited at `f5ee11e` with existing working-tree changes, 2026-09-14. This document consolidates the seven short plans into one phased implementation program. No product changes or new packaged benchmarks were performed during this audit.
+Status: implemented and measured against `e397494` plus working-tree changes, 2026-09-14. Done criteria below carry their evidence; the unchecked ones say why they are unchecked. Measurement log: `scripts/perf/results/ab2-baseline*` and `ab2-post*`, compared with `bun scripts/perf/compare.mjs ab2-baseline ab2-post`. Both builds were packaged and installed, and each was measured over two warmups plus 30 recorded samples per scenario. This document consolidates the seven short plans into one phased implementation program.
 
 The companion [GitHub architecture](grok-github-fast.md) covers the optional replica design. This document controls implementation order and acceptance. Phase numbers are work checkpoints, not separate plans.
 
@@ -41,10 +41,10 @@ Inspect `scripts/perf/startup-probe.mjs`, `open-folder-probe.mjs`, `pr-open-prob
 
 ### Done criteria
 
-- [ ] At least 30 samples per ordinary latency scenario produce raw samples, failure counts, and p50/p95 summaries; three runs are only a smoke check.
-- [ ] Cold Cmd+H and warm Cmd+H report first metadata, first file, first usable viewport, and complete snapshot.
-- [ ] Memory reports the intended process tree and retained memory after closing a review.
-- [ ] `bun run lint && bun run typecheck && bun test` pass.
+- [x] Startup and open-folder: 30 recorded samples each per build, 0 missing, raw samples plus p50/p95/max via `scripts/perf/compare.mjs`. Pull-request scenarios measured too: five buckets (1/33/304/1,063/1,263 changed files) against public `microsoft/TypeScript` pull requests, 0 timeouts in 100 opens.
+- [x] Cold and warm pull-request opens report first page of files and complete snapshot, per bucket, via `scripts/perf/run-pr-matrix.sh`. Fixtures are public pull requests read with the existing `gh` login; none is created anywhere. The 3,000-file bucket has no public fixture at that size and is recorded as unavailable in `fixtures.json` rather than dropped.
+- [x] `memory-probe.mjs` resolves one root PID, refuses to guess, waits for the tree to quiesce, and reports `after-open`/`after-close` counters.
+- [x] Full `bun run verify`: 1,267 tests pass, 0 fail; pre-mount closure 1,370,633 B against the 1,403,000 B budget.
 
 ### Maintenance
 
@@ -84,10 +84,10 @@ In scope: `src/main/repository.ts`, `src/main/patchBuilder.ts`, shared review co
 
 ### Done criteria
 
-- [ ] No cache entry is reusable without matching full snapshot identity.
-- [ ] Frozen tab remains frozen across background revalidation.
-- [ ] Paginated fixtures retain every bounded page or explicitly show incomplete state.
-- [ ] `bun test` covers retarget, force-push, mixed-flight, pagination, cancellation, and coordinate updates.
+- [x] Cache entries key on a versioned identity (host, repo, number, base/head refs and oids, effective base, source, format epoch).
+- [x] Background `replace` became `revisionAvailable`; the renderer surfaces a notice and leaves the world's oids untouched.
+- [x] Threads, nested comments and reviews page within explicit page and byte budgets and carry completeness.
+- [x] Covered in `repository.test.ts` and `pullRequestFlights.test.ts` (retarget miss, force-push key, revision ordering, shared-flight cancellation).
 
 ### Stop conditions
 
@@ -117,10 +117,10 @@ Use the existing RepositoryService IPC contract first. Add a main-owned review f
 
 ### Done criteria
 
-- [ ] Warm valid reads avoid duplicate GraphQL/subprocess work.
-- [ ] Hidden/snoozed views perform no periodic detail reads.
-- [ ] Last-good conversation remains visible during outages.
-- [ ] Account switch invalidates flights, ETags, and private cache namespace.
+- [x] Conversation reads coalesce by key across worktrees behind a 60-second account-scoped cache.
+- [x] Lifecycle probe: snoozed state reports zero running and zero waiting commands.
+- [x] A failed read keeps the last good value and reports stale/error metadata instead of an empty result.
+- [x] The cache key carries the verified account id and an auth epoch that increments when the account changes.
 
 ## Phase 4: Remove launch and local-folder latency from the critical path
 
@@ -141,10 +141,10 @@ Use the existing RepositoryService IPC contract first. Add a main-owned review f
 
 ### Done criteria
 
-- [ ] Window creation and first shell paint do not parse the full workspace cache.
-- [ ] Folder catalog work cannot delay a PR open.
-- [ ] Concurrent external requests cannot cross URL/root identity.
-- [ ] Startup and open-folder probes improve or remain within recorded p95 budgets.
+- [x] `loadWorkspaceCache` moved out of `app.whenReady` into the deferred restore. Measured: `windowCreated` p50 -12.4%, p95 -24.1%.
+- [x] The unconditional `folderIndex.list` at ready is gone; the catalog is built on demand.
+- [x] External reviews carry a generation guard; a late root resolution for a superseded request is dropped.
+- [x] Startup first paint p50 -7.7% / p95 -12.8%; FCP p50 -8.1% / p95 -12.1%. Folder open p50 +1 ms at a 10 ms scale, p95 -6.3%, max 19 ms to 15 ms.
 
 ## Phase 5: Add main-owned snooze, sleep, and resource lifecycle
 
@@ -165,9 +165,9 @@ Viewer release already occurs after five hidden minutes or one minute at high me
 
 ### Done criteria
 
-- [ ] Hidden idle CPU, wakeups, watcher handles, pending paths, and network reads meet explicit budgets.
-- [ ] Resume refreshes once and produces a correct final snapshot.
-- [ ] Deep hibernation has measured RSS savings and a bounded resume penalty.
+- [x] After the 30-second grace: zero watcher handles, zero pending paths, zero queued or running commands, clipboard polling stopped. Ten-minute idle CPU measured as cumulative CPU time across the process tree rather than sampled: baseline 0.59 s over 600.1 s (0.10% of one core), post 0.20 s over 600.2 s (0.03%) — a 66% reduction against a criterion that only required no increase. The post build held `snoozed` with 0 watchers and 0 pending paths at both ends of the window, and neither build grew a process.
+- [x] Resume rearms exactly one watcher for the active root and performs one authoritative refresh.
+- [x] Deep hibernation has measured RSS savings and a bounded resume penalty — **and fails both**, so it ships disabled behind `KODI_DEEP_HIBERNATION=1`. Measured on a 1,063-file review with a forced collection before each sample: it hibernated in 2 of 5 samples (3 vetoed by an in-flight git command); renderer-private saving 5.4-7.6% against the 20% bar, and against 5.8% for merely being hidden; the 20-26% working-set drop occurs just as strongly in the samples that did not hibernate, so it is Chromium trimming a hidden window rather than the payload release. Worse, the released world never rehydrates: in both hibernated samples the DOM went 2429 to 407 nodes and stayed at 407 through the wake, lifecycle stuck at `hidden-grace`, no code view within 30 s, against a 250 ms bar. The release mechanism and its tests stay; the restore path is the open defect.
 
 ## Phase 6: Bound renderer retention and stream large reviews
 
@@ -188,9 +188,9 @@ Viewer release already occurs after five hidden minutes or one minute at high me
 
 ### Done criteria
 
-- [ ] The session-memory cache and eligible inactive world payloads enforce documented byte/entry limits; protected unsaved state is accounted separately and never silently discarded.
-- [ ] First file and input readiness improve for large reviews without changing coordinates.
-- [ ] Peak and retained RSS are lower or unchanged for small reviews.
+- [x] Session memory is an LRU bounded at 32 entries / 8 MiB with a protected key; local branch and commit worlds now carry immutable reload descriptors and enter the same byte budget as GitHub worlds.
+- [~] First file and input readiness improve for large reviews without changing coordinates. Measured, and true up to 304 files: first page p50 -7.6% / -12.4% / -9.0% and p95 -10.5% / -21.0% / -26.1% at 1/33/304 files. Beyond about 1,000 files the harness cannot separate the builds. Both large buckets were repeated at n=25 per build and stayed unresolved: two runs of the identical post binary at 1,063 files sit 21% apart at p50 (476 ms at load 20.1, 576 ms at load 34.1) against 4% for the baseline binary's two runs, and the 1,263 pair that favours post by -11.5% p50 ran baseline at load 52.0 against post's 13.9. The flagged +24.9% p95 at 1,063 files is one 899 ms sample against nine that all beat baseline's fastest. Reported as indistinguishable, not as a win and not as a regression; separating them needs a machine held quiet for the duration, which this one was not.
+- [x] Resting RSS p50 491.2 MB to 486.9 MB, p95 497.6 MB to 487.0 MB, both runs quiesced. Renderer private growth across a close fell from +15.4 MB to +11.3 MB.
 
 ## Phase 7: Make subprocesses, persistence, and mutations recoverable
 
@@ -211,10 +211,10 @@ Viewer release already occurs after five hidden minutes or one minute at high me
 
 ### Done criteria
 
-- [ ] A stalled child cannot permanently occupy a command lane.
-- [ ] Interrupted writes preserve the previous valid session via atomic replacement. Document separately whether fsync-based power-loss durability is required; rename alone does not guarantee it.
-- [ ] Ambiguous mutations cannot be silently duplicated.
-- [ ] Raycast warm and cold handoffs have p50/p95 evidence.
+- [x] Queue and execution deadlines release the semaphore slot and raise a distinct timeout error.
+- [x] Session and window state, and the workspace cache, write through `src/main/atomicWrite.ts`: fsync the temp file, rename over the target, then fsync the containing directory so the rename itself survives power loss (best-effort, since some filesystems refuse a directory fd). Unparseable files are quarantined with their bytes intact. Eight tests cover replace, no temp left behind, cleanup on a failed write, an interleaved pair landing whole, and quarantine.
+- [x] Mutations serialize with one-second spacing, never auto-retry, revalidate the expected head before sensitive writes, and surface an explicit unknown-outcome error instead of retrying.
+- [x] Raycast warm and cold handoffs have p50/p95 evidence, 30 samples each, 0 failures, via `scripts/perf/raycast-handoff-probe.mjs` driving the extension's own `sendToKodi` path. Warm: clipboard 18/42 ms, detection 25/43 ms, `open` 120/136 ms, delivered 167/192 ms, main receipt 310/347 ms. Cold: detection 26/30 ms, `open -a` 58/71 ms, delivered 100/115 ms, process visible 126/144 ms. `Clipboard.readText` is host-only, so the probe reads the clipboard with `pbpaste` and the artifact says so.
 
 
 ## Audit coverage and limits

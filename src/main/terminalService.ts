@@ -33,6 +33,33 @@ const OMITTED_CHILD_ENVIRONMENT_KEYS = new Set([
   'NODE_CHANNEL_SERIALIZATION_MODE'
 ])
 
+/**
+ * POSIX locale names are `language[_REGION][.codeset][@modifier]`, plus the two
+ * bare names `C` and `POSIX`.
+ */
+const POSIX_LOCALE = /^[A-Za-z]{2,3}(_[A-Za-z0-9]{2,3})?(\.[A-Za-z0-9_-]+)?(@[A-Za-z0-9]+)?$/
+const LOCALE_KEYS = /^(LANG|LANGUAGE|LC_[A-Z_]+)$/
+
+/**
+ * What a shell can actually use for `value`, or null when nothing survives.
+ *
+ * macOS hands a GUI app its own locale identifier rather than a POSIX one —
+ * `en-US-u-ca-gregory-co-standard-cu-usd-fw-sun-hc-h12-ms-metric-tz-deber` — and
+ * a login shell greets every new terminal with
+ * `setlocale: LC_ALL: cannot change locale`. Keeping the language and region and
+ * dropping the Unicode extensions preserves the reader's own locale; a value
+ * with no region to recover is dropped so the shell falls back instead of
+ * inheriting something it has already rejected.
+ */
+export function posixLocaleValue(value: string): string | null {
+  const trimmed = value.trim()
+  if (trimmed === '') return null
+  if (trimmed === 'C' || trimmed === 'POSIX' || POSIX_LOCALE.test(trimmed)) return trimmed
+  const tag = /^([A-Za-z]{2,3})-(?:[A-Za-z]{4}-)?([A-Za-z]{2}|\d{3})\b/.exec(trimmed)
+  if (tag == null) return null
+  return `${tag[1]!.toLowerCase()}_${tag[2]!.toUpperCase()}.UTF-8`
+}
+
 export interface TerminalOwner {
   readonly id: number
   isDestroyed(): boolean
@@ -114,9 +141,13 @@ export function createTerminalEnvironment(
 ): Record<string, string> {
   const environment: Record<string, string> = {}
   for (const [key, value] of Object.entries(source)) {
-    if (typeof value === 'string' && !OMITTED_CHILD_ENVIRONMENT_KEYS.has(key)) {
-      environment[key] = value
+    if (typeof value !== 'string' || OMITTED_CHILD_ENVIRONMENT_KEYS.has(key)) continue
+    if (LOCALE_KEYS.test(key)) {
+      const locale = posixLocaleValue(value)
+      if (locale != null) environment[key] = locale
+      continue
     }
+    environment[key] = value
   }
   environment.COLORTERM = 'truecolor'
   environment.TERM = 'xterm-256color'
@@ -231,6 +262,11 @@ export class TerminalService {
 
   killAll(): void {
     for (const session of this.sessions.values()) this.disposeSession(session, true)
+  }
+
+  /** Live shells, which a hibernating window must never destroy. */
+  get sessionCount(): number {
+    return this.sessions.size
   }
 
   private bindOwner(owner: TerminalOwner): void {

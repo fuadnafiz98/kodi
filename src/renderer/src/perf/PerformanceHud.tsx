@@ -1,8 +1,13 @@
-import { lazy, memo, Suspense, useCallback, useRef, useState } from 'react'
+import { lazy, memo, Suspense, useCallback, useRef, useState, useSyncExternalStore } from 'react'
 import { IconCiWarningFill } from '@pierre/icons'
 import './PerformanceHud.css'
 
-import { formatPerformanceMemory, formatPerformancePercent, getMemorySamples } from './performanceHistory'
+import {
+  formatPerformanceMemory,
+  formatPerformancePercent,
+  getMemorySamples,
+  subscribeMemorySamples
+} from './performanceHistory'
 import { isHighMemory } from './performanceHealth'
 import { PerformanceDiagnostics } from './PerformanceDiagnostics'
 import {
@@ -25,7 +30,10 @@ const sampledTimeFormatter = new Intl.DateTimeFormat(undefined, {
 })
 
 export const PerformanceHud = memo(function PerformanceHud(): React.JSX.Element {
-  const history = getMemorySamples()
+  // Each recorded sample publishes a new array, so this re-renders exactly when
+  // the history actually changes and the chart's memo sees a reference it cannot
+  // mistake for the old one.
+  const history = useSyncExternalStore(subscribeMemorySamples, getMemorySamples, getMemorySamples)
   const [popoverOpen, setPopoverOpen] = useState(false)
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false)
   // Nothing is sampled until someone asks for the numbers, so a launch spends no
@@ -85,7 +93,7 @@ export const PerformanceHud = memo(function PerformanceHud(): React.JSX.Element 
           </dl>
 
           {popoverOpen ? <Suspense fallback={null}>
-            <PerformanceChart history={history} historyVersion={metrics?.sampledAt} />
+            <PerformanceChart history={history} />
           </Suspense> : null}
 
           <details className="performance-diagnostics" onToggle={(event) => setDiagnosticsOpen(event.currentTarget.open)}>

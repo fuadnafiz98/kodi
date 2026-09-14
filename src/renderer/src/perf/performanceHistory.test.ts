@@ -8,6 +8,7 @@ import {
   formatSpan,
   formatTrendPerHour,
   getMemorySamples,
+  subscribeMemorySamples,
   memoryTrendPerHour,
   recordMemorySample,
   type MemorySample
@@ -127,6 +128,32 @@ describe('interpolateChartY', () => {
 })
 
 describe('recordMemorySample', () => {
+  it('publishes a new array per sample so a memo cannot reuse a stale chart', () => {
+    // The React Compiler memoizes on the values a component reads. When history
+    // was one array mutated in place, the chart kept its first geometry forever:
+    // it drew two points and never a third. Identity has to change with content.
+    const first = recordMemorySample({ atMs: 1_000, workingSetMegabytes: 500, rendererPrivateMegabytes: 250 })
+    const second = recordMemorySample({ atMs: 2_000, workingSetMegabytes: 510, rendererPrivateMegabytes: 255 })
+    expect(second).not.toBe(first)
+    expect(first).toHaveLength(1)
+    expect(second).toHaveLength(2)
+    expect(getMemorySamples()).toBe(second)
+  })
+
+  it('tells subscribers when the history moves, and stops when they leave', () => {
+    let notifications = 0
+    const unsubscribe = subscribeMemorySamples(() => { notifications += 1 })
+    recordMemorySample({ atMs: 1_000, workingSetMegabytes: 500, rendererPrivateMegabytes: 250 })
+    recordMemorySample({ atMs: 2_000, workingSetMegabytes: 505, rendererPrivateMegabytes: 252 })
+    expect(notifications).toBe(2)
+    // A sample that is not newer changes nothing, so it announces nothing.
+    recordMemorySample({ atMs: 2_000, workingSetMegabytes: 900, rendererPrivateMegabytes: 400 })
+    expect(notifications).toBe(2)
+    unsubscribe()
+    recordMemorySample({ atMs: 3_000, workingSetMegabytes: 510, rendererPrivateMegabytes: 255 })
+    expect(notifications).toBe(2)
+  })
+
   it('keeps a rolling recent history', () => {
     for (const sample of series(1_300, 100, 1)) recordMemorySample(sample)
     const history = getMemorySamples()

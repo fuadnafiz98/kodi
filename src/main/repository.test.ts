@@ -42,6 +42,7 @@ import {
   pullRequestInboxVariables,
   pullRequestReviewLane,
   pullRequestReviewReply,
+  pullRequestSnapshotIdentity,
   pullRequestFilePageWave,
   pullRequestTargetsRemotes,
   replaceStatusEntry,
@@ -1112,6 +1113,22 @@ describe('PullRequestReviewCache', () => {
     }
   })
 
+  it('misses when the base is retargeted without moving the head', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'kodi-pr-cache-retarget-'))
+    try {
+      const cache = new PullRequestReviewCache(join(directory, 'pr-cache'))
+      const original = review()
+      await cache.write(original.pullRequest.url, original.headOid, original)
+      const retargeted = review({
+        baseOid: 'base-oid-2',
+        pullRequest: { ...original.pullRequest, baseRefName: 'release' }
+      })
+      expect(await cache.read(original.pullRequest.url, pullRequestSnapshotIdentity(retargeted))).toBeNull()
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
   it('treats a corrupt entry as a miss and never writes an empty review', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'kodi-pr-cache-bad-'))
     try {
@@ -1141,7 +1158,12 @@ describe('PullRequestReviewCache', () => {
       const cacheDirectory = join(directory, 'pr-cache')
       const cache = new PullRequestReviewCache(cacheDirectory)
       for (let index = 1; index <= 64; index += 1) {
-        await cache.write(`https://github.com/acme/app/pull/${index}`, `oid-${index}`, review())
+        const url = `https://github.com/acme/app/pull/${index}`
+        await cache.write(url, `oid-${index}`, review({
+          headOid: `oid-${index}`,
+          commitId: `oid-${index}`,
+          pullRequest: { ...review().pullRequest, number: index, url }
+        }))
       }
       await writeFile(join(cacheDirectory, 'orphan.patch'), 'orphan', 'utf8')
       await cache.sweep()

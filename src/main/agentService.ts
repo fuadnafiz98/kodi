@@ -428,6 +428,11 @@ export class AgentService {
     child.close()
   }
 
+  /** Turns and approvals still in flight; hibernation waits for all of them. */
+  get busyCount(): number {
+    return this.#active.size + this.#codexRequests.size + this.#pendingApprovals.size
+  }
+
   cancelAll(): void {
     for (const id of this.#active.keys()) this.cancel(id)
     this.#codexRequests.clear()

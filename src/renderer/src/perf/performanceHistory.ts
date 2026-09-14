@@ -20,27 +20,49 @@ const TREND_WINDOW_MS = 1_200_000
 
 // Module state, not component state: the HUD remounts with the titlebar and the
 // history is about the session, not the widget.
-const samples: MemorySample[] = []
+//
+// Every write replaces the array instead of mutating it, and that is load-bearing
+// rather than a style choice. The React Compiler memoizes on the values a
+// component actually reads, so a component handed the same array reference keeps
+// its cached derivation no matter what a version counter alongside it says — the
+// chart drew its first two samples and then never redrew. A new reference per
+// write is the only signal the compiler cannot miss.
+let samples: readonly MemorySample[] = []
+const listeners = new Set<() => void>()
+
+function publish(next: readonly MemorySample[]): readonly MemorySample[] {
+  samples = next
+  for (const listener of listeners) listener()
+  return samples
+}
 
 export function recordMemorySample(sample: MemorySample): readonly MemorySample[] {
   const previous = samples[samples.length - 1]
   if (previous != null && sample.atMs <= previous.atMs) return samples
-  if (previous != null && sample.atMs - previous.atMs > HISTORY_GAP_RESET_MS) {
-    samples.length = 0
-  }
-  samples.push(sample)
-  const firstRecentIndex = samples.findIndex((entry) => entry.atMs >= sample.atMs - HISTORY_WINDOW_MS)
-  if (firstRecentIndex > 0) samples.splice(0, firstRecentIndex)
-  if (samples.length > MAX_SAMPLES) samples.splice(0, samples.length - MAX_SAMPLES)
-  return samples
+  // A long gap means the app was not sampling, and a line drawn across it would
+  // claim measurements that were never taken. Start a new series instead.
+  const carried = previous != null && sample.atMs - previous.atMs > HISTORY_GAP_RESET_MS
+    ? []
+    : samples
+  const appended = [...carried, sample]
+  const firstRecentIndex = appended.findIndex((entry) => entry.atMs >= sample.atMs - HISTORY_WINDOW_MS)
+  const windowed = firstRecentIndex > 0 ? appended.slice(firstRecentIndex) : appended
+  return publish(windowed.length > MAX_SAMPLES ? windowed.slice(windowed.length - MAX_SAMPLES) : windowed)
 }
 
 export function getMemorySamples(): readonly MemorySample[] {
   return samples
 }
 
+export function subscribeMemorySamples(listener: () => void): () => void {
+  listeners.add(listener)
+  return () => {
+    listeners.delete(listener)
+  }
+}
+
 export function clearMemorySamples(): void {
-  samples.length = 0
+  publish([])
 }
 
 /**

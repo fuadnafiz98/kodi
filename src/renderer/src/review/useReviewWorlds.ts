@@ -136,6 +136,7 @@ type WorldRegistryAction =
       loadStatus: PatchWorld['loadStatus']
       errorMessage?: string | null
     }
+  | { type: 'hibernate' }
   | { type: 'focus'; worldId: string }
   | { type: 'close'; worldId: string; nextWorld: ReviewWorld }
 
@@ -313,6 +314,51 @@ export function reviewPayloadBytes(
     + cachedGraphBytes
 }
 
+/**
+ * The released form of a world: payload gone, identity and reload descriptor
+ * kept. Both the byte evictor and hibernation produce exactly this, so a world
+ * released either way restores through the same path.
+ */
+function releasedWorld(world: PatchWorld | SinceWorld): PatchWorld | SinceWorld {
+  return world.source === 'patch'
+    ? {
+        ...world,
+        loadStatus: 'released',
+        requestId: null,
+        patchPages: [],
+        patchLength: 0,
+        review: { ...world.review, files: [], patch: '', omittedFiles: [] }
+      }
+    : {
+        ...world,
+        loadStatus: 'released',
+        patchPages: [],
+        patchLength: 0,
+        review: { ...world.review, files: [], patch: '', omittedFiles: [] }
+      }
+}
+
+/**
+ * Deep hibernation: release every review payload the app is holding, the
+ * focused one included, because a snoozed window is not showing any of them.
+ * A world still streaming is left alone — it has no descriptor to restore from
+ * mid-flight — and so is anything already released.
+ *
+ * Callers are responsible for the safety gate. This function knows nothing
+ * about unsaved edits, terminal jobs or agent turns; it must not be reached
+ * while any of them are live.
+ */
+export function hibernateWorldPayloads(state: WorldRegistryState): WorldRegistryState {
+  let changed = false
+  const worlds = state.worlds.map((world) => {
+    if (world.source !== 'patch' && world.source !== 'since') return world
+    if (world.loadStatus !== 'ready') return world
+    changed = true
+    return releasedWorld(world)
+  })
+  return changed ? { ...state, worlds } : state
+}
+
 export function boundInactivePatchPayloads(
   state: WorldRegistryState,
   maxBytes = MAX_INACTIVE_PATCH_BYTES,
@@ -325,12 +371,9 @@ export function boundInactivePatchPayloads(
     const world = worlds[index]
     if (world == null || (world.source !== 'patch' && world.source !== 'since')
       || world.worldId === state.activeWorldId
-      // Only GitHub worlds have a reload-on-focus path today, so local
-      // branch-compare / commit-review tabs are left unbounded (known gap).
-      // Loading worlds are also skipped: they have no restore path yet, and
+      // Loading worlds are skipped: they have no restore path yet, and
       // charging them would evict a stream that cannot be rebuilt mid-flight.
       // A skipped world is neither evicted nor added to retainedBytes.
-      || (world.source === 'patch' && world.review.kind !== 'github')
       || world.loadStatus === 'loading'
       || world.loadStatus === 'released') continue
     const payloadBytes = reviewPayloadBytes(world, cachedGraphBytes(world.worldId))
@@ -339,22 +382,7 @@ export function boundInactivePatchPayloads(
       continue
     }
     changed = true
-    worlds[index] = world.source === 'patch'
-      ? {
-          ...world,
-          loadStatus: 'released',
-          requestId: null,
-          patchPages: [],
-          patchLength: 0,
-          review: { ...world.review, files: [], patch: '', omittedFiles: [] }
-        }
-      : {
-          ...world,
-          loadStatus: 'released',
-          patchPages: [],
-          patchLength: 0,
-          review: { ...world.review, files: [], patch: '', omittedFiles: [] }
-        }
+    worlds[index] = releasedWorld(world)
   }
   return changed ? { ...state, worlds } : state
 }
@@ -382,6 +410,7 @@ export function reduceWorldRegistry(
   action: WorldRegistryAction
 ): WorldRegistryState {
   if (action.type === 'reset') return { worlds: [action.world], activeWorldId: action.world.worldId }
+  if (action.type === 'hibernate') return hibernateWorldPayloads(state)
   if (action.type === 'new-tab') {
     return { worlds: [...state.worlds, action.world], activeWorldId: action.world.worldId }
   }
@@ -747,6 +776,18 @@ export function useReviewWorlds({
     return worldId
   }, [dispatch, onActivateSnapshot, restoreNavigation, saveActiveNavigation])
 
+  // Deep hibernation is driven from main, which owns the snooze clock. The
+  // caller must have checked that nothing unsaved or in flight would be lost;
+  // this only reports whether there was anything left to release.
+  const hibernateWorlds = useCallback((): boolean => {
+    const releasable = stateRef.current.worlds.some((world) =>
+      (world.source === 'patch' || world.source === 'since') && world.loadStatus === 'ready')
+    if (!releasable) return false
+    saveActiveNavigation()
+    dispatch({ type: 'hibernate' })
+    return true
+  }, [dispatch, saveActiveNavigation])
+
   const focusDesk = useCallback((path: string | null, view: WorkspaceView) => {
     const root = snapshot?.root
     const desk = stateRef.current.worlds.find((world) => world.source === 'desk' && world.root === root)
@@ -953,6 +994,7 @@ export function useReviewWorlds({
     initialReviewScrollTop: activeNavigation?.reviewScrollTop ?? 0,
     focusWorld,
     focusDesk,
+    hibernateWorlds,
     openNewWorld,
     updateNewWorldLocator,
     updateNewWorldRepositoryRoot,
@@ -977,7 +1019,8 @@ export function useReviewWorlds({
     syncRepositorySnapshot,
     reset
   }), [activeNavigation?.reviewScrollTop, activeReview, activeWorld, appendPatchPage, closeWorld,
-    cycleWorld, focusDesk, focusWorld, openDeskWorld, openNewWorld, openPatchWorld, openSinceWorld,
+    cycleWorld, focusDesk, focusWorld, hibernateWorlds, openDeskWorld, openNewWorld, openPatchWorld,
+    openSinceWorld,
     hasRepositoryRoot, hasWorld, isWorldActive, rememberReviewScroll, replacePatchHead,
     replacePatchReview, reset,
     restoreSincePatch,

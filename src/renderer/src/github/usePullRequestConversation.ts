@@ -38,6 +38,7 @@ export function sameConversation(
 ): boolean {
   if (current == null) return false
   if (current.available !== next.available || current.message !== next.message) return false
+  if (current.complete !== next.complete || current.stale !== next.stale || current.partialError !== next.partialError) return false
   if (current.body !== next.body) return false
   if (current.threads.length !== next.threads.length) return false
   if (current.reviews.length !== next.reviews.length) return false
@@ -45,6 +46,8 @@ export function sameConversation(
     const currentThread = current.threads[index]!
     const nextThread = next.threads[index]!
     if (currentThread.id !== nextThread.id) return false
+    if (currentThread.path !== nextThread.path || currentThread.startLine !== nextThread.startLine) return false
+    if (currentThread.side !== nextThread.side) return false
     if (currentThread.resolved !== nextThread.resolved) return false
     if (currentThread.outdated !== nextThread.outdated) return false
     if (currentThread.line !== nextThread.line) return false
@@ -55,6 +58,7 @@ export function sameConversation(
       if (currentComment.id !== nextComment.id || currentComment.body !== nextComment.body) return false
       if (currentComment.authorLogin !== nextComment.authorLogin) return false
       if (currentComment.authorAvatarUrl !== nextComment.authorAvatarUrl) return false
+      if (currentComment.createdAt !== nextComment.createdAt) return false
     }
   }
   for (let index = 0; index < current.reviews.length; index += 1) {

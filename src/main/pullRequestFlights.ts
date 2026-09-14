@@ -65,7 +65,7 @@ export class PullRequestReviewFlight {
   #listeners = new Set<PullRequestProgressListener>()
   #metadata: PullRequestReviewProgress | null = null
   #pages: PullRequestReviewProgress[] = []
-  #replace: PullRequestReviewProgress | null = null
+  #revisionAvailable: PullRequestReviewProgress | null = null
   #checks: PullRequestReviewProgress | null = null
   #done: PullRequestReviewProgress | null = null
   #streamed = false
@@ -138,10 +138,8 @@ export class PullRequestReviewFlight {
   replay(): PullRequestReviewProgress[] {
     const events: PullRequestReviewProgress[] = []
     if (this.#metadata != null) events.push(this.#metadata)
-    // A replacement supersedes every page that preceded it, so a joiner is told
-    // the current review once instead of a stale stream and then a correction.
-    if (this.#replace != null) events.push(this.#replace)
-    else events.push(...this.#pages)
+    events.push(...this.#pages)
+    if (this.#revisionAvailable != null) events.push(this.#revisionAvailable)
     if (this.#checks != null) events.push(this.#checks)
     if (this.#done != null) events.push(this.#done)
     return events
@@ -157,10 +155,8 @@ export class PullRequestReviewFlight {
       this.#streamed = true
       return
     }
-    if (progress.kind === 'replace') {
-      this.#pages = []
-      this.#replace = progress
-      this.#streamed = true
+    if (progress.kind === 'revisionAvailable') {
+      this.#revisionAvailable = progress
       return
     }
     if (progress.kind === 'checks') {

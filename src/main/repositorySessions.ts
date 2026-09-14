@@ -49,6 +49,16 @@ export class RepositorySessionRegistry {
     return [...this.#sessions.keys()]
   }
 
+  resourceStats(): { watcherCount: number; pendingWatcherPaths: number } {
+    let watcherCount = 0
+    let pendingWatcherPaths = 0
+    for (const { watcher } of this.#sessions.values()) {
+      watcherCount += watcher.handleCount
+      pendingWatcherPaths += watcher.pendingPathCount
+    }
+    return { watcherCount, pendingWatcherPaths }
+  }
+
   getActiveSnapshot(): RepositorySnapshot | null {
     return this.#activeRoot == null
       ? null
@@ -187,8 +197,21 @@ export class RepositorySessionRegistry {
   }
 
   setSuspended(suspended: boolean): void {
+    if (this.#suspended === suspended) return
     this.#suspended = suspended
-    for (const { watcher } of this.#sessions.values()) watcher.setSuspended(suspended)
+    if (suspended) {
+      for (const { watcher } of this.#sessions.values()) {
+        watcher.setSuspended(true)
+        watcher.pause()
+      }
+      return
+    }
+    // A paused watcher deliberately records no unbounded path list. One full
+    // refresh is the authoritative dirty flag, and only the visible root is
+    // rearmed. Background roots remain parked until the user selects them.
+    const active = this.#activeRoot == null ? null : this.#sessions.get(this.#activeRoot)
+    for (const { watcher } of this.#sessions.values()) watcher.setSuspended(false)
+    if (active != null && active.watcher.resume()) void this.#refreshAndPublish(active)
   }
 
   stopAll(): void {

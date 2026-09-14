@@ -8,6 +8,7 @@ import {
   createPatchWorld,
   createSinceWorld,
   findCollisionPaths,
+  hibernateWorldPayloads,
   initialWorldRegistry,
   newWorldHoldsReview,
   reduceWorldRegistry,
@@ -258,6 +259,38 @@ test('inactive GitHub patch payloads are released when they exceed the memory bu
   expect(state.worlds[1]).toBe(second)
 })
 
+test('hibernation releases the focused world too, keeping its reload descriptor', () => {
+  const first = createPatchWorld(snapshot(), { ...review(1), patch: 'a'.repeat(100) }, 1, 'ready')
+  const second = createPatchWorld(snapshot(), { ...review(2), patch: 'b'.repeat(100) }, 2, 'ready')
+  const state = hibernateWorldPayloads({ worlds: [first, second], activeWorldId: second.worldId })
+
+  for (const world of state.worlds) {
+    expect(world.source === 'patch' ? world.loadStatus : null).toBe('released')
+    expect(world.source === 'patch' ? world.review.patch : null).toBe('')
+    expect(world.source === 'patch' ? world.patchLength : null).toBe(0)
+  }
+  // The identity a released world restores from has to survive the release.
+  const focused = state.worlds[1]
+  expect(focused?.source === 'patch' ? focused.review.baseOid : null).toBe(second.review.baseOid)
+  expect(focused?.source === 'patch' ? focused.review.headOid : null).toBe(second.review.headOid)
+  expect(state.activeWorldId).toBe(second.worldId)
+})
+
+test('hibernation leaves a streaming world alone', () => {
+  const streaming = createPatchWorld(snapshot(), { ...review(1), patch: 'a'.repeat(100) }, 1, 'loading')
+  const ready = createPatchWorld(snapshot(), { ...review(2), patch: 'b'.repeat(100) }, 2, 'ready')
+  const state = hibernateWorldPayloads({ worlds: [streaming, ready], activeWorldId: ready.worldId })
+
+  expect(state.worlds[0]).toBe(streaming)
+  expect(state.worlds[1]?.source === 'patch' ? state.worlds[1].loadStatus : null).toBe('released')
+})
+
+test('hibernation with nothing releasable returns the same state', () => {
+  const released = createPatchWorld(snapshot(), review(1), 1, 'ready')
+  const hibernated = hibernateWorldPayloads({ worlds: [released], activeWorldId: released.worldId })
+  expect(hibernateWorldPayloads(hibernated)).toBe(hibernated)
+})
+
 test('inactive Since worlds are released and can restore their filtered pages', () => {
   const parent = createPatchWorld(snapshot(), review(), 1, 'ready')
   const checkpoint = {
@@ -373,7 +406,7 @@ test('a retained parsed graph can evict an inactive world the patch text alone w
   expect(state.worlds[1]).toBe(second)
 })
 
-test('local branch-compare and loading GitHub worlds stay outside the budget', () => {
+test('local branch-compare payloads are bounded while loading worlds stay protected', () => {
   const localReview: LocalBranchReview = {
     kind: 'local',
     id: 'main...feature',
@@ -395,7 +428,7 @@ test('local branch-compare and loading GitHub worlds stay outside the budget', (
     activeWorldId: active.worldId
   }, 1)
 
-  expect(state.worlds[0]).toBe(local)
+  expect(state.worlds[0]?.source === 'patch' ? state.worlds[0].loadStatus : null).toBe('released')
   expect(state.worlds[1]).toBe(loading)
   expect(state.worlds[2]).toBe(active)
 })

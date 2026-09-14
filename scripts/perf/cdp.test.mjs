@@ -57,12 +57,18 @@ describe('round', () => {
 
 describe('statistics', () => {
   test('reports the median and the best sample, in whole milliseconds', () => {
-    expect(statistics([284.4, 181.2, 174.6])).toEqual({ samples: 3, median: 181, min: 175, max: 284 })
+    expect(statistics([284.4, 181.2, 174.6])).toEqual({
+      samples: 3, failures: 0, p50: 181, p95: 284, median: 181, min: 175, max: 284
+    })
   })
 
   test('ignores the samples that never measured anything', () => {
-    expect(statistics([null, 12, undefined, Number.NaN])).toEqual({ samples: 1, median: 12, min: 12, max: 12 })
-    expect(statistics([])).toEqual({ samples: 0, median: null, min: null, max: null })
+    expect(statistics([null, 12, undefined, Number.NaN])).toEqual({
+      samples: 1, failures: 3, p50: 12, p95: 12, median: 12, min: 12, max: 12
+    })
+    expect(statistics([])).toEqual({
+      samples: 0, failures: 0, p50: null, p95: null, median: null, min: null, max: null
+    })
   })
 })
 
@@ -75,8 +81,10 @@ describe('summaryLine', () => {
       probe: 'startup',
       label: 'after',
       metrics: {
-        fcpMs: { samples: 3, median: 181, min: 174, max: 284 },
-        restoreSettled: { samples: 0, median: null, min: null, max: null }
+        fcpMs: { samples: 3, failures: 0, p50: 181, p95: 284, median: 181, min: 174, max: 284 },
+        restoreSettled: {
+          samples: 0, failures: 0, p50: null, p95: null, median: null, min: null, max: null
+        }
       }
     })
   })

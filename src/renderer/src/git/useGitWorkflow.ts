@@ -103,10 +103,6 @@ async function fetchPullRequestPatch(root: string, url: string): Promise<PullReq
       omittedFiles.push(...progress.omittedFiles)
       return
     }
-    if (progress.kind !== 'replace') return
-    pages = progress.review.patch === '' ? [] : [progress.review.patch]
-    files = [...progress.review.files]
-    omittedFiles = [...progress.review.omittedFiles]
   })
   try {
     const review = await requireRepositoryApi().getPullRequestReview(root, url, requestId)
@@ -177,13 +173,13 @@ export function useGitWorkflow({
     hasRepositoryRoot,
     hasWorld,
     initialReviewScrollTop,
+    hibernateWorlds,
     isWorldActive,
     openDeskWorld,
     openNewWorld,
     openPatchWorld,
     openSinceWorld,
     rememberReviewScroll,
-    replacePatchHead,
     replacePatchReview,
     reset: resetReviewWorlds,
     restoreSincePatch,
@@ -470,16 +466,8 @@ export function useGitWorkflow({
         setPatchChecks(worldId, generation, progress.checks, progress.mergeable)
         return
       }
-      if (progress.kind === 'replace') {
-        // The review opened from disk and the head has since moved. What arrives
-        // here is the whole pull request again at its new commits, so it supersedes
-        // every page as well as the oids the tab was opened at.
-        replacePatchHead(worldId, generation, {
-          ...progress.review,
-          expectedFileCount: progress.review.files.length
-        })
-        const replacedPath = progress.review.files[0]?.path
-        if (replacedPath != null) selectInitialPath(worldId, replacedPath)
+      if (progress.kind === 'revisionAvailable') {
+        setSubmissionMessage('A newer pull request revision is available. Reopen the review to load it.')
         return
       }
       appendPatchPage(worldId, generation, progress)
@@ -554,7 +542,7 @@ export function useGitWorkflow({
       reviewRequestsRef.current.delete(requestId)
       setActionKey((current) => current === `review:${selector}` ? null : current)
     }
-  }, [activeReviewWorld, appendPatchPage, onError, openPatchWorld, replacePatchHead,
+  }, [activeReviewWorld, appendPatchPage, onError, openPatchWorld,
     replacePatchReview, selectInitialPath, setPatchChecks, setPatchExpectedFileCount,
     setPatchLoadStatus, snapshot])
 
@@ -617,8 +605,24 @@ export function useGitWorkflow({
     if (world == null || world.source === 'new' || world.source === 'desk'
       || world.loadStatus !== 'released' || restoringWorldsRef.current.has(world.worldId)) return
     if (world.source === 'patch') {
-      if (world.review.kind !== 'github') return
       restoringWorldsRef.current.add(world.worldId)
+      if (world.review.kind === 'local') {
+        const saved = world.review
+        const load = saved.id.startsWith('commit:')
+          ? requireRepositoryApi().getCommitReview(saved.headOid)
+          : requireRepositoryApi().getLocalSnapshotReview(
+              saved.baseOid,
+              saved.headOid,
+              saved.baseRefName,
+              saved.headRefName
+            )
+        void load.then((review) => {
+          replacePatchReview(world.worldId, world.generation, review)
+          setPatchLoadStatus(world.worldId, world.generation, 'ready')
+        }).catch((error: unknown) => onError(getErrorMessage(error)))
+          .finally(() => restoringWorldsRef.current.delete(world.worldId))
+        return
+      }
       void openPullRequestReview(world.review.pullRequest.url, world.snapshot, world.worldId)
         .finally(() => restoringWorldsRef.current.delete(world.worldId))
       return
@@ -656,7 +660,8 @@ export function useGitWorkflow({
         restoringWorldsRef.current.delete(world.worldId)
       }
     })()
-  }, [onError, openPullRequestReview, restoreSincePatch, reviewWorldList])
+  }, [onError, openPullRequestReview, replacePatchReview, restoreSincePatch, reviewWorldList,
+    setPatchLoadStatus])
 
   const focusWorld = useCallback(async (worldId: string): Promise<boolean> => {
     const world = reviewWorldList.find((candidate) => candidate.worldId === worldId)
@@ -957,7 +962,16 @@ export function useGitWorkflow({
     void loadInbox()
   }, [branch, head, loadInbox, loadIntegration, panelOpen])
 
+  // A review still streaming has no descriptor to restore from, so hibernating
+  // mid-flight would lose the stream rather than release a payload.
+  const hibernateReviews = useCallback((): string | null => {
+    if (reviewRequestsRef.current.size > 0) return 'a review is still loading'
+    hibernateWorlds()
+    return null
+  }, [hibernateWorlds])
+
   return useMemo(() => ({
+    hibernateReviews,
     panelOpen,
     panelTab,
     setPanelOpen,
@@ -1016,6 +1030,7 @@ export function useGitWorkflow({
     actionKey,
     activeReviewWorld,
     cycleWorld,
+    hibernateReviews,
     focusWorld,
     initialReviewScrollTop,
     openDeskWorld,

@@ -8,16 +8,51 @@ repo alone changes nothing they can see.
 Every probe quits Kodi before it starts and again when it finishes, including
 on Ctrl+C, so none of them leaves a window behind.
 
+The scenario catalog is `fixtures.json`. Set `KODI_PERF_FIXTURE` and
+`KODI_PERF_CACHE_STATE` for every recorded run. Each JSONL record includes a
+UUID run ID, clock origins, machine RAM, architecture, fixture ID, and cache
+state. `PERF` summaries report p50, p95, maximum, and missing-sample failures.
+Use two unrecorded warmups before the 30 recorded samples. A p95 from fewer
+than 30 samples is provisional.
+
 ```bash
 bun run perf:startup-probe before      # cold launch + first Cmd+P
 bun run perf:open-folder-probe before  # Cmd+O -> Enter -> usable tree
 bun run perf:pr-open-probe before      # kodi://review deep link, warm and cold
+bun run perf:memory-probe before       # resting RSS of the tree + retained after close
+bun run perf:lifecycle-probe           # hidden-idle snooze budget and resume
 ```
+
+`bun run perf:matrix <label>` runs all of those in one recorded pass (two
+warmups, then 30 samples each) and writes `<label>.jsonl`,
+`<label>-folder.jsonl`, `<label>-memory.txt` and `<label>-lifecycle.json`.
+`bun scripts/perf/compare.mjs <before> <after>` prints p50/p95/max per metric
+from the raw samples of two such labels, with sample and missing-sample counts
+beside every number.
+
+`memory-probe` refuses to guess between Kodi instances: it launches the app
+itself, resolves the single root PID, and hands it to `benchmark-memory.sh`,
+which waits for the process tree to go quiet before it samples and prints
+`quiesced=true|false`. Two memory runs are comparable only when both quiesced —
+a tree still spawning `git` measures the open, not the resting cost. The probe
+then closes every review world and re-reads the counters, so memory that a
+closed review still retains shows up as an `after-close` row.
+
+`lifecycle-probe` drives the snooze contract end to end: hide, wait past the
+30-second grace, then assert the snoozed state has zero watcher handles, zero
+pending paths and idle command lanes, and that resume rearms exactly one
+watcher. Resume goes through a second launch of the app binary, because the
+single-instance lock turns that into the same reveal a user gets from Raycast
+or `kodi .`. It exits non-zero when any of those checks fail.
 
 Prefix a probe with `KODI_PROBE_HIDDEN=1` to run it with the window never
 shown — nothing appears on screen, nothing takes focus, no dock bounce. The
 app binary is exec'd directly with `KODI_PROBE=1`, the session still restores,
 and `windowShown` reports null because `window.show()` genuinely never ran.
+
+For lifecycle checks, also set `KODI_PROBE_LIFECYCLE=1`. This preserves normal
+Chromium background throttling and applies a 1440×920 CDP viewport before
+virtualized-list assertions.
 
 `theme-screenshots.mjs` is the visual counterpart rather than a perf probe: it
 cycles all sixteen editor themes, captures a PNG of the restored workspace for
@@ -43,6 +78,9 @@ so `before` and `after` runs stay side by side. Every probe also prints one
 | --- | --- | --- |
 | `KODI_APP` | `~/Applications/Kodi.app` | all |
 | `KODI_PERF_RESULTS_DIR` | `scripts/perf/results` | all |
+| `KODI_PERF_RUN_ID` | random UUID | all |
+| `KODI_PERF_FIXTURE` | `restored-session` | all |
+| `KODI_PERF_CACHE_STATE` | `os-page-cache-warm` | all |
 | `SAMPLES` | `3` | startup |
 | `TIMEOUT_MS` | `20000` | startup |
 | `QUERY` | `app` | startup (what to type into the palette) |

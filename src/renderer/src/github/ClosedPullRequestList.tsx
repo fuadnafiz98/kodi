@@ -1,4 +1,4 @@
-import { IconRefresh } from '@pierre/icons'
+import { IconChevronSm, IconRefresh } from '@pierre/icons'
 
 import type { PullRequestMergeStrategy, PullRequestSummary } from '../../../shared/contracts'
 import { PullRequestRow } from './PullRequestRow'
@@ -25,14 +25,21 @@ export function ClosedPullRequestList({
 }: ClosedPullRequestListProps): React.JSX.Element {
   return (
     <div className="pr-inbox" aria-label="Closed pull requests">
-      <div className="pr-inbox-heading">
+      {/* The heading is the control. A section that opens does not need a label
+          and a separate button beside it: one quiet row reads as a sibling of
+          the inbox heading above, where a bordered control read as a stray
+          form field parked over empty space. */}
+      <button
+        type="button"
+        className="pr-inbox-heading pr-inbox-disclosure"
+        aria-expanded={closed.shown}
+        onClick={closed.toggle}
+      >
+        <IconChevronSm className="pr-inbox-disclosure-chevron" aria-hidden="true" />
         <strong>Closed and merged</strong>
         {closed.pullRequests == null ? null : <span>{closed.pullRequests.length}</span>}
         {closed.loading ? <IconRefresh className="spin" /> : null}
-        <button type="button" onClick={closed.toggle} aria-expanded={closed.shown}>
-          {closed.shown ? 'Hide' : 'Show closed'}
-        </button>
-      </div>
+      </button>
       <ClosedPullRequestBody
         closed={closed}
         actionKey={actionKey}

@@ -24,7 +24,7 @@ import {
   retainReviewItems
 } from './reviewItems'
 import type { FileComparison, FileImagePreview } from '../../../shared/contracts'
-import { agentSelectionForReviewItem, reviewScrollAnchorTarget } from './MultiFileReview'
+import { agentSelectionForReviewItem, markdownPreviewScrollAnchor, reviewScrollAnchorTarget } from './MultiFileReview'
 import type { ReviewAnnotationMetadata, ReviewThread } from './ReviewComments'
 import type { RemoteReviewThread } from '../../../shared/contracts'
 
@@ -293,6 +293,22 @@ describe('multi-file review items', () => {
   test('keeps a background refresh anchor at the same viewport offset', () => {
     expect(reviewScrollAnchorTarget({ itemId: 'review:file.ts', viewportOffset: -240 }, 1_840)).toBe(2_080)
     expect(reviewScrollAnchorTarget({ itemId: 'review:file.ts', viewportOffset: 80 }, 40)).toBe(0)
+  })
+
+  test('lands a markdown preview toggle on the toggled file, not where the diff used to be', () => {
+    // Measured: the rendered preview is about half the height of the diff it
+    // replaces (8,188px to 4,662px), so the old scroll offset points past the
+    // end of the file and the scroller clamps onto the next one. Zero offset
+    // means the file's own top.
+    const anchor = markdownPreviewScrollAnchor('review:plan.md')
+    expect(anchor).toEqual({ itemId: 'review:plan.md', viewportOffset: 0 })
+    expect(anchor == null ? null : reviewScrollAnchorTarget(anchor, 1_840)).toBe(1_840)
+    expect(anchor == null ? null : reviewScrollAnchorTarget(anchor, 0)).toBe(0)
+  })
+
+  test('has nothing to scroll to when the path has no item', () => {
+    expect(markdownPreviewScrollAnchor(null)).toBeNull()
+    expect(markdownPreviewScrollAnchor(undefined)).toBeNull()
   })
 
   test('replaces duplicate IDs instead of passing duplicates to CodeView', () => {

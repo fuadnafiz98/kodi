@@ -48,13 +48,21 @@ export async function isKodiRunning(): Promise<boolean> {
 }
 
 export async function sendToKodi(pullRequestUrl: string, intent: KodiIntent): Promise<void> {
+  const startedAt = performance.now()
   const deepLink = formatKodiReviewUrl(pullRequestUrl, intent)
   if (deepLink == null) throw new Error('That is not a GitHub pull request URL.')
 
-  const plan = kodiLaunchPlan({ deepLink, intent, running: await isKodiRunning() })
+  const running = await isKodiRunning()
+  const processDetectionMs = performance.now() - startedAt
+  const plan = kodiLaunchPlan({ deepLink, intent, running })
   if (plan.kind === 'none') return
   try {
     await execFileAsync('open', plan.args)
+    console.info('[kodi-performance]', JSON.stringify({
+      processDetectionMs,
+      openMs: performance.now() - startedAt,
+      mode: plan.kind
+    }))
   } catch {
     throw new Error(plan.kind === 'scheme' ? KODI_SCHEME_UNREGISTERED : KODI_NOT_INSTALLED)
   }

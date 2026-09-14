@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs'
-import { writeFile } from 'node:fs/promises'
 import { isAbsolute, join } from 'node:path'
+
+import { quarantineFile, writeFileAtomic } from './atomicWrite.js'
 
 export type WindowThemeType = 'dark' | 'light'
 
@@ -106,9 +107,16 @@ function parsePullRequestFolders(raw: unknown): Record<string, string> {
  * decides whether to start opening a repository alongside it.
  */
 export function loadSessionState(directory: string): SessionState {
+  const path = join(directory, FILE_NAME)
   try {
-    return parseSessionState(JSON.parse(readFileSync(join(directory, FILE_NAME), 'utf8')))
+    return parseSessionState(JSON.parse(readFileSync(path, 'utf8')))
   } catch {
+    try {
+      readFileSync(path)
+      quarantineFile(path)
+    } catch {
+      // Missing and unreadable files both mean a default session.
+    }
     return DEFAULT_SESSION_STATE
   }
 }
@@ -117,8 +125,8 @@ export function saveSessionState(directory: string, state: SessionState): Promis
   const path = join(directory, FILE_NAME)
   const serialized = JSON.stringify(state, null, 2)
   pendingSave = pendingSave
-    .then(() => writeFile(path, serialized, 'utf8'))
-    .catch((error) => {
+    .then(() => writeFileAtomic(path, serialized))
+    .catch((error: unknown) => {
       console.error('Could not persist the last session:', error)
     })
   return pendingSave

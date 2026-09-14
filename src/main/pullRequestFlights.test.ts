@@ -86,17 +86,32 @@ describe('PullRequestReviewFlight', () => {
     expect(late.filter((event) => event.kind === 'files').map((event) => event.patch)).toEqual(['a', 'b'])
   })
 
-  test('replays a replacement instead of the pages it superseded', async () => {
+  test('replays a revision notice without replacing frozen pages', async () => {
     const flight = new PullRequestReviewFlight()
     await flight.start(async (send) => {
       send(metadata())
       send(page('stale'))
-      send({ kind: 'replace', selector: 'pr', review: review({ patch: 'fresh' }) })
+      send({
+        kind: 'revisionAvailable',
+        selector: 'pr',
+        snapshotIdentity: {
+          formatEpoch: 1,
+          host: 'github.com',
+          repository: 'acme/app',
+          number: 1,
+          baseRefName: 'main',
+          baseOid: 'base-2',
+          headRefName: 'feature',
+          headOid: 'head-2',
+          effectiveBaseOid: 'base-2',
+          patchSource: 'github'
+        }
+      })
       send(done())
       return review({ patch: 'fresh' })
     })
 
-    expect(kinds(flight.replay())).toEqual(['metadata', 'replace', 'done'])
+    expect(kinds(flight.replay())).toEqual(['metadata', 'files', 'revisionAvailable', 'done'])
   })
 
   test('marks itself streamed only once a page has been emitted', async () => {

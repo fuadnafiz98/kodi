@@ -20,6 +20,7 @@ import type { AppLayoutProps, WorkspaceLayoutProps } from './appLayoutProps'
 import { AppChrome } from './AppChrome'
 import { WorkspaceStage } from './WorkspaceStage'
 import { useAppCommands, useCommandPaletteControls } from './useAppCommands'
+import { useHibernationListener } from './useHibernation'
 import { useAppPersistence } from './useAppPersistence'
 import { useExternalPullRequest } from '../github/useExternalPullRequest'
 import { useFolderOpen } from '../explorer/useFolderOpen'
@@ -113,6 +114,9 @@ function useWindowVisibilitySync(): void {
 
 const AgentSessionLayout = memo(function AgentSessionLayout(view: WorkspaceLayoutProps): React.JSX.Element {
   const { gitWorkflow } = view
+  // Main drives this from the snooze clock; the vetoes registered elsewhere in
+  // the tree decide whether it is safe before any payload is released.
+  useHibernationListener(gitWorkflow.hibernateReviews)
   // Both surfaces have a closed-state rule in styles.css that only bites while
   // the node is still in the tree, so presence holds them for the exit.
   const reviewLoadingPresence = usePresence(gitWorkflow.actionKey?.startsWith('review:') ?? false, 160)

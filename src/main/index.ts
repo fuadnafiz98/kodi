@@ -4,7 +4,7 @@ import { stat } from 'node:fs/promises'
 import { readFile, writeFile } from 'node:fs/promises'
 import { existsSync, renameSync, rmSync } from 'node:fs'
 
-import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, nativeTheme, screen, shell, type RenderProcessGoneDetails, type WebContents } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, nativeTheme, powerMonitor, screen, shell, type RenderProcessGoneDetails, type WebContents } from 'electron'
 
 import {
   IPC_CHANNELS,
@@ -30,16 +30,17 @@ import {
   normalizeGitHubPullRequestUrl
 } from '../shared/pullRequestUrl.js'
 import { AgentService, coalesceAgentTextEvents } from './agentService.js'
+import { BUILD_TIME, formatBuildTime } from './buildInfo.js'
 import { migrateLegacyReviewDirectory } from './agentReviewBundle.js'
 import { parseAgentAskRequest } from './agentRequest.js'
 import { FolderIndex, resolveOpenableFolder } from './folderIndex.js'
 import { getAvatarDataUrl } from './avatars.js'
 import { loadMarkdownMedia } from './markdownMedia.js'
-import { isPathWithinApprovedRoots, loadGlobalPullRequestInbox, parseRemotes, pullRequestTargetsRemotes } from './repository.js'
+import { conversationCacheEntryCount, isPathWithinApprovedRoots, loadGlobalPullRequestInbox, parseRemotes, pullRequestTargetsRemotes } from './repository.js'
 import { normalizeInboxRepos } from '../shared/inboxRepos.js'
 import { PullRequestRootResolver } from './pullRequestRoots.js'
 import { clipboardWarmupDecision, warmupCooledDown } from './pullRequestWarmup.js'
-import { runCommand } from './gitCommands.js'
+import { commandSemaphore, runCommand } from './gitCommands.js'
 import { RepositorySessionRegistry } from './repositorySessions.js'
 import {
   effectiveLastRoot,
@@ -87,6 +88,7 @@ process.on('uncaughtException', (error) => {
 })
 
 const PRODUCT_NAME = 'Kodi'
+const buildStamp = formatBuildTime(BUILD_TIME)
 // Pre-rename env names keep working for anything still setting them.
 const startHidden = (process.env.KODI_BACKGROUND ?? process.env.HORUS_BACKGROUND) === '1'
 // KODI_PROBE: the perf harness runs the app with its window never shown.
@@ -94,8 +96,10 @@ const startHidden = (process.env.KODI_BACKGROUND ?? process.env.HORUS_BACKGROUND
 // what the probes measure — and the instance lock is kept, so a human opening
 // Kodi mid-probe still reveals the window through second-instance.
 const probeHidden = (process.env.KODI_PROBE ?? process.env.HORUS_PROBE) === '1'
+const lifecycleProbe = process.env.KODI_LIFECYCLE_PROBE === '1'
 const CLIPBOARD_WARMUP_MS = 2_000
 const WARMUP_COOLDOWN_MS = 60_000
+const HIDDEN_GRACE_MS = 30_000
 // How long the open request waits for the checkout before it goes without one.
 const EXTERNAL_REVIEW_ROOT_DEADLINE_MS = 150
 const remoteDebuggingPort = (process.env.KODI_REMOTE_DEBUGGING_PORT ?? process.env.HORUS_REMOTE_DEBUGGING_PORT)?.trim()
@@ -155,11 +159,13 @@ let sessionState: SessionState = DEFAULT_SESSION_STATE
 let restoreLastSession: Promise<unknown> = Promise.resolve(null)
 let sessionRestoreStarted = false
 let workspaceCacheStore: WorkspaceCacheStore = EMPTY_WORKSPACE_CACHE_STORE
+let workspaceCacheLoaded = false
 let persistWorkspaceTimer: ReturnType<typeof setTimeout> | null = null
 const WORKSPACE_CACHE_SAVE_DEBOUNCE_MS = 1_000
 let holdWindowHidden = startHidden
 let pendingOpenPullRequestUrl: string | null = null
 let pendingOpenPullRequestRoot: string | null = null
+let externalReviewGeneration = 0
 // A `kodi .` open in flight: the snapshot handler waits on it so a boot-time
 // CLI open can never lose to the Welcome screen.
 let pendingFolderOpen: Promise<unknown> = Promise.resolve(null)
@@ -167,6 +173,13 @@ const queuedExternalReviews: KodiReviewRequest[] = []
 const queuedFolderOpens: string[] = []
 const warmupFlights = new Map<string, Promise<void>>()
 const recentlyWarmedAt = new Map<string, number>()
+let clipboardWarmupTimer: ReturnType<typeof setInterval> | null = null
+let hiddenGraceTimer: ReturnType<typeof setTimeout> | null = null
+let lifecycleState: 'visible' | 'hidden-grace' | 'snoozed' | 'restoring' = 'visible'
+let hibernated: boolean | null = null
+let hibernationBlockedBy: string | null = null
+const LIFECYCLE_TRANSITION_HISTORY = 16
+const lifecycleTransitions: Array<{ state: string; reason: string; atMs: number }> = []
 
 function enqueueExternalReview(request: KodiReviewRequest): void {
   queuedExternalReviews.push(request)
@@ -178,6 +191,9 @@ function revealMainWindow(): void {
   const existing = BrowserWindow.getAllWindows()[0]
   const window = existing == null || existing.isDestroyed() ? createMainWindow() : existing
   revealExistingWindow(window)
+  // An already-visible window emits no `show`, and a reveal is the one caller
+  // that is allowed to end a snooze before the OS reports the window visible.
+  setAppVisible(true, 'reveal')
 }
 
 function publishPendingOpenPullRequest(): void {
@@ -212,6 +228,9 @@ async function warmupPullRequest(url: string): Promise<void> {
   const inFlight = warmupFlights.get(url)
   if (inFlight != null) return inFlight
   const now = Date.now()
+  for (const [candidate, warmedAt] of recentlyWarmedAt) {
+    if (now - warmedAt > WARMUP_COOLDOWN_MS) recentlyWarmedAt.delete(candidate)
+  }
   if (!warmupCooledDown({ lastWarmedAt: recentlyWarmedAt.get(url), now, cooldownMs: WARMUP_COOLDOWN_MS })) return
   // Cooled down before the work, not after it: a URL with no local checkout used
   // to re-probe every folder on the machine on every clipboard change.
@@ -233,17 +252,19 @@ async function applyExternalReview(request: KodiReviewRequest): Promise<void> {
     await warmupPullRequest(request.url)
     return
   }
-  pendingOpenPullRequestUrl = request.url
-  pendingOpenPullRequestRoot = null
+  const generation = ++externalReviewGeneration
   // Probe runs measure the review in a hidden window; revealing would flash it.
   if (!probeHidden) revealMainWindow()
   // The renderer has to resolve the checkout before it can ask for the review, so
   // the answer rides along with the open request. Bounded: a resolution that has
   // to walk the folder catalog must not hold the tab back.
-  pendingOpenPullRequestRoot = await Promise.race([
+  const root = await Promise.race([
     pullRequestRoots.resolve(request.url, 'quick').catch(() => null),
     delay(EXTERNAL_REVIEW_ROOT_DEADLINE_MS).then(() => null)
   ])
+  if (generation !== externalReviewGeneration) return
+  pendingOpenPullRequestUrl = request.url
+  pendingOpenPullRequestRoot = root
   publishPendingOpenPullRequest()
   void primePullRequest(request.url).catch((error: unknown) => {
     console.warn(`Could not prime pull request ${request.url}:`, error)
@@ -283,6 +304,7 @@ function acceptExternalFolder(folderPath: string): void {
 }
 
 function startClipboardWarmup(): void {
+  if (clipboardWarmupTimer != null) return
   let seen = clipboard.readText()
   // Nothing on screen means nobody is about to press Cmd+H, and a hidden Kodi
   // that scans on every copied URL is a background process burning a core.
@@ -295,9 +317,109 @@ function startClipboardWarmup(): void {
     seen = decision.seen
     if (decision.url != null) void warmupPullRequest(decision.url)
   }
-  setInterval(pollClipboard, CLIPBOARD_WARMUP_MS)
-  app.on('browser-window-focus', pollClipboard)
-  app.on('activate', pollClipboard)
+  pollClipboard()
+  clipboardWarmupTimer = setInterval(pollClipboard, CLIPBOARD_WARMUP_MS)
+  clipboardWarmupTimer.unref?.()
+}
+
+function stopClipboardWarmup(): void {
+  if (clipboardWarmupTimer == null) return
+  clearInterval(clipboardWarmupTimer)
+  clipboardWarmupTimer = null
+}
+
+/**
+ * Deep hibernation drops the renderer's review payloads while the app is
+ * snoozed. Work that cannot be rebuilt from a descriptor blocks it: a live
+ * shell, an agent turn or approval, or a command still holding a lane. Unsaved
+ * editor state is the renderer's own veto and comes back on the reply channel.
+ */
+function hibernationBlocker(): string | null {
+  if (terminalService.sessionCount > 0) return 'a terminal session is running'
+  if (agentService.busyCount > 0) return 'an agent turn is in flight'
+  if (commandSemaphore.running > 0 || commandSemaphore.waiting > 0) return 'a git command is in flight'
+  return null
+}
+
+/**
+ * Deep hibernation is off by default, and measurement is why.
+ *
+ * Releasing the focused review while snoozed saves 5.4-7.6% of renderer private
+ * memory, against 5.8% for simply being hidden — the 20-26% working-set drop
+ * that looks like a win happens with or without it, because Chromium trims a
+ * hidden window on its own. It also does not come back: in every sample that
+ * hibernated, the released focused world never rehydrated on wake (DOM stayed
+ * at 407 nodes and the code view did not return within 30 s).
+ *
+ * So the release path stays, tested and behind this flag, and the shipped app
+ * does not carry a restore that does not restore. Re-enable with
+ * KODI_DEEP_HIBERNATION=1 to work on it.
+ */
+const deepHibernationEnabled = process.env.KODI_DEEP_HIBERNATION === '1'
+
+function requestHibernation(): void {
+  if (!deepHibernationEnabled) {
+    hibernated = false
+    hibernationBlockedBy = 'deep hibernation is disabled'
+    return
+  }
+  const blocker = hibernationBlocker()
+  if (blocker != null) {
+    hibernated = false
+    hibernationBlockedBy = blocker
+    return
+  }
+  const windows = BrowserWindow.getAllWindows().filter((window) => !window.isDestroyed())
+  if (windows.length === 0) return
+  hibernated = false
+  hibernationBlockedBy = 'the window has not answered yet'
+  for (const window of windows) window.webContents.send(IPC_CHANNELS.hibernateRequest)
+}
+
+function anyWindowVisible(): boolean {
+  return BrowserWindow.getAllWindows().some((window) => !window.isDestroyed() && window.isVisible())
+}
+
+function recordLifecycle(state: typeof lifecycleState, reason: string): void {
+  lifecycleState = state
+  lifecycleTransitions.push({ state, reason, atMs: Date.now() })
+  if (lifecycleTransitions.length > LIFECYCLE_TRANSITION_HISTORY) lifecycleTransitions.shift()
+}
+
+function setAppVisible(visible: boolean, reason: string): void {
+  if (visible) {
+    // A window hidden at the OS level is not made visible by a claim from its
+    // own renderer: Chromium reports `document.visibilityState` as visible for
+    // a window that was created but never shown, so without this check the
+    // renderer's mount-time sync cancels the snooze it just asked for.
+    if (!anyWindowVisible() && reason !== 'reveal') return
+    if (lifecycleState === 'visible') return
+    if (hiddenGraceTimer != null) clearTimeout(hiddenGraceTimer)
+    hiddenGraceTimer = null
+    if (lifecycleState === 'snoozed') {
+      recordLifecycle('restoring', reason)
+      repositorySessions.setSuspended(false)
+    }
+    hibernated = null
+    hibernationBlockedBy = null
+    recordLifecycle('visible', reason)
+    if (!startHidden && !probeHidden) startClipboardWarmup()
+    return
+  }
+  if (lifecycleState !== 'visible') return
+  recordLifecycle('hidden-grace', reason)
+  stopClipboardWarmup()
+  hiddenGraceTimer = setTimeout(() => {
+    hiddenGraceTimer = null
+    if (anyWindowVisible()) {
+      recordLifecycle('visible', 'grace-window-still-visible')
+      return
+    }
+    recordLifecycle('snoozed', 'grace-elapsed')
+    repositorySessions.setSuspended(true)
+    requestHibernation()
+  }, HIDDEN_GRACE_MS)
+  hiddenGraceTimer.unref?.()
 }
 
 const launchRequest = findKodiReviewRequest(process.argv)
@@ -450,7 +572,7 @@ function createMainWindow(): BrowserWindow {
       sandbox: true,
       // A window that never shows is occluded from Chromium's point of view;
       // probe measurements would stall on suspended rAF and throttled timers.
-      backgroundThrottling: !probeHidden,
+      backgroundThrottling: !probeHidden || lifecycleProbe,
       additionalArguments: [encodeRestoreHintArgument(currentRestoreHint())]
     }
   })
@@ -523,7 +645,15 @@ function createMainWindow(): BrowserWindow {
   if (!startHidden) persistWindowGeometry(window)
   window.on('responsive', clearRecoveryTimer)
   window.on('unresponsive', () => scheduleRecovery('the window stopped responding', UNRESPONSIVE_RECOVERY_DELAY_MS))
-  window.on('closed', clearRecoveryTimer)
+  window.on('show', () => setAppVisible(true, 'window-show'))
+  window.on('focus', () => setAppVisible(true, 'window-focus'))
+  window.on('hide', () => setAppVisible(false, 'window-hide'))
+  window.on('minimize', () => setAppVisible(false, 'window-minimize'))
+  window.on('restore', () => setAppVisible(true, 'window-restore'))
+  window.on('closed', () => {
+    clearRecoveryTimer()
+    setAppVisible(false, 'window-closed')
+  })
   window.webContents.setWindowOpenHandler(({ url }) => {
     if (url.startsWith('https://')) void shell.openExternal(url)
     return { action: 'deny' }
@@ -578,7 +708,11 @@ function createMainWindow(): BrowserWindow {
 
 async function collectPerformanceDetail(
   processMetrics: Electron.ProcessMetric[]
-): Promise<Pick<PerformanceMetricsDetail, 'mainStartup' | 'memoryByProcessType' | 'mainPrivateMegabytes'>> {
+): Promise<Pick<PerformanceMetricsDetail,
+  'mainStartup' | 'memoryByProcessType' | 'mainPrivateMegabytes' | 'commandRunning'
+  | 'commandWaiting' | 'watcherCount' | 'pendingWatcherPaths' | 'lifecycleState'
+  | 'lifecycleTransitions' | 'hibernated' | 'hibernationBlockedBy'
+  | 'conversationCacheEntries'>> {
   const mainMemory = await process.getProcessMemoryInfo()
   const megabytesByType = new Map<string, number>()
   for (const metric of processMetrics) {
@@ -587,12 +721,22 @@ async function collectPerformanceDetail(
       (megabytesByType.get(metric.type) ?? 0) + metric.memory.workingSetSize / 1_024
     )
   }
+  const resources = repositorySessions.resourceStats()
   return {
     mainStartup: { ...mainStartupMetrics },
     memoryByProcessType: [...megabytesByType]
       .map(([type, megabytes]) => ({ type, megabytes }))
       .sort((left, right) => right.megabytes - left.megabytes),
-    mainPrivateMegabytes: mainMemory.private / 1_024
+    mainPrivateMegabytes: mainMemory.private / 1_024,
+    commandRunning: commandSemaphore.running,
+    commandWaiting: commandSemaphore.waiting,
+    watcherCount: resources.watcherCount,
+    pendingWatcherPaths: resources.pendingWatcherPaths,
+    lifecycleState,
+    lifecycleTransitions: [...lifecycleTransitions],
+    hibernated,
+    hibernationBlockedBy,
+    conversationCacheEntries: conversationCacheEntryCount()
   }
 }
 
@@ -1050,6 +1194,13 @@ function registerIpcHandlers(): void {
       localReviewProgressSender(event.sender, requestId)
     )
   )
+  ipcMain.handle(IPC_CHANNELS.getLocalSnapshotReview, (
+    _event,
+    baseOid: string,
+    headOid: string,
+    baseRefName: string,
+    headRefName: string
+  ) => repositorySessions.requireActive().getLocalSnapshotReview(baseOid, headOid, baseRefName, headRefName))
   ipcMain.handle(IPC_CHANNELS.getCommitReview, (event, oid: string, requestId: unknown) =>
     repositorySessions.requireActive().getCommitReview(
       oid,
@@ -1128,9 +1279,16 @@ function registerIpcHandlers(): void {
     if (typeChanged) nativeTheme.themeSource = themeType
     BrowserWindow.fromWebContents(event.sender)?.setBackgroundColor(canvas)
   })
+  ipcMain.on(IPC_CHANNELS.hibernationState, (_event, blockedBy: unknown) => {
+    // Only the snooze that asked may record an answer: a reply that arrives
+    // after the user came back would otherwise mark a visible app hibernated.
+    if (lifecycleState !== 'snoozed') return
+    hibernated = blockedBy == null
+    hibernationBlockedBy = typeof blockedBy === 'string' ? blockedBy : null
+  })
   ipcMain.handle(IPC_CHANNELS.setVisibility, (_event, visible: unknown) => {
     if (typeof visible !== 'boolean') throw new Error('Visibility must be a boolean.')
-    repositorySessions.setSuspended(!visible)
+    setAppVisible(visible, 'renderer-visibility')
   })
   ipcMain.handle(IPC_CHANNELS.findInPage, (event, query: unknown, forward: unknown, findNext: unknown) => {
     if (typeof query !== 'string' || typeof forward !== 'boolean' || typeof findNext !== 'boolean') {
@@ -1216,6 +1374,10 @@ function startLiveRefresh(root: string): void {
 function beginSessionRestore(): void {
   if (sessionRestoreStarted) return
   sessionRestoreStarted = true
+  if (!workspaceCacheLoaded) {
+    workspaceCacheStore = loadWorkspaceCache(userDataPath)
+    workspaceCacheLoaded = true
+  }
   const snapshot = hydrateLastWorkspace()
   if (snapshot == null) {
     restoreLastSession = Promise.resolve(null)
@@ -1223,6 +1385,19 @@ function beginSessionRestore(): void {
     return
   }
   startLiveRefresh(snapshot.root)
+}
+
+function scheduleSessionRestore(): void {
+  let releaseGate: () => void = () => {}
+  const gate = new Promise<void>((resolveGate) => {
+    releaseGate = resolveGate
+  })
+  restoreLastSession = gate
+  setImmediate(() => {
+    beginSessionRestore()
+    const work = restoreLastSession
+    void work.finally(releaseGate)
+  })
 }
 
 /**
@@ -1254,9 +1429,15 @@ app.whenReady().then(() => {
   userDataPath = app.getPath('userData')
   repositorySessions.setPullRequestCacheDirectory(join(userDataPath, 'pr-cache'))
   sessionState = loadSessionState(userDataPath)
-  workspaceCacheStore = loadWorkspaceCache(userDataPath)
   nativeTheme.themeSource = sessionState.themeType
-  app.setAboutPanelOptions({ applicationName: PRODUCT_NAME })
+  app.setAboutPanelOptions({
+    applicationName: PRODUCT_NAME,
+    applicationVersion: app.getVersion(),
+    // macOS prints this in parentheses after the version, which is where a
+    // build stamp belongs. An unbundled run has no stamp, and the panel then
+    // shows the version alone rather than an invented date.
+    ...(buildStamp == null ? {} : { version: buildStamp })
+  })
   const initialReviews = queuedExternalReviews.splice(0)
   holdWindowHidden = probeHidden || shouldHoldWindowHidden(startHidden, initialReviews)
   if (startHidden || holdWindowHidden) app.dock?.hide()
@@ -1271,18 +1452,35 @@ app.whenReady().then(() => {
     // hydrate over it. A failed open falls back to the usual restore inside the
     // snapshot handler.
     sessionRestoreStarted = true
-    pendingFolderOpen = applyExternalFolder(initialFolder).catch((error: unknown) => {
-      console.warn(`Could not open folder ${initialFolder}:`, error)
+    pendingFolderOpen = new Promise<void>((resolveOpen) => {
+      setImmediate(() => {
+        workspaceCacheStore = loadWorkspaceCache(userDataPath)
+        workspaceCacheLoaded = true
+        void applyExternalFolder(initialFolder)
+          .catch((error: unknown) => {
+            console.warn(`Could not open folder ${initialFolder}:`, error)
+          })
+          .finally(resolveOpen)
+      })
     })
   } else {
     // Hydrating the cached workspace — up to 25,000 paths — runs after the window
     // has been handed to the compositor, not in the same tick as its creation.
-    setImmediate(beginSessionRestore)
+    scheduleSessionRestore()
   }
   void loadLastRendererTermination()
   applyDevelopmentDockIcon()
-  void folderIndex.list(sessionState.approvedRoots)
-  if (!startHidden) startClipboardWarmup()
+  if (!startHidden && !probeHidden) startClipboardWarmup()
+  powerMonitor.on('suspend', () => {
+    if (hiddenGraceTimer != null) clearTimeout(hiddenGraceTimer)
+    hiddenGraceTimer = null
+    recordLifecycle('snoozed', 'power-suspend')
+    stopClipboardWarmup()
+    repositorySessions.setSuspended(true)
+  })
+  powerMonitor.on('lock-screen', () => setAppVisible(false, 'lock-screen'))
+  powerMonitor.on('resume', () => setAppVisible(true, 'power-resume'))
+  powerMonitor.on('unlock-screen', () => setAppVisible(true, 'unlock-screen'))
   app.on('second-instance', (_event, argv) => {
     const request = findKodiReviewRequest(argv)
     if (request != null) {
@@ -1299,7 +1497,10 @@ app.whenReady().then(() => {
     revealMainWindow()
   })
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createMainWindow()
+    // Clicking the dock icon is a resume: a window that is only hidden has to
+    // come back, not just be counted. Without this an app that snoozed behind
+    // `window.hide()` stays snoozed with its window off screen.
+    if (BrowserWindow.getAllWindows().length === 0 || !anyWindowVisible()) revealMainWindow()
   })
 })
 

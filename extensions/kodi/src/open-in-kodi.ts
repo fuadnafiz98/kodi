@@ -1,7 +1,8 @@
 import { LaunchProps } from '@raycast/api'
 
-import { clipboardText, openKodiPullRequest } from './lib/open'
+import { clipboardText, firstPullRequestUrl, openKodiPullRequest } from './lib/open'
 
 export default async function Command(props: LaunchProps): Promise<void> {
-  await openKodiPullRequest(props.fallbackText, await clipboardText())
+  const fallback = firstPullRequestUrl(props.fallbackText)
+  await openKodiPullRequest(fallback ?? await clipboardText())
 }

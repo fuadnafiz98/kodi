@@ -99,4 +99,16 @@ describe('sameConversation', () => {
       conversation({ reviews: [{ ...review, authorAvatarUrl: 'https://avatars.example/r.png' }] })
     )).toBe(false)
   })
+
+  it('detects coordinate-only and timestamp-only anchor changes', () => {
+    expect(sameConversation(conversation(), conversation({
+      threads: [thread({ path: 'src/b.ts' })]
+    }))).toBe(false)
+    expect(sameConversation(conversation(), conversation({
+      threads: [thread({ startLine: 2, side: 'LEFT' })]
+    }))).toBe(false)
+    expect(sameConversation(conversation(), conversation({
+      threads: [thread({ comments: [{ ...thread().comments[0]!, createdAt: '2026-08-18T10:00:00Z' }] })]
+    }))).toBe(false)
+  })
 })

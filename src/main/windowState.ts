@@ -1,5 +1,7 @@
-import { readFileSync, writeFileSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
+
+import { quarantineFile, writeFileAtomicSync } from './atomicWrite.js'
 
 export interface WindowState {
   x: number
@@ -59,17 +61,25 @@ export function isReachable(state: WindowState, workAreas: readonly ScreenArea[]
  * BrowserWindow, so there is nothing useful to overlap the read with.
  */
 export function loadWindowState(directory: string, workAreas: readonly ScreenArea[]): WindowState | null {
+  const path = join(directory, FILE_NAME)
   try {
-    const state = parseWindowState(JSON.parse(readFileSync(join(directory, FILE_NAME), 'utf8')))
+    const state = parseWindowState(JSON.parse(readFileSync(path, 'utf8')))
     return state != null && isReachable(state, workAreas) ? state : null
   } catch {
+    try {
+      readFileSync(path)
+      quarantineFile(path)
+    } catch {
+      // A missing file is the normal first-launch case.
+    }
     return null
   }
 }
 
 export function saveWindowState(directory: string, state: WindowState): void {
+  const path = join(directory, FILE_NAME)
   try {
-    writeFileSync(join(directory, FILE_NAME), JSON.stringify(state, null, 2), 'utf8')
+    writeFileAtomicSync(path, JSON.stringify(state, null, 2))
   } catch (error) {
     console.error('Could not persist window geometry:', error)
   }

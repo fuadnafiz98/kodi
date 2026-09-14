@@ -143,14 +143,15 @@ export const Explorer = memo(function Explorer({
       </div>
       {onFileFilterChange == null ? null : (
         <div className="sidebar-file-filter">
+          {/* No magnifier here: the heading's search button already carries one,
+              and two of them a row apart read as two different searches. */}
           <div className="sidebar-file-filter-field">
-            <IconSearch aria-hidden="true" />
             <input
               type="search"
               name="file-filter"
               value={fileFilter.query}
-              placeholder="Filter files, e.g. /api/* or *.test.ts"
-              aria-label="Filter files"
+              placeholder="Filter files"
+              aria-label="Filter files, for example /api/* or *.test.ts"
               onChange={(event) => onFileFilterChange({ ...fileFilter, query: event.target.value })}
             />
           </div>

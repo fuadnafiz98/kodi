@@ -5,7 +5,8 @@
 // Every probe is responsible for leaving no Kodi process behind. `guardExit()`
 // covers the signal paths; the probes themselves quit in a `finally`.
 import { appendFile, mkdir } from 'node:fs/promises'
-import { homedir } from 'node:os'
+import { randomUUID } from 'node:crypto'
+import { homedir, hostname, loadavg, totalmem } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -14,6 +15,9 @@ const PERF_DIRECTORY = dirname(fileURLToPath(import.meta.url))
 export const APP_PATH = process.env.KODI_APP ?? join(homedir(), 'Applications/Kodi.app')
 export const APP_BINARY = join(APP_PATH, 'Contents/MacOS/Kodi')
 export const RESULTS_DIRECTORY = process.env.KODI_PERF_RESULTS_DIR ?? join(PERF_DIRECTORY, 'results')
+export const RUN_ID = process.env.KODI_PERF_RUN_ID ?? randomUUID()
+export const FIXTURE_ID = process.env.KODI_PERF_FIXTURE ?? 'restored-session'
+export const CACHE_STATE = process.env.KODI_PERF_CACHE_STATE ?? 'os-page-cache-warm'
 
 // KODI_PROBE_HIDDEN=1 runs the app with its window never shown: nothing
 // flashes on screen, nothing steals focus, no dock bounce. The app binary is
@@ -23,6 +27,7 @@ export const RESULTS_DIRECTORY = process.env.KODI_PERF_RESULTS_DIR ?? join(PERF_
 // timers — the palette's rAF handoff would stall otherwise. `windowShown`
 // reports null in this mode; that is the honest answer.
 const HIDDEN = process.env.KODI_PROBE_HIDDEN === '1'
+const LIFECYCLE = process.env.KODI_PROBE_LIFECYCLE === '1'
 const UNTHROTTLE_ARGS = [
   '--disable-backgrounding-occluded-windows',
   '--disable-renderer-backgrounding',
@@ -210,13 +215,30 @@ export async function launch(port, extraArgs = []) {
   const startedAt = Date.now()
   if (HIDDEN) {
     const env = { ...process.env, KODI_PROBE: '1' }
+    if (LIFECYCLE) env.KODI_LIFECYCLE_PROBE = '1'
     delete env.ELECTRON_RUN_AS_NODE
     delete env.ELECTRON_NO_ASAR
-    Bun.spawn([APP_BINARY, `--remote-debugging-port=${port}`, ...UNTHROTTLE_ARGS, ...extraArgs], {
+    const child = Bun.spawn([
+      APP_BINARY,
+      `--remote-debugging-port=${port}`,
+      ...(LIFECYCLE ? [] : UNTHROTTLE_ARGS),
+      ...extraArgs
+    ], {
       env,
       stdout: 'ignore',
       stderr: 'ignore'
     })
+    const page = await waitForPage(port)
+    const cdp = new CDP(await connect(page.webSocketDebuggerUrl))
+    if (LIFECYCLE) {
+      await cdp.send('Emulation.setDeviceMetricsOverride', {
+        width: 1440,
+        height: 920,
+        deviceScaleFactor: 1,
+        mobile: false
+      })
+    }
+    return { cdp, startedAt, rootPid: child.pid }
   } else {
     // Same guard as `bun run open:mac`: a leaked ELECTRON_RUN_AS_NODE makes the
     // packaged binary run as bare Node and exit before the debug port exists.
@@ -224,7 +246,7 @@ export async function launch(port, extraArgs = []) {
       'open', '-na', APP_PATH, '--args', `--remote-debugging-port=${port}`, ...extraArgs])
   }
   const page = await waitForPage(port)
-  return { cdp: new CDP(await connect(page.webSocketDebuggerUrl)), startedAt }
+  return { cdp: new CDP(await connect(page.webSocketDebuggerUrl)), startedAt, rootPid: null }
 }
 
 /** Resolves when main reports `restoreSettled` and the explorer is on screen. */
@@ -337,10 +359,17 @@ export function median(values) {
 export function statistics(values) {
   const numbers = values.filter((value) => typeof value === 'number' && Number.isFinite(value))
     .sort((left, right) => left - right)
-  if (numbers.length === 0) return { samples: 0, median: null, min: null, max: null }
+  const failures = values.length - numbers.length
+  if (numbers.length === 0) {
+    return { samples: 0, failures, p50: null, p95: null, median: null, min: null, max: null }
+  }
+  const percentile = (fraction) => numbers[Math.max(0, Math.ceil(numbers.length * fraction) - 1)]
   return {
     samples: numbers.length,
-    median: round(numbers[Math.floor(numbers.length / 2)]),
+    failures,
+    p50: round(percentile(0.5)),
+    p95: round(percentile(0.95)),
+    median: round(percentile(0.5)),
     min: round(numbers[0]),
     max: round(numbers[numbers.length - 1])
   }
@@ -387,6 +416,25 @@ export function round(value) {
 export async function appendResult(label, record) {
   await mkdir(RESULTS_DIRECTORY, { recursive: true })
   const file = resolve(RESULTS_DIRECTORY, `${label}.jsonl`)
-  await appendFile(file, `${JSON.stringify({ at: new Date().toISOString(), ...record })}\n`)
+  await appendFile(file, `${JSON.stringify({
+    at: new Date().toISOString(),
+    runId: RUN_ID,
+    fixture: FIXTURE_ID,
+    cacheState: CACHE_STATE,
+    origins: { process: 'process-launch', interaction: 'input-dispatch', main: 'main-receipt' },
+    // Load average is recorded with every run because two labels measured under
+    // different machine load are not comparable, and nothing else in the record
+    // would show it. `appPath` is here for the same reason: an A/B that points
+    // KODI_APP at two builds has to say which one produced the samples.
+    machine: {
+      hostname: hostname(),
+      ramBytes: totalmem(),
+      platform: process.platform,
+      arch: process.arch,
+      loadAverage1m: Math.round(loadavg()[0] * 100) / 100,
+      appPath: APP_PATH
+    },
+    ...record
+  })}\n`)
   return file
 }

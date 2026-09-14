@@ -7,6 +7,41 @@ export { COMMAND_ABORTED_MESSAGE }
 
 export const MAX_DIFF_FILE_BYTES = 2 * 1024 * 1024
 export const MAX_GIT_OUTPUT_BYTES = 64 * 1024 * 1024
+export const COMMAND_QUEUE_TIMEOUT_MESSAGE = 'The command timed out while waiting for capacity.'
+export const COMMAND_EXECUTION_TIMEOUT_MESSAGE = 'The command exceeded its execution deadline.'
+const INTERACTIVE_QUEUE_TIMEOUT_MS = 30_000
+const BACKGROUND_QUEUE_TIMEOUT_MS = 60_000
+const DEFAULT_EXECUTION_TIMEOUT_MS = 120_000
+
+export interface CommandDeadlineOptions {
+  queueMs?: number
+  executionMs?: number
+}
+
+function deadlineSignal(
+  upstream: AbortSignal | undefined,
+  milliseconds: number,
+  message: string
+): { signal: AbortSignal; dispose(): void; timedOut(): boolean } {
+  const controller = new AbortController()
+  let deadlineReached = false
+  const abort = (): void => controller.abort()
+  if (upstream?.aborted) controller.abort()
+  else upstream?.addEventListener('abort', abort, { once: true })
+  const timer = setTimeout(() => {
+    deadlineReached = true
+    controller.abort()
+  }, Math.max(1, milliseconds))
+  timer.unref?.()
+  return {
+    signal: controller.signal,
+    dispose: () => {
+      clearTimeout(timer)
+      upstream?.removeEventListener('abort', abort)
+    },
+    timedOut: () => deadlineReached && !upstream?.aborted && message !== ''
+  }
+}
 
 /**
  * A plain `git status` takes the optional index lock and rewrites `.git/index`,
@@ -420,12 +455,36 @@ export async function runCommand(
   allowedExitCodes: readonly number[] = [],
   input?: string,
   signal?: AbortSignal,
-  lane: CommandLaneSource = 'interactive'
+  lane: CommandLaneSource = 'interactive',
+  deadlines: CommandDeadlineOptions = {}
 ): Promise<CommandResult> {
-  const release = await commandSemaphore.acquire(lane, signal)
+  const resolvedLane = resolveCommandLane(lane)
+  const queueDeadline = deadlineSignal(
+    signal,
+    deadlines.queueMs ?? (resolvedLane === 'interactive' ? INTERACTIVE_QUEUE_TIMEOUT_MS : BACKGROUND_QUEUE_TIMEOUT_MS),
+    COMMAND_QUEUE_TIMEOUT_MESSAGE
+  )
+  let release: () => void
   try {
-    return await spawnCommand(executable, args, cwd, allowedExitCodes, input, signal)
+    release = await commandSemaphore.acquire(lane, queueDeadline.signal)
+  } catch (error) {
+    if (queueDeadline.timedOut()) throw new Error(COMMAND_QUEUE_TIMEOUT_MESSAGE)
+    throw error
   } finally {
+    queueDeadline.dispose()
+  }
+  const executionDeadline = deadlineSignal(
+    signal,
+    deadlines.executionMs ?? DEFAULT_EXECUTION_TIMEOUT_MS,
+    COMMAND_EXECUTION_TIMEOUT_MESSAGE
+  )
+  try {
+    return await spawnCommand(executable, args, cwd, allowedExitCodes, input, executionDeadline.signal)
+  } catch (error) {
+    if (executionDeadline.timedOut()) throw new Error(COMMAND_EXECUTION_TIMEOUT_MESSAGE)
+    throw error
+  } finally {
+    executionDeadline.dispose()
     release()
   }
 }

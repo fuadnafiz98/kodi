@@ -1,0 +1,109 @@
+{
+  "version": 1,
+  "latency": [
+    {
+      "id": "startup-restored",
+      "kind": "startup",
+      "samples": 30
+    },
+    {
+      "id": "folder-small",
+      "kind": "folder",
+      "size": "small",
+      "samples": 30
+    },
+    {
+      "id": "folder-large",
+      "kind": "folder",
+      "size": "large",
+      "samples": 30
+    },
+    {
+      "id": "pr-1-file",
+      "kind": "pull-request",
+      "files": 1,
+      "samples": 30
+    },
+    {
+      "id": "pr-30-files",
+      "kind": "pull-request",
+      "files": 30,
+      "samples": 30
+    },
+    {
+      "id": "pr-300-files",
+      "kind": "pull-request",
+      "files": 300,
+      "samples": 30
+    },
+    {
+      "id": "pr-1000-files",
+      "kind": "pull-request",
+      "files": 1000,
+      "samples": 30
+    },
+    {
+      "id": "pr-3000-files",
+      "kind": "pull-request",
+      "files": 3000,
+      "samples": 30
+    }
+  ],
+  "conversation": [
+    0,
+    100,
+    101
+  ],
+  "faults": [
+    "offline",
+    "slow",
+    "force-push",
+    "base-retarget",
+    "cancelled"
+  ],
+  "cacheStates": [
+    "process-cold",
+    "kodi-cache-cold",
+    "os-page-cache-warm"
+  ],
+  "pullRequests": {
+    "repository": "https://github.com/microsoft/TypeScript",
+    "checkout": "/tmp/kodi-perf-fixtures/TypeScript",
+    "note": "Public pull requests read with existing gh auth. No fixture pull request is created anywhere.",
+    "buckets": [
+      {
+        "id": "pr-1-file",
+        "url": "https://github.com/microsoft/TypeScript/pull/64258",
+        "changedFiles": 1,
+        "samples": 30
+      },
+      {
+        "id": "pr-33-files",
+        "url": "https://github.com/microsoft/TypeScript/pull/64216",
+        "changedFiles": 33,
+        "samples": 30
+      },
+      {
+        "id": "pr-304-files",
+        "url": "https://github.com/microsoft/TypeScript/pull/32372",
+        "changedFiles": 304,
+        "samples": 10
+      },
+      {
+        "id": "pr-1063-files",
+        "url": "https://github.com/microsoft/TypeScript/pull/53463",
+        "changedFiles": 1063,
+        "samples": 10
+      },
+      {
+        "id": "pr-1263-files",
+        "url": "https://github.com/microsoft/TypeScript/pull/50820",
+        "changedFiles": 1263,
+        "samples": 10
+      }
+    ],
+    "unavailable": {
+      "pr-3000-files": "No public pull request at that size was found; 1,263 files is the largest bucket measured."
+    }
+  }
+}

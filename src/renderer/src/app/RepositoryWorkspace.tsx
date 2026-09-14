@@ -24,6 +24,7 @@ import type { AgentSelection } from '../agent/agentAttachments'
 import { usePullRequestConversation } from '../github/usePullRequestConversation'
 import { useReviewSession } from '../review/useReviewSession'
 import { useReviewLoadState, type ReviewLoadState } from '../review/useReviewLoadState'
+import { useHibernationVeto } from './useHibernation'
 import { useViewerSuspension } from './useViewerSuspension'
 import { formatKeybinding, type ReviewCommand } from '../settings/keybindings'
 import { useReviewShortcuts } from '../review/useReviewShortcuts'
@@ -1377,6 +1378,16 @@ const RepositoryWorkspace = memo(function RepositoryWorkspace({
   const viewerSuspended = hiddenLongEnoughToRelease
     && fileEditing.activeSession == null
     && fileEditing.controls.unsavedPaths.length === 0
+
+  // The same state that keeps the viewer mounted also blocks hibernation:
+  // releasing a review world would take the edit session and its drafts with it.
+  const unsavedSession = fileEditing.activeSession != null
+  const unsavedCount = fileEditing.controls.unsavedPaths.length
+  useHibernationVeto(useCallback(() => {
+    if (unsavedCount > 0) return `${unsavedCount} file${unsavedCount === 1 ? '' : 's'} have unsaved edits`
+    if (unsavedSession) return 'a file edit session is open'
+    return null
+  }, [unsavedCount, unsavedSession]))
 
   // Unmounting the viewer only frees DOM; the workers and their AST caches are
   // the expensive part, so the provider tears the pool down too.

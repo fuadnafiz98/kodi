@@ -18,6 +18,7 @@
     "update:mac": "bun run dist:mac && bun run install:mac",
     "open:mac": "env -u ELECTRON_RUN_AS_NODE -u ELECTRON_NO_ASAR open -a \"Kodi\"",
     "raycast:dev": "npm --prefix extensions/kodi run dev",
+    "raycast:build": "npm --prefix extensions/kodi run build",
     "update:mac:open": "bun run update:mac && bun run open:mac",
     "preview": "electron-vite preview",
     "typecheck": "tsc -b tsconfig.json",
@@ -32,7 +33,10 @@
     "perf:open-folder-probe": "bun scripts/perf/open-folder-probe.mjs",
     "perf:pr-open-probe": "bun scripts/perf/pr-open-probe.mjs",
     "perf:theme-shots": "bun scripts/perf/theme-screenshots.mjs",
-    "perf:patch-stream": "bun scripts/benchmark-patch-stream.mjs"
+    "perf:patch-stream": "bun scripts/benchmark-patch-stream.mjs",
+    "perf:memory-probe": "bun scripts/perf/memory-probe.mjs",
+    "perf:lifecycle-probe": "bun scripts/perf/lifecycle-probe.mjs",
+    "perf:matrix": "bash scripts/perf/run-matrix.sh"
   },
   "comment:dependencies": "electron-builder packs `dependencies` into the app verbatim. Only packages the main process resolves at runtime belong here: the Claude Agent SDK, @vscode/ripgrep, and the native node-pty bridge. Everything the renderer uses is bundled by Vite into out/renderer, so shipping it again would be dead weight.",
   "dependencies": {

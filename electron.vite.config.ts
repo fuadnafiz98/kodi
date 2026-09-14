@@ -333,9 +333,22 @@ function reactCompilerOptions(): Record<string, unknown> {
   return options
 }
 
+// The About panel reports when this bundle was built. `SOURCE_DATE_EPOCH` wins
+// when it is set, so a reproducible build stays byte-identical instead of
+// baking in the wall clock of whoever ran it.
+function buildTime(): string {
+  const reproducible = process.env.SOURCE_DATE_EPOCH
+  const seconds = reproducible == null ? Number.NaN : Number(reproducible)
+  const built = Number.isFinite(seconds) ? new Date(seconds * 1_000) : new Date()
+  return built.toISOString()
+}
+
 export default defineConfig({
   main: {
     plugins: [externalizeDepsPlugin()],
+    define: {
+      __BUILD_TIME__: JSON.stringify(buildTime())
+    },
     build: {
       // electron-vite ships minification off by default; every byte here is
       // parsed on every cold start, so all three targets opt in explicitly.

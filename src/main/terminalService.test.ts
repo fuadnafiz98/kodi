@@ -4,6 +4,7 @@ import type { IPty } from 'node-pty'
 import type { TerminalDataEvent, TerminalExitEvent } from '../shared/contracts.js'
 import {
   createTerminalEnvironment,
+  posixLocaleValue,
   normalizeTerminalSize,
   resolveTerminalShell,
   TerminalService,
@@ -89,6 +90,33 @@ describe('terminal configuration', () => {
     expect(environment.GOOGLE_API_KEY).toBeUndefined()
     expect(environment.TERM).toBe('xterm-256color')
     expect(environment.TERM_PROGRAM).toBe('Kodi')
+  })
+
+  test('hands the shell a locale it can set', () => {
+    // macOS gives a GUI app its own locale identifier, and a login shell answers
+    // with `setlocale: LC_ALL: cannot change locale` on every new terminal.
+    const environment = createTerminalEnvironment('/work/project', '1.2.3', {
+      LC_ALL: 'en-US-u-ca-gregory-co-standard-cu-usd-fw-sun-hc-h12-ms-metric-tz-deber',
+      LANG: 'en_US.UTF-8',
+      LC_CTYPE: 'de-DE',
+      LC_TIME: 'not a locale at all'
+    })
+    expect(environment.LC_ALL).toBe('en_US.UTF-8')
+    expect(environment.LANG).toBe('en_US.UTF-8')
+    expect(environment.LC_CTYPE).toBe('de_DE.UTF-8')
+    // Nothing to recover: dropping it lets the shell fall back to LANG rather
+    // than inheriting a value it has already refused.
+    expect(environment.LC_TIME).toBeUndefined()
+  })
+
+  test('keeps locales a shell already accepts exactly as they are', () => {
+    expect(posixLocaleValue('en_US.UTF-8')).toBe('en_US.UTF-8')
+    expect(posixLocaleValue('C')).toBe('C')
+    expect(posixLocaleValue('POSIX')).toBe('POSIX')
+    expect(posixLocaleValue('pt_BR.ISO8859-1')).toBe('pt_BR.ISO8859-1')
+    expect(posixLocaleValue('sr_RS.UTF-8@latin')).toBe('sr_RS.UTF-8@latin')
+    expect(posixLocaleValue('zh-Hans-CN')).toBe('zh_CN.UTF-8')
+    expect(posixLocaleValue('  ')).toBeNull()
   })
 
   test('rejects malformed or excessive dimensions', () => {

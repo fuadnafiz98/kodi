@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs'
-import { rename, unlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
+
+import { writeFileAtomic } from './atomicWrite.js'
 
 import {
   EMPTY_WORKSPACE_CACHE_STORE,
@@ -9,7 +10,6 @@ import {
 } from '../shared/workspaceCache.js'
 
 const FILE_NAME = 'last-workspace.json'
-const TEMP_FILE_NAME = 'last-workspace.json.tmp'
 let pendingSave: Promise<void> = Promise.resolve()
 
 /**
@@ -25,23 +25,18 @@ export function loadWorkspaceCache(directory: string): WorkspaceCacheStore {
 }
 
 /**
- * Writes through a sibling temp file and renames it over the target: a quit or
- * a crash mid-write leaves the previous cache intact instead of a truncated
- * file the next launch has to throw away. Saves are chained so two of them
- * cannot interleave on the same temp path.
+ * Writes through a sibling temp file that is fsynced before the rename, so a
+ * crash or power loss mid-write leaves the previous cache intact rather than a
+ * truncated file the next launch has to throw away. Saves are chained so two of
+ * them cannot interleave.
  */
 export function saveWorkspaceCache(directory: string, store: WorkspaceCacheStore): Promise<void> {
   const path = join(directory, FILE_NAME)
-  const tempPath = join(directory, TEMP_FILE_NAME)
   const serialized = JSON.stringify(store)
   pendingSave = pendingSave
-    .then(async () => {
-      await writeFile(tempPath, serialized, 'utf8')
-      await rename(tempPath, path)
-    })
-    .catch(async (error: unknown) => {
+    .then(() => writeFileAtomic(path, serialized))
+    .catch((error: unknown) => {
       console.error('Could not persist the last workspace:', error)
-      await unlink(tempPath).catch(() => undefined)
     })
   return pendingSave
 }

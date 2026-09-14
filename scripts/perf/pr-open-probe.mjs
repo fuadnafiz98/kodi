@@ -136,11 +136,21 @@ async function coldRun(pullRequest) {
 
 guardExit()
 
+// A warm reopen of a pull request that already has a tab is absorbed by that
+// tab and emits no progress at all, so repeating one URL in a warm app measures
+// a single open and then nothing. Each cold run is a fresh process, which is a
+// genuine first open every time, so the samples come from there — and that is
+// also the scenario the plan asks about (Cmd+H from a cold app).
+const COLD_SAMPLES = Number(process.env.COLD_SAMPLES ?? process.env.SAMPLES ?? '1')
+
 const records = []
 try {
   records.push(...await warmRuns())
-  const first = PRS[0]
-  if (first != null) records.push(await coldRun(first))
+  for (const pullRequest of new Set(PRS)) {
+    for (let sample = 0; sample < COLD_SAMPLES; sample += 1) {
+      records.push(await coldRun(pullRequest))
+    }
+  }
 } finally {
   await quit()
 }
@@ -155,6 +165,9 @@ console.log(summaryLine('pr-open', LABEL, {
   warmDoneMs: warm.map((record) => record.doneMs),
   warmCodeViewMs: warm.map((record) => record.firstCodeViewMs),
   coldSurfaceMs: records.filter((record) => record.mode === 'cold-app').map((record) => record.reviewSurfaceMs),
+  coldMetadataMs: records.filter((record) => record.mode === 'cold-app').map((record) => record.metadataMs),
+  coldFirstPageMs: records.filter((record) => record.mode === 'cold-app').map((record) => record.firstPageMs),
+  coldDoneMs: records.filter((record) => record.mode === 'cold-app').map((record) => record.doneMs),
   coldCodeViewMs: records.filter((record) => record.mode === 'cold-app').map((record) => record.firstCodeViewMs)
 }))
 console.log(`Appended to ${await appendResult(LABEL, { probe: 'pr-open', summary })}`)

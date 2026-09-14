@@ -29,6 +29,7 @@ import type {
   PullRequestReview,
   PullRequestReviewComment,
   PullRequestReviewEvent,
+  PullRequestSnapshotIdentity,
   PullRequestSummary,
   RemoteBranch,
   RemoteReviewComment,
@@ -46,6 +47,7 @@ import { normalizeGitHubPullRequestUrl } from '../shared/pullRequestUrl.js'
 import { MAX_CACHED_PATHS } from '../shared/workspaceCache.js'
 import {
   COMMAND_ABORTED_MESSAGE,
+  COMMAND_EXECUTION_TIMEOUT_MESSAGE,
   awaitAll,
   comparePaths,
   GitObjectReader,
@@ -73,7 +75,6 @@ import {
   MAX_PULL_REQUEST_FILES,
   parseNumstat,
   PULL_REQUEST_FILES_PAGE_SIZE,
-  pullRequestFilePageWave,
   selectOversizedDiffFiles,
   type RawPullRequestFile
 } from './patchBuilder.js'
@@ -167,18 +168,19 @@ const PULL_REQUEST_LIST_LIMIT = 30
 // restart — can serve it from disk instead of repeating a download the code's own
 // comment measures at nearly two minutes for a 3000-file review. A force-push
 // produces a new oid and therefore a new key, so staleness is impossible.
-const PULL_REQUEST_CACHE_VERSION = 3
+const PULL_REQUEST_CACHE_VERSION = 4
+const PULL_REQUEST_SNAPSHOT_FORMAT_EPOCH = 1
 const MAX_PULL_REQUEST_CACHE_ENTRIES = 60
 const MAX_PULL_REQUEST_CACHE_BYTES = 200 * 1024 * 1024
 // Written beside the diff so a reopen can paint from disk before `gh` answers:
 // the diff is keyed on the head oid, which only `gh pr view` knows, so without a
 // URL-keyed pointer even a warm cache waited out the metadata hop.
 const PULL_REQUEST_INDEX_SUFFIX = '.latest.json'
-const PULL_REQUEST_INDEX_VERSION = 1
+const PULL_REQUEST_INDEX_VERSION = 2
 
 export interface CachedPullRequestReview {
   version: number
-  headRefOid: string
+  snapshotIdentity: PullRequestSnapshotIdentity
   files: PullRequestFile[]
   patch: string
   omittedFiles: OmittedDiffFile[]
@@ -186,7 +188,7 @@ export interface CachedPullRequestReview {
 
 interface CachedPullRequestReviewMetadata {
   version: number
-  headRefOid: string
+  snapshotIdentity: PullRequestSnapshotIdentity
   files: PullRequestFile[]
   omittedFiles: OmittedDiffFile[]
   patchLength: number
@@ -204,9 +206,35 @@ export interface CachedPullRequestIndex {
   url: string
   headRefOid: string
   baseRefOid: string
+  snapshotIdentity: PullRequestSnapshotIdentity
   viewerCanSubmitDecision: boolean
   summary: PullRequestSummary
   writtenAt: number
+}
+
+export function pullRequestSnapshotIdentity(review: PullRequestReview): PullRequestSnapshotIdentity {
+  const normalized = normalizeGitHubPullRequestUrl(review.pullRequest.url)
+  const match = normalized == null ? null : new URL(normalized)
+  const [owner = '', repository = ''] = match?.pathname.split('/').filter(Boolean) ?? []
+  return {
+    formatEpoch: PULL_REQUEST_SNAPSHOT_FORMAT_EPOCH,
+    host: match?.host.toLowerCase() ?? '',
+    repository: `${owner}/${repository}`.toLowerCase(),
+    number: review.pullRequest.number,
+    baseRefName: review.pullRequest.baseRefName,
+    baseOid: review.baseOid,
+    headRefName: review.pullRequest.headRefName,
+    headOid: review.headOid,
+    effectiveBaseOid: review.baseOid,
+    patchSource: 'github'
+  }
+}
+
+function sameSnapshotIdentity(
+  left: PullRequestSnapshotIdentity,
+  right: PullRequestSnapshotIdentity
+): boolean {
+  return JSON.stringify(left) === JSON.stringify(right)
 }
 const MAX_REVIEW_BODY_LENGTH = 65_536
 // `gh search prs --json` only exposes these pull request fields; richer fields need `gh pr view`.
@@ -289,11 +317,12 @@ const ADD_PULL_REQUEST_REVIEW_MUTATION = `
   }
 `
 const PULL_REQUEST_THREADS_QUERY = `
-  query PullRequestThreads($owner: String!, $name: String!, $number: Int!) {
+  query PullRequestThreads($owner: String!, $name: String!, $number: Int!, $threadCursor: String, $reviewCursor: String) {
     repository(owner: $owner, name: $name) {
       pullRequest(number: $number) {
         body
-        reviewThreads(first: 100) {
+        reviewThreads(first: 100, after: $threadCursor) {
+          pageInfo { hasNextPage endCursor }
           nodes {
             id
             isResolved
@@ -302,18 +331,41 @@ const PULL_REQUEST_THREADS_QUERY = `
             line
             startLine
             diffSide
-            comments(first: 50) {
+            comments(first: 100) {
+              pageInfo { hasNextPage endCursor }
               nodes { id body author { login avatarUrl } createdAt }
             }
           }
         }
-        reviews(first: 50) {
+        reviews(first: 50, after: $reviewCursor) {
+          pageInfo { hasNextPage endCursor }
           nodes { id state body submittedAt author { login avatarUrl } }
         }
       }
     }
   }
 `
+const PULL_REQUEST_THREAD_COMMENTS_QUERY = `
+  query PullRequestThreadComments($id: ID!, $cursor: String) {
+    node(id: $id) {
+      ... on PullRequestReviewThread {
+        comments(first: 100, after: $cursor) {
+          pageInfo { hasNextPage endCursor }
+          nodes { id body author { login avatarUrl } createdAt }
+        }
+      }
+    }
+  }
+`
+const MAX_CONVERSATION_PAGES = 20
+const MAX_CONVERSATION_BYTES = 8 * 1024 * 1024
+const CONVERSATION_CACHE_TTL_MS = 60_000
+const conversationCache = new Map<string, { value: PullRequestConversation; fetchedAt: number }>()
+const conversationFlights = new Map<string, Promise<PullRequestConversation>>()
+
+export function conversationCacheEntryCount(): number {
+  return conversationCache.size
+}
 const ADD_REVIEW_THREAD_REPLY_MUTATION = `
   mutation AddReviewThreadReply($input: AddPullRequestReviewThreadReplyInput!) {
     addPullRequestReviewThreadReply(input: $input) {
@@ -422,6 +474,26 @@ export function pullRequestReviewLane(intent: PullRequestReviewIntent): CommandL
 function isTransientGitHubError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error)
   return /HTTP\s+(?:502|503|504)\b|timed?\s*out|timeout|connection reset/i.test(message)
+}
+
+const GITHUB_MUTATION_SPACING_MS = 1_000
+let githubMutationTail: Promise<void> = Promise.resolve()
+let lastGitHubMutationStartedAt = 0
+
+function runGitHubMutation<Result>(operation: () => Promise<Result>): Promise<Result> {
+  const run = githubMutationTail.catch(() => undefined).then(async () => {
+    const waitMs = Math.max(0, GITHUB_MUTATION_SPACING_MS - (Date.now() - lastGitHubMutationStartedAt))
+    if (waitMs > 0) await new Promise((resolveDelay) => setTimeout(resolveDelay, waitMs))
+    lastGitHubMutationStartedAt = Date.now()
+    return operation()
+  })
+  githubMutationTail = run.then(() => undefined, () => undefined)
+  return run.catch((error: unknown) => {
+    if (error instanceof Error && error.message === COMMAND_EXECUTION_TIMEOUT_MESSAGE) {
+      throw new Error('GitHub may have accepted this change, but Kodi could not confirm the outcome. Refresh before you resend it.')
+    }
+    throw error
+  })
 }
 
 /**
@@ -1195,8 +1267,8 @@ export class PullRequestReviewCache {
 
   // Hashed rather than composed from the slug: a pull request URL is remote input
   // and must never decide a path segment.
-  #entryPaths(url: string, headRefOid: string): { metadata: string; patch: string } {
-    const base = resolve(this.#directory, createCacheKey(url, headRefOid))
+  #entryPaths(url: string, identity: PullRequestSnapshotIdentity): { metadata: string; patch: string } {
+    const base = resolve(this.#directory, createCacheKey(url, JSON.stringify(identity)))
     return { metadata: `${base}.json`, patch: `${base}.patch` }
   }
 
@@ -1219,14 +1291,21 @@ export class PullRequestReviewCache {
     else this.#pendingPatchWrites.set(path, remaining)
   }
 
-  async read(url: string, headRefOid: string): Promise<CachedPullRequestReview | null> {
-    if (headRefOid === '') return null
+  async read(
+    url: string,
+    expected: PullRequestSnapshotIdentity | string
+  ): Promise<CachedPullRequestReview | null> {
+    const identity = typeof expected === 'string'
+      ? (await this.readIndex(url))?.snapshotIdentity ?? null
+      : expected
+    if (identity == null || (typeof expected === 'string' && identity.headOid !== expected)) return null
+    if (identity.headOid === '' || identity.baseOid === '') return null
     try {
-      const paths = this.#entryPaths(url, headRefOid)
+      const paths = this.#entryPaths(url, identity)
       const entry = JSON.parse(await readFile(paths.metadata, 'utf8')) as CachedPullRequestReviewMetadata
       if (
         entry.version !== PULL_REQUEST_CACHE_VERSION
-        || entry.headRefOid !== headRefOid
+        || !sameSnapshotIdentity(entry.snapshotIdentity, identity)
         || !Array.isArray(entry.files)
         || !Array.isArray(entry.omittedFiles)
         || !Number.isSafeInteger(entry.patchLength)
@@ -1236,7 +1315,7 @@ export class PullRequestReviewCache {
       if (patch.length !== entry.patchLength) return null
       return {
         version: entry.version,
-        headRefOid: entry.headRefOid,
+        snapshotIdentity: entry.snapshotIdentity,
         files: entry.files,
         patch,
         omittedFiles: entry.omittedFiles
@@ -1263,6 +1342,11 @@ export class PullRequestReviewCache {
         || typeof entry.headRefOid !== 'string'
         || entry.headRefOid === ''
         || typeof entry.baseRefOid !== 'string'
+        || typeof entry.snapshotIdentity !== 'object'
+        || entry.snapshotIdentity == null
+        || entry.snapshotIdentity.formatEpoch !== PULL_REQUEST_SNAPSHOT_FORMAT_EPOCH
+        || entry.snapshotIdentity.headOid !== entry.headRefOid
+        || entry.snapshotIdentity.baseOid !== entry.baseRefOid
         || typeof entry.viewerCanSubmitDecision !== 'boolean'
         || typeof entry.summary !== 'object'
         || entry.summary == null
@@ -1283,6 +1367,7 @@ export class PullRequestReviewCache {
       url,
       headRefOid,
       baseRefOid: review.baseOid,
+      snapshotIdentity: pullRequestSnapshotIdentity(review),
       viewerCanSubmitDecision: review.viewerCanSubmitDecision,
       summary: review.pullRequest,
       writtenAt: Date.now()
@@ -1297,15 +1382,16 @@ export class PullRequestReviewCache {
   }
 
   async write(url: string, headRefOid: string, review: PullRequestReview): Promise<void> {
-    if (headRefOid === '' || review.files.length === 0) return
+    if (headRefOid === '' || headRefOid !== review.headOid || review.files.length === 0) return
+    const snapshotIdentity = pullRequestSnapshotIdentity(review)
     const entry: CachedPullRequestReviewMetadata = {
       version: PULL_REQUEST_CACHE_VERSION,
-      headRefOid,
+      snapshotIdentity,
       files: review.files,
       omittedFiles: review.omittedFiles,
       patchLength: review.patch.length
     }
-    const paths = this.#entryPaths(url, headRefOid)
+    const paths = this.#entryPaths(url, snapshotIdentity)
     const writeId = randomUUID()
     const temporaryPatchPath = `${paths.patch}.${writeId}.tmp`
     const temporaryMetadataPath = `${paths.metadata}.${writeId}.tmp`
@@ -1441,10 +1527,16 @@ export class RepositoryService {
   // cancelling one of them must not abort the fetch the others are still reading.
   #reviewRequests = new Map<string, PullRequestReviewFlight>()
   #reviewFlights = new Map<string, PullRequestReviewFlight>()
+  #reviewsRequiringRefresh = new Set<string>()
   #pullRequestCache: PullRequestReviewCache | null = null
+  #pullRequestCacheDirectory: string | null = null
   #activeSearch: ActiveContentSearch | null = null
   #contentSearchMetrics: ContentSearchMetrics = { spawned: 0, cancelled: 0, completed: 0, durationsMs: [] }
   #githubViewerLogin: string | null = null
+  #githubViewerResolvedAt = 0
+  #githubAccountId: string | null = null
+  #githubAccountResolvedAt = 0
+  #githubAuthEpoch = 0
   // undefined means "not resolved yet"; null means "resolved, no GitHub remote".
   #githubSlug: string | null | undefined = undefined
   #remotes: Promise<GitRemote[]> | undefined
@@ -1472,19 +1564,23 @@ export class RepositoryService {
 
   // Passed in from the main entry point so this module keeps no Electron import.
   setPullRequestCacheDirectory(directory: string | null): void {
+    this.#pullRequestCacheDirectory = directory
     this.#pullRequestCache = directory == null ? null : new PullRequestReviewCache(directory)
   }
 
   async prepareAgentReview(subject: AgentRequestSubject): Promise<string> {
     const remembered = this.#findRememberedReview(subject)
-    const cached = remembered == null && subject.pullRequestUrl != null && subject.headOid != null
-      ? await this.#pullRequestCache?.read(subject.pullRequestUrl, subject.headOid) ?? null
+    const index = remembered == null && subject.pullRequestUrl != null && subject.headOid != null
+      ? await this.#pullRequestCache?.readIndex(subject.pullRequestUrl) ?? null
+      : null
+    const cached = index != null && index.headRefOid === subject.headOid
+      ? await this.#pullRequestCache?.read(index.url, index.snapshotIdentity) ?? null
       : null
     return prepareAgentReviewContext({
       snapshot: this.#snapshot,
       subject,
       remembered,
-      cached
+      cached: cached == null ? null : { ...cached, headRefOid: cached.snapshotIdentity.headOid }
     })
   }
 
@@ -2283,8 +2379,113 @@ export class RepositoryService {
     this.#requireGitRepository()
     const normalizedSelector = normalizePullRequestSelector(selector)
     const ghExecutable = await getGhExecutable()
+    const attemptedAt = Date.now()
+    let cacheKey = ''
     try {
-      const { owner, name, number } = await this.#resolvePullRequestIdentity(ghExecutable, normalizedSelector)
+      const [{ owner, name, number }, accountId] = await Promise.all([
+        this.#resolvePullRequestIdentity(ghExecutable, normalizedSelector),
+        this.#getGitHubAccountId(ghExecutable)
+      ])
+      cacheKey = `github.com:${accountId}:${this.#githubAuthEpoch}:${owner.toLowerCase()}/${name.toLowerCase()}:${number}:conversation:v2`
+      let cached = conversationCache.get(cacheKey)
+      if (cached == null) {
+        cached = await this.#readConversationCache(cacheKey)
+        if (cached != null) conversationCache.set(cacheKey, cached)
+      }
+      if (cached != null && attemptedAt - cached.fetchedAt < CONVERSATION_CACHE_TTL_MS) {
+        return { ...cached.value, stale: false, attemptedAt }
+      }
+      const pending = conversationFlights.get(cacheKey)
+      if (pending != null) return pending
+      const flight = this.#loadPullRequestConversationPages(
+        ghExecutable,
+        { owner, name, number },
+        attemptedAt
+      ).then((conversation) => {
+        conversationCache.set(cacheKey, { value: conversation, fetchedAt: conversation.fetchedAt ?? Date.now() })
+        void this.#writeConversationCache(cacheKey, conversation)
+        while (conversationCache.size > 100) conversationCache.delete(conversationCache.keys().next().value as string)
+        return conversation
+      }).catch((error: unknown) => {
+        const lastGood = conversationCache.get(cacheKey)?.value
+        if (lastGood == null) throw error
+        return {
+          ...lastGood,
+          available: false,
+          message: gitHubIntegrationErrorMessage(error),
+          stale: true,
+          attemptedAt,
+          partialError: gitHubIntegrationErrorMessage(error)
+        }
+      }).finally(() => {
+        if (conversationFlights.get(cacheKey) === flight) conversationFlights.delete(cacheKey)
+      })
+      conversationFlights.set(cacheKey, flight)
+      return await flight
+    } catch (error) {
+      return {
+        available: false,
+        message: gitHubIntegrationErrorMessage(error),
+        body: '',
+        threads: [],
+        reviews: [],
+        complete: false,
+        stale: false,
+        attemptedAt,
+        partialError: gitHubIntegrationErrorMessage(error)
+      }
+    }
+  }
+
+  async #readConversationCache(
+    key: string
+  ): Promise<{ value: PullRequestConversation; fetchedAt: number } | undefined> {
+    const directory = this.#pullRequestCacheDirectory
+    if (directory == null) return undefined
+    try {
+      const raw = JSON.parse(await readFile(resolve(directory, `conversation-${createCacheKey(key)}.json`), 'utf8')) as {
+        version?: number
+        fetchedAt?: number
+        value?: PullRequestConversation
+      }
+      if (raw.version !== 1 || typeof raw.fetchedAt !== 'number' || raw.value?.available !== true
+        || raw.value.complete !== true || !Array.isArray(raw.value.threads) || !Array.isArray(raw.value.reviews)) {
+        return undefined
+      }
+      return { value: raw.value, fetchedAt: raw.fetchedAt }
+    } catch {
+      return undefined
+    }
+  }
+
+  async #writeConversationCache(key: string, value: PullRequestConversation): Promise<void> {
+    const directory = this.#pullRequestCacheDirectory
+    if (directory == null || value.available !== true || value.complete !== true) return
+    const path = resolve(directory, `conversation-${createCacheKey(key)}.json`)
+    const temporaryPath = `${path}.${randomUUID()}.tmp`
+    try {
+      await mkdir(directory, { recursive: true })
+      await writeFile(temporaryPath, JSON.stringify({ version: 1, fetchedAt: value.fetchedAt, value }), 'utf8')
+      await rename(temporaryPath, path)
+    } catch {
+      await unlink(temporaryPath).catch(() => undefined)
+    }
+  }
+
+  async #loadPullRequestConversationPages(
+    ghExecutable: string,
+    identity: { owner: string; name: string; number: number },
+    attemptedAt: number
+  ): Promise<PullRequestConversation> {
+    const threads = new Map<string, RemoteReviewThread>()
+    const reviews = new Map<string, RemoteReviewSummary>()
+    let body = ''
+    let threadCursor: string | null = null
+    let reviewCursor: string | null = null
+    let pages = 0
+    let bytes = 0
+    let complete = true
+    do {
       const result = await runCommand(
         ghExecutable,
         ['api', 'graphql', '--input', '-'],
@@ -2292,20 +2493,85 @@ export class RepositoryService {
         [],
         JSON.stringify({
           query: PULL_REQUEST_THREADS_QUERY,
-          variables: { owner, name, number }
-        })
+          variables: { ...identity, threadCursor, reviewCursor }
+        }),
+        undefined,
+        'interactive',
+        { executionMs: 45_000 }
       )
-      const conversation = parsePullRequestConversation(JSON.parse(result.stdout.toString('utf8')) as unknown)
-      return { available: true, message: null, ...conversation }
-    } catch (error) {
-      return {
-        available: false,
-        message: gitHubIntegrationErrorMessage(error),
-        body: '',
-        threads: [],
-        reviews: []
+      pages += 1
+      bytes += result.stdout.length
+      const raw = JSON.parse(result.stdout.toString('utf8')) as unknown
+      const parsed = parsePullRequestConversation(raw)
+      body = parsed.body || body
+      for (const thread of parsed.threads) threads.set(thread.id, thread)
+      for (const review of parsed.reviews) reviews.set(review.id, review)
+      const pullRequest = (raw as { data?: { repository?: { pullRequest?: Record<string, unknown> } } })
+        ?.data?.repository?.pullRequest
+      const threadPage = (pullRequest?.reviewThreads as { pageInfo?: { hasNextPage?: boolean; endCursor?: string } } | undefined)?.pageInfo
+      const reviewPage = (pullRequest?.reviews as { pageInfo?: { hasNextPage?: boolean; endCursor?: string } } | undefined)?.pageInfo
+      threadCursor = threadPage?.hasNextPage === true ? threadPage.endCursor ?? null : null
+      reviewCursor = reviewPage?.hasNextPage === true ? reviewPage.endCursor ?? null : null
+      if (pages >= MAX_CONVERSATION_PAGES || bytes >= MAX_CONVERSATION_BYTES) {
+        complete = threadCursor == null && reviewCursor == null
+        break
       }
+    } while (threadCursor != null || reviewCursor != null)
+
+    for (const thread of threads.values()) {
+      if (pages >= MAX_CONVERSATION_PAGES || bytes >= MAX_CONVERSATION_BYTES) {
+        complete = false
+        break
+      }
+      const comments = new Map(thread.comments.map((comment) => [comment.id, comment]))
+      let cursor = await this.#threadCommentCursor(ghExecutable, thread.id, null, comments, (size) => { bytes += size })
+      while (cursor != null && pages < MAX_CONVERSATION_PAGES && bytes < MAX_CONVERSATION_BYTES) {
+        pages += 1
+        cursor = await this.#threadCommentCursor(ghExecutable, thread.id, cursor, comments, (size) => { bytes += size })
+      }
+      if (cursor != null) complete = false
+      thread.comments = [...comments.values()]
     }
+    const fetchedAt = Date.now()
+    return {
+      available: true,
+      message: null,
+      body,
+      threads: [...threads.values()],
+      reviews: [...reviews.values()],
+      complete,
+      stale: false,
+      fetchedAt,
+      attemptedAt,
+      partialError: complete ? null : 'GitHub conversation page or byte budget reached.'
+    }
+  }
+
+  async #threadCommentCursor(
+    ghExecutable: string,
+    threadId: string,
+    cursor: string | null,
+    comments: Map<string, RemoteReviewComment>,
+    countBytes: (bytes: number) => void
+  ): Promise<string | null> {
+    if (cursor == null && comments.size < 100) return null
+    const result = await runCommand(
+      ghExecutable,
+      ['api', 'graphql', '--input', '-'],
+      this.#requireRoot(),
+      [],
+      JSON.stringify({ query: PULL_REQUEST_THREAD_COMMENTS_QUERY, variables: { id: threadId, cursor } }),
+      undefined,
+      'interactive',
+      { executionMs: 45_000 }
+    )
+    countBytes(result.stdout.length)
+    const raw = JSON.parse(result.stdout.toString('utf8')) as {
+      data?: { node?: { comments?: { nodes?: unknown; pageInfo?: { hasNextPage?: boolean; endCursor?: string } } } }
+    }
+    const connection = raw.data?.node?.comments
+    for (const comment of parseRemoteReviewComments(connection)) comments.set(comment.id, comment)
+    return connection?.pageInfo?.hasNextPage === true ? connection.pageInfo.endCursor ?? null : null
   }
 
   async #resolvePullRequestIdentity(
@@ -2341,7 +2607,7 @@ export class RepositoryService {
     if (replyBody === '') throw new Error('A reply cannot be empty.')
     if (replyBody.length > MAX_REVIEW_BODY_LENGTH) throw new Error('This reply is too long to send.')
     const ghExecutable = await getGhExecutable()
-    await runCommand(
+    await runGitHubMutation(() => runCommand(
       ghExecutable,
       ['api', 'graphql', '--input', '-'],
       this.#requireRoot(),
@@ -2349,8 +2615,11 @@ export class RepositoryService {
       JSON.stringify({
         query: ADD_REVIEW_THREAD_REPLY_MUTATION,
         variables: { input: { pullRequestReviewThreadId: threadId, body: replyBody } }
-      })
-    )
+      }),
+      undefined,
+      'interactive',
+      { executionMs: 60_000 }
+    ))
   }
 
   async setPullRequestThreadResolved(threadId: unknown, resolved: unknown): Promise<void> {
@@ -2359,7 +2628,7 @@ export class RepositoryService {
       throw new Error('The review thread could not be identified.')
     }
     const ghExecutable = await getGhExecutable()
-    await runCommand(
+    await runGitHubMutation(() => runCommand(
       ghExecutable,
       ['api', 'graphql', '--input', '-'],
       this.#requireRoot(),
@@ -2367,8 +2636,11 @@ export class RepositoryService {
       JSON.stringify({
         query: resolved === true ? RESOLVE_REVIEW_THREAD_MUTATION : UNRESOLVE_REVIEW_THREAD_MUTATION,
         variables: { input: { threadId } }
-      })
-    )
+      }),
+      undefined,
+      'interactive',
+      { executionMs: 60_000 }
+    ))
   }
 
   async mergePullRequest(selector: number | string, strategy: unknown): Promise<void> {
@@ -2385,17 +2657,30 @@ export class RepositoryService {
       this.getRemotes(),
       runGitHubReadCommand(
         ghExecutable,
-        ['pr', 'view', normalizedSelector, '--json', 'number,url'],
+        ['pr', 'view', normalizedSelector, '--json', 'number,url,baseRefOid,headRefOid'],
         this.#requireRoot()
       )
     ])
-    const details = parseJson<{ number: number; url: string }>(detailsResult, 'GitHub CLI')
+    const details = parseJson<{ number: number; url: string; baseRefOid: string; headRefOid: string }>(detailsResult, 'GitHub CLI')
     validatePullRequestTarget(details.url, details.number)
     // Merging is irreversible, so it is refused unless the pull request lives in the open repository.
     if (!pullRequestTargetsRemotes(remotes, details.url)) {
       throw new Error('This pull request belongs to a different repository than the open one.')
     }
-    await runCommand(ghExecutable, ['pr', 'merge', normalizedSelector, mergeFlag], this.#requireRoot())
+    const opened = await this.#pullRequestCache?.readIndex(details.url) ?? null
+    if (opened != null && (opened.baseRefOid !== details.baseRefOid || opened.headRefOid !== details.headRefOid)) {
+      throw new Error('This pull request changed after you opened it. Reload the review before merging.')
+    }
+    await runGitHubMutation(() => runCommand(
+      ghExecutable,
+      ['pr', 'merge', normalizedSelector, mergeFlag],
+      this.#requireRoot(),
+      [],
+      undefined,
+      undefined,
+      'interactive',
+      { executionMs: 120_000 }
+    ))
   }
 
   async markPullRequestReady(selector: number | string): Promise<void> {
@@ -2417,7 +2702,16 @@ export class RepositoryService {
     if (!pullRequestTargetsRemotes(remotes, details.url)) {
       throw new Error('This pull request belongs to a different repository than the open one.')
     }
-    await runCommand(ghExecutable, ['pr', 'ready', normalizedSelector], this.#requireRoot())
+    await runGitHubMutation(() => runCommand(
+      ghExecutable,
+      ['pr', 'ready', normalizedSelector],
+      this.#requireRoot(),
+      [],
+      undefined,
+      undefined,
+      'interactive',
+      { executionMs: 60_000 }
+    ))
   }
 
   // The remote slug cannot change while a repository is open, so it is resolved
@@ -2584,6 +2878,39 @@ export class RepositoryService {
       title: `${headRef} compared with ${baseRef}`,
       baseRefName: baseRef,
       headRefName: headRef,
+      baseOid,
+      headOid
+    })
+  }
+
+  async getLocalSnapshotReview(
+    baseOid: string,
+    headOid: string,
+    baseRefName: string,
+    headRefName: string
+  ): Promise<LocalBranchReview> {
+    this.#requireGitRepository()
+    if (!/^[0-9a-f]{40}$/i.test(baseOid) || !/^[0-9a-f]{40}$/i.test(headOid)) {
+      throw new Error('The saved comparison commits are invalid.')
+    }
+    const safeBaseName = baseRefName.slice(0, 256)
+    const safeHeadName = headRefName.slice(0, 256)
+    const comparison = `${baseOid}..${headOid}`
+    const [baseExists, headExists, churnResult] = await awaitAll([
+      this.#git(['cat-file', '-e', `${baseOid}^{commit}`]),
+      this.#git(['cat-file', '-e', `${headOid}^{commit}`]),
+      this.#git(['diff', '--numstat', '-z', '--find-renames', comparison, '--'])
+    ])
+    void baseExists
+    void headExists
+    return this.#loadFileFirstReview({
+      churnEntries: parseNumstat(churnResult.stdout),
+      patchArgs: ['diff', '--no-color', '--full-index', '--find-renames', comparison, '--'],
+      signal: new AbortController().signal,
+      reviewId: `${safeBaseName}...${safeHeadName}:${baseOid}:${headOid}`,
+      title: `${safeHeadName} compared with ${safeBaseName}`,
+      baseRefName: safeBaseName,
+      headRefName: safeHeadName,
       baseOid,
       headOid
     })
@@ -2907,6 +3234,9 @@ export class RepositoryService {
     emit: PullRequestProgressListener,
     lane: CommandLaneSource
   ): Promise<PullRequestReview> {
+    if (this.#reviewsRequiringRefresh.delete(normalizedSelector)) {
+      return this.#fetchPullRequestReview(await getGhExecutable(), normalizedSelector, signal, emit, lane)
+    }
     const cached = await this.#openCachedPullRequestReview(normalizedSelector, emit)
     if (cached == null) {
       return this.#fetchPullRequestReview(await getGhExecutable(), normalizedSelector, signal, emit, lane)
@@ -2941,7 +3271,7 @@ export class RepositoryService {
     if (cache == null || !normalizedSelector.startsWith('https://')) return null
     const index = await cache.readIndex(normalizedSelector)
     if (index == null) return null
-    const entry = await cache.read(index.url, index.headRefOid)
+    const entry = await cache.read(index.url, index.snapshotIdentity)
     if (entry == null) return null
     const viewerLogin = this.#githubViewerLogin
     const base: PullRequestReview = {
@@ -2959,7 +3289,8 @@ export class RepositoryService {
       files: [],
       patch: '',
       omittedFiles: [],
-      expectedFileCount: entry.files.length
+      expectedFileCount: entry.files.length,
+      snapshotIdentity: index.snapshotIdentity
     }
     emit({ kind: 'metadata', selector: normalizedSelector, review: base })
     emit({
@@ -2990,33 +3321,41 @@ export class RepositoryService {
     lane: CommandLaneSource
   ): Promise<PullRequestReview> {
     this.#emitPullRequestChecks(ghExecutable, normalizedSelector, signal, emit, lane)
-    let headRefOid = ''
+    let revision: { baseRefOid: string; headRefOid: string; baseRefName: string; headRefName: string } | null = null
     try {
       const result = await runGitHubReadCommand(
         ghExecutable,
-        ['pr', 'view', normalizedSelector, '--json', 'headRefOid'],
+        ['pr', 'view', normalizedSelector, '--json', 'baseRefOid,headRefOid,baseRefName,headRefName'],
         this.#requireRoot(),
         signal,
         lane
       )
-      headRefOid = parseJson<{ headRefOid: string }>(result, 'GitHub CLI').headRefOid
+      revision = parseJson(result, 'GitHub CLI')
     } catch {
       // Offline, rate limited or cancelled. The cached diff is immutable for the oid
       // it was stored under, so it stays on screen instead of collapsing into an error.
       return cached
     }
-    if (signal.aborted || headRefOid === '' || headRefOid === cached.headOid) return cached
-    // A force push moved the head. Refetch quietly — the reader is looking at the
-    // previous head meanwhile — and hand the whole review over in one event.
-    const review = await this.#fetchPullRequestReview(
-      ghExecutable,
-      normalizedSelector,
-      signal,
-      () => {},
-      lane
-    )
-    emit({ kind: 'replace', selector: normalizedSelector, review })
-    return review
+    if (signal.aborted || revision == null || revision.headRefOid === '') return cached
+    if (revision.headRefOid === cached.headOid && revision.baseRefOid === cached.baseOid
+      && revision.baseRefName === cached.pullRequest.baseRefName
+      && revision.headRefName === cached.pullRequest.headRefName) return cached
+    const available = pullRequestSnapshotIdentity({
+      ...cached,
+      baseOid: revision.baseRefOid,
+      headOid: revision.headRefOid,
+      commitId: revision.headRefOid,
+      pullRequest: {
+        ...cached.pullRequest,
+        baseRefName: revision.baseRefName,
+        headRefName: revision.headRefName
+      }
+    })
+    // Preserve the current immutable world. The next explicit open is the user's
+    // adoption point and bypasses the stale URL index once.
+    this.#reviewsRequiringRefresh.add(normalizedSelector)
+    emit({ kind: 'revisionAvailable', selector: normalizedSelector, snapshotIdentity: available })
+    return cached
   }
 
   async #fetchPullRequestReview(
@@ -3024,7 +3363,8 @@ export class RepositoryService {
     normalizedSelector: string,
     signal: AbortSignal,
     emit: PullRequestProgressListener,
-    lane: CommandLaneSource
+    lane: CommandLaneSource,
+    attempt = 0
   ): Promise<PullRequestReview> {
     const collectedFiles: PullRequestFile[] = []
     const collectedOmitted: OmittedDiffFile[] = []
@@ -3113,11 +3453,14 @@ export class RepositoryService {
         files: [],
         patch: '',
         omittedFiles: [],
-        expectedFileCount
+        expectedFileCount,
+        snapshotIdentity: undefined
       }
+      const identity = pullRequestSnapshotIdentity(base)
+      base.snapshotIdentity = identity
       emit({ kind: 'metadata', selector: normalizedSelector, review: base })
 
-      const cached = await this.#pullRequestCache?.read(pullRequest.url, headRefOid) ?? null
+      const cached = await this.#pullRequestCache?.read(pullRequest.url, identity) ?? null
       if (cached != null) {
         // No files event: the whole patch is already in hand, so emitting it here
         // and returning it from the same call would clone up to the entire review
@@ -3165,6 +3508,29 @@ export class RepositoryService {
         patch: patchParts.join(''),
         omittedFiles: collectedOmitted
       }
+      const validated = await this.#readPullRequestRevision(
+        ghExecutable,
+        normalizedSelector,
+        signal,
+        lane
+      )
+      const stable = validated.baseRefOid === baseRefOid
+        && validated.headRefOid === headRefOid
+        && validated.baseRefName === pullRequest.baseRefName
+        && validated.headRefName === pullRequest.headRefName
+      if (!stable) {
+        if (attempt === 0 && !signal.aborted) {
+          return this.#fetchPullRequestReview(
+            ghExecutable,
+            normalizedSelector,
+            signal,
+            emit,
+            lane,
+            1
+          )
+        }
+        throw new Error('The pull request changed while Kodi was loading it. Refresh and try again.')
+      }
       if (emittedPage) {
         emit({ kind: 'done', selector: normalizedSelector, fileCount: collectedFiles.length })
       }
@@ -3175,6 +3541,22 @@ export class RepositoryService {
       diffAbort.abort()
       signal.removeEventListener('abort', abortDiff)
     }
+  }
+
+  async #readPullRequestRevision(
+    ghExecutable: string,
+    selector: string,
+    signal: AbortSignal,
+    lane: CommandLaneSource
+  ): Promise<{ baseRefOid: string; headRefOid: string; baseRefName: string; headRefName: string }> {
+    const result = await runGitHubReadCommand(
+      ghExecutable,
+      ['pr', 'view', selector, '--json', 'baseRefOid,headRefOid,baseRefName,headRefName'],
+      this.#requireRoot(),
+      signal,
+      lane
+    )
+    return parseJson(result, 'GitHub CLI')
   }
 
   // The identity never changes and the metadata hop already carries it. Resolving it
@@ -3293,17 +3675,34 @@ export class RepositoryService {
       return Array.isArray(pageFiles) ? pageFiles : []
     }
 
-    for (let wave = pullRequestFilePageWave(1); wave.length > 0; wave = pullRequestFilePageWave(wave[wave.length - 1]! + 1)) {
-      if (signal.aborted) return
-      const pages = await Promise.all(wave.map(readPage))
-      if (signal.aborted) return
-      let filesInWave = 0
-      for (const pageFiles of pages) {
-        if (pageFiles.length === 0) continue
-        filesInWave += pageFiles.length
-        emit(buildPullRequestPatchFromFiles(pageFiles))
+    const concurrency = 4
+    const maxPages = MAX_PULL_REQUEST_FILES / PULL_REQUEST_FILES_PAGE_SIZE
+    const inFlight = new Map<number, Promise<{ page: number; files: RawPullRequestFile[] }>>()
+    const completed = new Map<number, RawPullRequestFile[]>()
+    let nextToSchedule = 1
+    let nextToPublish = 1
+    let terminalPage = maxPages + 1
+    const schedule = (): void => {
+      while (!signal.aborted && inFlight.size < concurrency && nextToSchedule <= maxPages
+        && nextToSchedule < terminalPage) {
+        const page = nextToSchedule++
+        inFlight.set(page, readPage(page).then((files) => ({ page, files })))
       }
-      if (filesInWave === 0) return
+    }
+    schedule()
+    while (inFlight.size > 0 && !signal.aborted) {
+      const result = await Promise.race(inFlight.values())
+      inFlight.delete(result.page)
+      completed.set(result.page, result.files)
+      if (result.files.length === 0) terminalPage = Math.min(terminalPage, result.page)
+      while (completed.has(nextToPublish)) {
+        const files = completed.get(nextToPublish) ?? []
+        completed.delete(nextToPublish)
+        if (nextToPublish >= terminalPage || files.length === 0) return
+        emit(buildPullRequestPatchFromFiles(files))
+        nextToPublish += 1
+      }
+      schedule()
     }
   }
 
@@ -3357,7 +3756,7 @@ export class RepositoryService {
       throw new Error(SELF_REVIEW_DECISION_ERROR)
     }
     try {
-      await runCommand(
+      await runGitHubMutation(() => runCommand(
         ghExecutable,
         ['api', 'graphql', '--input', '-'],
         this.#requireRoot(),
@@ -3370,8 +3769,11 @@ export class RepositoryService {
               ...payload
             }
           }
-        })
-      )
+        }),
+        undefined,
+        'interactive',
+        { executionMs: 60_000 }
+      ))
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       if (/can not (?:approve|request changes on) your own pull request/i.test(message)) {
@@ -3382,7 +3784,9 @@ export class RepositoryService {
   }
 
   async #getGitHubViewerLogin(ghExecutable: string, lane: CommandLaneSource = 'interactive'): Promise<string> {
-    if (this.#githubViewerLogin != null) return this.#githubViewerLogin
+    if (this.#githubViewerLogin != null && Date.now() - this.#githubViewerResolvedAt < CONVERSATION_CACHE_TTL_MS) {
+      return this.#githubViewerLogin
+    }
     const result = await runGitHubReadCommand(
       ghExecutable,
       ['api', 'user', '--jq', '.login'],
@@ -3399,7 +3803,25 @@ export class RepositoryService {
       throw new Error('GitHub returned an invalid viewer login.')
     }
     this.#githubViewerLogin = login
+    this.#githubViewerResolvedAt = Date.now()
     return login
+  }
+
+  async #getGitHubAccountId(ghExecutable: string): Promise<string> {
+    if (this.#githubAccountId != null && Date.now() - this.#githubAccountResolvedAt < CONVERSATION_CACHE_TTL_MS) {
+      return this.#githubAccountId
+    }
+    const result = await runGitHubReadCommand(
+      ghExecutable,
+      ['api', 'user', '--jq', '.id'],
+      this.#requireRoot()
+    )
+    const accountId = result.stdout.toString('utf8').trim()
+    if (!/^\d{1,32}$/.test(accountId)) throw new Error('GitHub returned an invalid account ID.')
+    if (this.#githubAccountId != null && this.#githubAccountId !== accountId) this.#githubAuthEpoch += 1
+    this.#githubAccountId = accountId
+    this.#githubAccountResolvedAt = Date.now()
+    return accountId
   }
 
   async #readHeadFile(

@@ -65,6 +65,20 @@ export interface PerformanceMetricsDetail {
   rendererHeapUsedMegabytes: number
   rendererHeapTotalMegabytes: number
   rendererDomNodes: number
+  commandRunning?: number
+  commandWaiting?: number
+  watcherCount?: number
+  pendingWatcherPaths?: number
+  lifecycleState?: 'visible' | 'hidden-grace' | 'snoozed' | 'restoring'
+  // The last lifecycle transitions, newest last. Snooze bugs are invisible in a
+  // single state read: the state can be restored by a stray event microseconds
+  // after it changes, and only the reason says which listener did it.
+  lifecycleTransitions?: Array<{ state: string; reason: string; atMs: number }>
+  // Deep hibernation: whether the last snooze released the renderer's review
+  // payloads, and if not, which guard refused. `null` means never attempted.
+  hibernated?: boolean | null
+  hibernationBlockedBy?: string | null
+  conversationCacheEntries?: number
 }
 
 export interface PerformanceMetrics {
@@ -224,6 +238,11 @@ export interface PullRequestConversation {
   body: string
   threads: RemoteReviewThread[]
   reviews: RemoteReviewSummary[]
+  complete?: boolean
+  stale?: boolean
+  fetchedAt?: number
+  attemptedAt?: number
+  partialError?: string | null
 }
 
 export interface OmittedDiffFile {
@@ -231,6 +250,19 @@ export interface OmittedDiffFile {
   reason: 'too-large'
   additions: number
   deletions: number
+}
+
+export interface PullRequestSnapshotIdentity {
+  formatEpoch: number
+  host: string
+  repository: string
+  number: number
+  baseRefName: string
+  baseOid: string
+  headRefName: string
+  headOid: string
+  effectiveBaseOid: string
+  patchSource: 'github'
 }
 
 export interface WorkingTreePatch {
@@ -258,6 +290,8 @@ export interface PullRequestReview {
   // What GitHub says the pull request touches. A streamed review arrives a page at
   // a time, so `files` climbs towards this rather than matching it immediately.
   expectedFileCount: number
+  /** Complete, versioned identity used by disk and read caches. */
+  snapshotIdentity?: PullRequestSnapshotIdentity
 }
 
 /**
@@ -283,11 +317,11 @@ export type PullRequestReviewProgress =
       requestId?: string
     }
   | {
-      // A review served from disk is revalidated in the background. When the head
-      // moved the refetched review supersedes everything already streamed.
-      kind: 'replace'
+      // A cached tab stays frozen. The reader explicitly refreshes to adopt this
+      // newly available immutable revision.
+      kind: 'revisionAvailable'
       selector: string
-      review: PullRequestReview
+      snapshotIdentity: PullRequestSnapshotIdentity
       root?: string
       requestId?: string
     }
@@ -622,6 +656,13 @@ export interface RepositoryApi {
    * renderer's own resolution into a lookup.
    */
   onOpenExternalPullRequest(listener: (url: string, root: string | null) => void): () => void
+  /**
+   * Main asks the window to drop every review payload it is holding because the
+   * app has been hidden long enough to snooze. The listener returns the reason
+   * it could not, or null when it hibernated; main records the answer so the
+   * refusal is visible in the performance detail rather than silent.
+   */
+  onHibernateRequest(listener: () => string | null): () => void
   readClipboardText(type?: string): Promise<string>
   revealPath(path: string): Promise<void>
   refresh(): Promise<RepositorySnapshot>
@@ -648,6 +689,7 @@ export interface RepositoryApi {
   getClosedPullRequests(): Promise<PullRequestSummary[]>
   switchBranch(name: string): Promise<RepositorySnapshot>
   getLocalBranchReview(baseRef: string, headRef: string, requestId?: string): Promise<LocalBranchReview>
+  getLocalSnapshotReview(baseOid: string, headOid: string, baseRefName: string, headRefName: string): Promise<LocalBranchReview>
   getCommitReview(oid: string, requestId?: string): Promise<LocalBranchReview>
   fetchRemote(): Promise<GitIntegrationSnapshot>
   pullCurrentBranch(): Promise<RepositorySnapshot>
@@ -714,6 +756,8 @@ export const IPC_CHANNELS = {
   resolvePullRequestRepository: 'repository:resolve-pull-request',
   getPendingExternalPullRequest: 'app:get-pending-external-pull-request',
   openExternalPullRequest: 'app:open-external-pull-request',
+  hibernateRequest: 'app:hibernate-request',
+  hibernationState: 'app:hibernation-state',
   readClipboardText: 'app:clipboard-read-text',
   revealPath: 'app:reveal-path',
   refresh: 'repository:refresh',
@@ -730,6 +774,7 @@ export const IPC_CHANNELS = {
   getClosedPullRequests: 'repository:get-closed-pull-requests',
   switchBranch: 'repository:switch-branch',
   getLocalBranchReview: 'repository:get-local-branch-review',
+  getLocalSnapshotReview: 'repository:get-local-snapshot-review',
   getCommitReview: 'repository:get-commit-review',
   fetchRemote: 'repository:fetch-remote',
   pullCurrentBranch: 'repository:pull-current-branch',

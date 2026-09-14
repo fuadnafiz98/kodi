@@ -169,11 +169,23 @@ export class RepositoryWatcher {
     return this.#paused
   }
 
+  get handleCount(): number {
+    return Number(this.#watcher != null) + Number(this.#gitDirectoryWatcher != null)
+  }
+
+  get pendingPathCount(): number {
+    return this.#pendingPaths.size
+  }
+
   start(snapshot: RepositorySnapshot): void {
     this.stop()
-    this.#paused = false
     this.#snapshot = snapshot
     this.#publishedPaths = snapshot.paths
+    if (this.#suspended) {
+      this.#paused = true
+      return
+    }
+    this.#paused = false
     const generation = this.#generation
     const accept = (path: string | null): void => {
       if (generation !== this.#generation || path == null) return

@@ -23,26 +23,17 @@ import { usePerformanceChartInspector } from './usePerformanceChartInspector'
 
 interface PerformanceChartProps {
   history: readonly MemorySample[]
-  historyVersion?: number
 }
 
 export const PerformanceChart = memo(function PerformanceChart({
-  history,
-  historyVersion = 0
+  history
 }: PerformanceChartProps): React.JSX.Element {
   const [metric, setMetric] = useState<PerformanceChartMetric>('memory')
   const [metricInput, setMetricInput] = useState<'keyboard' | 'pointer'>('pointer')
-  const historySnapshot = useMemo(
-    () => ({ history, version: historyVersion }),
-    [history, historyVersion]
-  )
-  const trendPerHour = useMemo(
-    () => memoryTrendPerHour(historySnapshot.history),
-    [historySnapshot]
-  )
+  const trendPerHour = useMemo(() => memoryTrendPerHour(history), [history])
   const chart = useMemo(
-    () => buildPerformanceChart(historySnapshot.history, metric, CHART_WIDTH, CHART_HEIGHT),
-    [historySnapshot, metric]
+    () => buildPerformanceChart(history, metric, CHART_WIDTH, CHART_HEIGHT),
+    [history, metric]
   )
   const inspector = usePerformanceChartInspector(history, chart)
 
