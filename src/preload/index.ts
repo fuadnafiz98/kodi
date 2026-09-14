@@ -94,8 +94,10 @@ const repositoryApi: RepositoryApi = {
   searchContent: (query, forOpenPath) => ipcRenderer.invoke(IPC_CHANNELS.searchContent, query, forOpenPath ?? null),
   cancelContentSearch: () => ipcRenderer.send(IPC_CHANNELS.cancelContentSearch),
   getMarkdownMedia: (url) => ipcRenderer.invoke(IPC_CHANNELS.getMarkdownMedia, url),
+  getAvatar: (url) => ipcRenderer.invoke(IPC_CHANNELS.getAvatar, url),
   getGitIntegration: () => ipcRenderer.invoke(IPC_CHANNELS.getGitIntegration),
   getPullRequestInbox: () => ipcRenderer.invoke(IPC_CHANNELS.getPullRequestInbox),
+  getGlobalPullRequestInbox: (repos) => ipcRenderer.invoke(IPC_CHANNELS.getGlobalPullRequestInbox, repos),
   getClosedPullRequests: () => ipcRenderer.invoke(IPC_CHANNELS.getClosedPullRequests),
   getPullRequestConversation: (root: string, selector: number | string) =>
     ipcRenderer.invoke(IPC_CHANNELS.getPullRequestConversation, root, selector),

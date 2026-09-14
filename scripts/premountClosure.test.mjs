@@ -17,7 +17,7 @@ afterEach(async () => {
 })
 
 async function renderDirectory(chunks) {
-  const directory = await mkdtemp(join(tmpdir(), 'horus-premount-'))
+  const directory = await mkdtemp(join(tmpdir(), 'kodi-premount-'))
   directories.push(directory)
   await mkdir(join(directory, 'assets'))
   await writeFile(
@@ -110,7 +110,7 @@ describe('measurePremountClosure', () => {
   })
 
   test('throws when the html has no entry', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'horus-premount-'))
+    const directory = await mkdtemp(join(tmpdir(), 'kodi-premount-'))
     directories.push(directory)
     await mkdir(join(directory, 'assets'))
     await writeFile(join(directory, 'index.html'), '<!doctype html>')

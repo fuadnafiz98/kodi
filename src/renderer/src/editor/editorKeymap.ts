@@ -1,6 +1,6 @@
 import type { EditorCommand, EditorKeymap, EditorShortcut } from '@pierre/diffs/edit'
 
-import type { AppCommand, KeybindingMap } from '../keybindings'
+import type { AppCommand, KeybindingMap } from '../settings/keybindings'
 
 export interface EditorShortcutHint {
   shortcut: EditorShortcut

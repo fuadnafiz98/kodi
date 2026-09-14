@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -9,6 +9,7 @@ import type { AgentRequestSubject, RepositorySnapshot } from '../shared/contract
 import {
   agentReviewPaths,
   formatAgentReviewInstructions,
+  migrateLegacyReviewDirectory,
   prepareAgentReviewContext,
   rememberedAgentReviewFrom,
   writeAgentReviewBundle
@@ -65,7 +66,7 @@ const remembered = rememberedAgentReviewFrom({
 
 describe('writeAgentReviewBundle', () => {
   test('writes the patch beside the checkout and excludes it from git status', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'horus-review-bundle-'))
+    const root = await mkdtemp(join(tmpdir(), 'kodi-review-bundle-'))
     await mkdir(join(root, '.git', 'info'), { recursive: true })
 
     const written = await writeAgentReviewBundle(root, remembered, snapshot(root))
@@ -74,24 +75,57 @@ describe('writeAgentReviewBundle', () => {
     expect(written.patchPath).toBe(paths.patch)
     expect(await readFile(paths.patch, 'utf8')).toContain('+session_id')
     expect(await readFile(paths.brief, 'utf8')).toContain('#7 Add session management')
-    expect(await readFile(join(root, '.git', 'info', 'exclude'), 'utf8')).toContain('.horus/')
+    expect(await readFile(join(root, '.git', 'info', 'exclude'), 'utf8')).toContain('.kodi/')
   })
 
-  test('excludes .horus from a linked gitdir used by worktrees', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'horus-review-worktree-'))
-    const gitDir = await mkdtemp(join(tmpdir(), 'horus-review-gitdir-'))
+  test('excludes .kodi from a linked gitdir used by worktrees', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'kodi-review-worktree-'))
+    const gitDir = await mkdtemp(join(tmpdir(), 'kodi-review-gitdir-'))
     await writeFile(join(root, '.git'), `gitdir: ${gitDir}\n`)
 
     await writeAgentReviewBundle(root, remembered, snapshot(root))
 
-    expect(await readFile(join(gitDir, 'info', 'exclude'), 'utf8')).toContain('.horus/')
+    expect(await readFile(join(gitDir, 'info', 'exclude'), 'utf8')).toContain('.kodi/')
     expect(await readFile(agentReviewPaths(root).patch, 'utf8')).toContain('+session_id')
+  })
+})
+
+describe('migrateLegacyReviewDirectory', () => {
+  test('moves .horus to .kodi and retargets the git exclude line', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'kodi-review-migrate-'))
+    await mkdir(join(root, '.horus', 'review'), { recursive: true })
+    await writeFile(join(root, '.horus', 'review', 'changes.patch'), 'patch')
+    await mkdir(join(root, '.git', 'info'), { recursive: true })
+    await writeFile(join(root, '.git', 'info', 'exclude'), '.DS_Store\n.horus/\n')
+
+    await migrateLegacyReviewDirectory(root)
+
+    expect(await readFile(join(root, '.kodi', 'review', 'changes.patch'), 'utf8')).toBe('patch')
+    await expect(stat(join(root, '.horus'))).rejects.toThrow()
+    expect(await readFile(join(root, '.git', 'info', 'exclude'), 'utf8')).toBe('.DS_Store\n.kodi/\n')
+  })
+
+  test('leaves a repo with no .horus, or an existing .kodi, untouched', async () => {
+    const clean = await mkdtemp(join(tmpdir(), 'kodi-review-clean-'))
+    await migrateLegacyReviewDirectory(clean)
+    expect(await readdir(clean)).toEqual([])
+
+    const root = await mkdtemp(join(tmpdir(), 'kodi-review-both-'))
+    await mkdir(join(root, '.horus'), { recursive: true })
+    await writeFile(join(root, '.horus', 'old.patch'), 'old')
+    await mkdir(join(root, '.kodi'), { recursive: true })
+    await writeFile(join(root, '.kodi', 'new.patch'), 'new')
+
+    await migrateLegacyReviewDirectory(root)
+
+    expect(await readFile(join(root, '.horus', 'old.patch'), 'utf8')).toBe('old')
+    expect(await readFile(join(root, '.kodi', 'new.patch'), 'utf8')).toBe('new')
   })
 })
 
 describe('prepareAgentReviewContext', () => {
   test('points the agent at the local patch and forbids GitHub fetches', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'horus-review-prepare-'))
+    const root = await mkdtemp(join(tmpdir(), 'kodi-review-prepare-'))
     await mkdir(join(root, '.git'), { recursive: true })
 
     const context = await prepareAgentReviewContext({

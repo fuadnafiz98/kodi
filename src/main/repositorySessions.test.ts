@@ -39,7 +39,7 @@ describe('RepositorySessionRegistry', () => {
   })
 
   it('cancels content search for the active repository', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'horus-repository-cancel-search-'))
+    const root = await mkdtemp(join(tmpdir(), 'kodi-repository-cancel-search-'))
     directories.push(root)
     const registry = new RepositorySessionRegistry(() => {}, () => {})
     registries.push(registry)
@@ -52,7 +52,7 @@ describe('RepositorySessionRegistry', () => {
   })
 
   it('keeps independent repository sessions and changes only the requested active root', async () => {
-    const parent = await mkdtemp(join(tmpdir(), 'horus-repository-sessions-'))
+    const parent = await mkdtemp(join(tmpdir(), 'kodi-repository-sessions-'))
     directories.push(parent)
     const firstRoot = join(parent, 'first')
     const secondRoot = join(parent, 'second')
@@ -73,7 +73,7 @@ describe('RepositorySessionRegistry', () => {
   })
 
   it('reuses a registered root without changing focus for a background open', async () => {
-    const parent = await mkdtemp(join(tmpdir(), 'horus-repository-reuse-'))
+    const parent = await mkdtemp(join(tmpdir(), 'kodi-repository-reuse-'))
     directories.push(parent)
     const firstRoot = join(parent, 'first')
     const secondRoot = join(parent, 'second')
@@ -91,7 +91,7 @@ describe('RepositorySessionRegistry', () => {
   })
 
   it('releases an unused repository session without disturbing another root', async () => {
-    const parent = await mkdtemp(join(tmpdir(), 'horus-repository-release-'))
+    const parent = await mkdtemp(join(tmpdir(), 'kodi-repository-release-'))
     directories.push(parent)
     const firstRoot = join(parent, 'first')
     const secondRoot = join(parent, 'second')
@@ -114,7 +114,7 @@ describe('RepositorySessionRegistry', () => {
   })
 
   it('trims the caches of repositories that become inactive', async () => {
-    const parent = await mkdtemp(join(tmpdir(), 'horus-repository-trim-'))
+    const parent = await mkdtemp(join(tmpdir(), 'kodi-repository-trim-'))
     directories.push(parent)
     const firstRoot = join(parent, 'first')
     const secondRoot = join(parent, 'second')
@@ -137,7 +137,7 @@ describe('RepositorySessionRegistry', () => {
   })
 
   it('refreshes the root it is given, not whichever one is active', async () => {
-    const parent = await mkdtemp(join(tmpdir(), 'horus-refresh-root-'))
+    const parent = await mkdtemp(join(tmpdir(), 'kodi-refresh-root-'))
     directories.push(parent)
     await Promise.all([mkdir(join(parent, 'active')), mkdir(join(parent, 'background'))])
     const activeRoot = await realpath(join(parent, 'active'))
@@ -164,7 +164,7 @@ describe('RepositorySessionRegistry', () => {
   })
 
   it('returns a snapshot before git status finishes', async () => {
-    const root = await realpath(await mkdtemp(join(tmpdir(), 'horus-open-instant-')))
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'kodi-open-instant-')))
     directories.push(root)
     await writeFile(join(root, 'readme.md'), 'hello\n', 'utf8')
     const registry = new RepositorySessionRegistry(() => {}, () => {})
@@ -190,7 +190,7 @@ describe('RepositorySessionRegistry', () => {
   })
 
   it('returns the live snapshot when the refresh beats the open deadline', async () => {
-    const root = await realpath(await mkdtemp(join(tmpdir(), 'horus-open-live-')))
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'kodi-open-live-')))
     directories.push(root)
     await writeFile(join(root, 'readme.md'), 'hello\n', 'utf8')
     const events: RepositoryChangeEvent[] = []
@@ -224,7 +224,7 @@ describe('RepositorySessionRegistry', () => {
   })
 
   it('falls back to the listing and publishes the live snapshot when the refresh is slow', async () => {
-    const root = await realpath(await mkdtemp(join(tmpdir(), 'horus-open-slow-')))
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'kodi-open-slow-')))
     directories.push(root)
     await writeFile(join(root, 'readme.md'), 'hello\n', 'utf8')
     const events: RepositoryChangeEvent[] = []
@@ -264,12 +264,12 @@ describe('RepositorySessionRegistry', () => {
   it('rejects a missing folder without walking git', async () => {
     const registry = new RepositorySessionRegistry(() => {}, () => {})
     registries.push(registry)
-    const missing = join(tmpdir(), 'horus-missing-folder-does-not-exist')
+    const missing = join(tmpdir(), 'kodi-missing-folder-does-not-exist')
     await expect(registry.open(missing)).rejects.toThrow()
   })
 
   it('publishes dirty paths when the first live refresh finishes', async () => {
-    const root = await realpath(await mkdtemp(join(tmpdir(), 'horus-refresh-dirty-')))
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'kodi-refresh-dirty-')))
     directories.push(root)
     await runCommand('git', ['-C', root, '-c', 'init.defaultBranch=main', 'init', '--quiet'])
     await writeFile(join(root, 'clean.ts'), 'export const clean = 1\n', 'utf8')
@@ -277,7 +277,7 @@ describe('RepositorySessionRegistry', () => {
     await runCommand('git', ['-C', root, 'add', '--all'])
     await runCommand('git', [
       '-C', root,
-      '-c', 'user.name=Horus Test',
+      '-c', 'user.name=Kodi Test',
       '-c', 'user.email=test@example.invalid',
       '-c', 'commit.gpgsign=false',
       'commit', '--quiet', '-m', 'init'
@@ -296,7 +296,7 @@ describe('RepositorySessionRegistry', () => {
   })
 
   it('counts a watcher tick as an external change instead of joining an older refresh', async () => {
-    const root = await realpath(await mkdtemp(join(tmpdir(), 'horus-session-watch-tick-')))
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'kodi-session-watch-tick-')))
     directories.push(root)
     const file = join(root, 'watched.ts')
     await writeFile(file, 'export const watched = 0\n', 'utf8')
@@ -320,7 +320,7 @@ describe('RepositorySessionRegistry', () => {
   }, 30_000)
 
   it('opens an already-resolved path into the session the symlink opened', async () => {
-    const parent = await realpath(await mkdtemp(join(tmpdir(), 'horus-session-resolved-')))
+    const parent = await realpath(await mkdtemp(join(tmpdir(), 'kodi-session-resolved-')))
     directories.push(parent)
     const realRoot = join(parent, 'project')
     const linkPath = join(parent, 'link')
@@ -340,7 +340,7 @@ describe('RepositorySessionRegistry', () => {
   })
 
   it('pauses every background watcher when a repository is activated', async () => {
-    const parent = await realpath(await mkdtemp(join(tmpdir(), 'horus-session-pause-')))
+    const parent = await realpath(await mkdtemp(join(tmpdir(), 'kodi-session-pause-')))
     directories.push(parent)
     const firstRoot = join(parent, 'first')
     const secondRoot = join(parent, 'second')
@@ -371,7 +371,7 @@ describe('RepositorySessionRegistry', () => {
   }, 30_000)
 
   it('never arms a watcher for a repository opened in the background', async () => {
-    const parent = await realpath(await mkdtemp(join(tmpdir(), 'horus-session-background-')))
+    const parent = await realpath(await mkdtemp(join(tmpdir(), 'kodi-session-background-')))
     directories.push(parent)
     const activeRoot = join(parent, 'active')
     const backgroundRoot = join(parent, 'background')
@@ -395,7 +395,7 @@ describe('RepositorySessionRegistry', () => {
   }, 30_000)
 
   it('caps resident sessions and reopens an evicted root when its tab returns', async () => {
-    const parent = await realpath(await mkdtemp(join(tmpdir(), 'horus-session-cap-')))
+    const parent = await realpath(await mkdtemp(join(tmpdir(), 'kodi-session-cap-')))
     directories.push(parent)
     const roots: string[] = []
     for (let index = 0; index < 6; index += 1) {
@@ -423,7 +423,7 @@ describe('RepositorySessionRegistry', () => {
   }, 30_000)
 
   it('hydrates a cached snapshot so the tree is available before git refresh', async () => {
-    const root = await realpath(await mkdtemp(join(tmpdir(), 'horus-session-hydrate-')))
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'kodi-session-hydrate-')))
     directories.push(root)
     await writeFile(join(root, 'app.ts'), 'export {}\n', 'utf8')
     const registry = new RepositorySessionRegistry(() => {}, () => {})

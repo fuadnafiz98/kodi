@@ -7,7 +7,7 @@ import { detectRepositoryKind, listRootSnapshot, resolveExistingRoot, rootsMatch
 
 describe('workspaceListing', () => {
   it('lists three levels of files and skips generated directories', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'horus-listing-'))
+    const root = await mkdtemp(join(tmpdir(), 'kodi-listing-'))
     try {
       await mkdir(join(root, 'src', 'nested', 'too-deep'), { recursive: true })
       await mkdir(join(root, '.github', 'workflows'), { recursive: true })
@@ -43,7 +43,7 @@ describe('workspaceListing', () => {
   })
 
   it('stops at the path cap, top of the tree first', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'horus-listing-cap-'))
+    const root = await mkdtemp(join(tmpdir(), 'kodi-listing-cap-'))
     try {
       await mkdir(join(root, 'deep'))
       await writeFile(join(root, 'top.txt'), 'top\n', 'utf8')
@@ -59,12 +59,12 @@ describe('workspaceListing', () => {
   })
 
   it('treats a missing folder as unusable', () => {
-    expect(resolveExistingRoot('/definitely-missing-horus-folder')).toBeNull()
+    expect(resolveExistingRoot('/definitely-missing-kodi-folder')).toBeNull()
     expect(rootsMatch('/a', '/b')).toBe(false)
   })
 
   it('upgrades a cached folder listing to git when .git is present', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'horus-listing-git-'))
+    const root = await mkdtemp(join(tmpdir(), 'kodi-listing-git-'))
     try {
       await mkdir(join(root, '.git'))
       await writeFile(join(root, 'Makefile'), 'all:\n', 'utf8')

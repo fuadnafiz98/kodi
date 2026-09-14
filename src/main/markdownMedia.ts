@@ -1,4 +1,4 @@
-import { isAllowedMarkdownMediaUrl, videoMimeTypeFromHref } from '../shared/markdownVideo.js'
+import { isAllowedGitHubMediaUrl, videoMimeTypeFromHref } from '../shared/markdownVideo.js'
 import { runCommand } from './gitCommands.js'
 
 export const MAX_MARKDOWN_MEDIA_BYTES = 48 * 1024 * 1024
@@ -17,13 +17,13 @@ export async function loadMarkdownMedia(
   fetchImpl: FetchLike = fetch,
   readToken: () => Promise<string | null> = readGitHubAuthToken
 ): Promise<MarkdownMediaBytes> {
-  if (typeof rawUrl !== 'string' || !isAllowedMarkdownMediaUrl(rawUrl)) {
+  if (typeof rawUrl !== 'string' || !isAllowedGitHubMediaUrl(rawUrl)) {
     throw new Error('Only GitHub-hosted videos can be previewed.')
   }
   const token = await readToken()
   const headers = new Headers({
     Accept: '*/*',
-    'User-Agent': 'Horus'
+    'User-Agent': 'Kodi'
   })
   if (token != null) headers.set('Authorization', `Bearer ${token}`)
   const response = await fetchImpl(rawUrl, { headers, redirect: 'follow' })

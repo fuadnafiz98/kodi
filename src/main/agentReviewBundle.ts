@@ -1,4 +1,4 @@
-import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises'
 import { isAbsolute, join, resolve } from 'node:path'
 
 import type {
@@ -17,11 +17,40 @@ interface CachedReviewPatch {
   patch: string
 }
 
-export const AGENT_REVIEW_DIR = '.horus/review'
+export const AGENT_REVIEW_DIR = '.kodi/review'
 export const AGENT_REVIEW_PATCH_NAME = 'changes.patch'
 export const AGENT_REVIEW_BRIEF_NAME = 'brief.md'
-const AGENT_REVIEW_EXCLUDE = '.horus/'
+const AGENT_REVIEW_EXCLUDE = '.kodi/'
+const LEGACY_AGENT_REVIEW_DIR = '.horus'
+const LEGACY_AGENT_REVIEW_EXCLUDE = '.horus/'
 const AGENT_CONTEXT_FILE_LIMIT = 80
+
+/**
+ * Rename-era migration: a repository Horus reviewed keeps `.horus/` until Kodi
+ * opens it, then the whole directory moves to `.kodi/` and its git exclude line
+ * follows so the store stays invisible to `git status`. Never throws — a
+ * read-only checkout just keeps working off the unmigrated directory.
+ */
+export async function migrateLegacyReviewDirectory(root: string): Promise<void> {
+  const legacy = join(root, LEGACY_AGENT_REVIEW_DIR)
+  const current = join(root, '.kodi')
+  const legacyInfo = await stat(legacy).catch(() => null)
+  if (legacyInfo == null || !legacyInfo.isDirectory()) return
+  if (await stat(current).catch(() => null) != null) return
+  await rename(legacy, current).catch(() => null)
+  if (await stat(current).catch(() => null) == null) return
+
+  const gitDir = await resolveGitDirectory(root)
+  if (gitDir == null) return
+  const excludePath = join(gitDir, 'info', 'exclude')
+  const text = await readFile(excludePath, 'utf8').catch(() => null)
+  if (text == null || !text.includes(LEGACY_AGENT_REVIEW_EXCLUDE)) return
+  const migrated = text
+    .split('\n')
+    .map((line) => (line.trim() === LEGACY_AGENT_REVIEW_EXCLUDE ? AGENT_REVIEW_EXCLUDE : line))
+    .join('\n')
+  await writeFile(excludePath, migrated, 'utf8').catch(() => null)
+}
 
 export interface RememberedAgentReview {
   key: string
@@ -78,7 +107,7 @@ export async function writeAgentReviewBundle(
   review: RememberedAgentReview,
   snapshot: RepositorySnapshot
 ): Promise<{ patchPath: string; briefPath: string }> {
-  await ensureHorusExcluded(root)
+  await ensureKodiExcluded(root)
   const paths = agentReviewPaths(root)
   await mkdir(paths.directory, { recursive: true })
   const brief = formatAgentReviewBrief(review, snapshot, paths.patch)
@@ -141,7 +170,7 @@ export function formatAgentReviewInstructions(options: {
     : []
   const omitted = (review?.omittedFiles ?? []).map((file) => file.path)
   return [
-    'Horus already loaded this review. Do not fetch remotes, clone repositories, or call GitHub, gh, or the network.',
+    'Kodi already loaded this review. Do not fetch remotes, clone repositories, or call GitHub, gh, or the network.',
     'The working directory is the matching local checkout. Stay inside it.',
     `Local checkout: ${subject.repositoryRoot}`,
     `Current branch: ${subject.workingBranch ?? snapshot?.branch ?? 'unknown'} (this is the current codebase; it may differ from the pull-request head)`,
@@ -219,7 +248,7 @@ export async function resolveGitDirectory(root: string): Promise<string | null> 
   return isAbsolute(gitdir) ? gitdir : resolve(root, gitdir)
 }
 
-async function ensureHorusExcluded(root: string): Promise<void> {
+async function ensureKodiExcluded(root: string): Promise<void> {
   const gitDir = await resolveGitDirectory(root)
   if (gitDir == null) return
   const excludePath = join(gitDir, 'info', 'exclude')

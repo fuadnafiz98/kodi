@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import { DEFAULT_KEYBINDINGS } from '../keybindings'
+import { DEFAULT_KEYBINDINGS } from '../settings/keybindings'
 import {
   buildEditorKeymap,
   EDITOR_SHORTCUTS,

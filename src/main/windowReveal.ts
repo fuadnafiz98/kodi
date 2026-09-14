@@ -41,7 +41,7 @@ export function revealCreatedWindow(
   return true
 }
 
-/** Cmd+H / horus:// open: show and focus even if the window was a hidden warmup. */
+/** Cmd+H / kodi:// open: show and focus even if the window was a hidden warmup. */
 export function revealExistingWindow(
   window: ExistingWindowRevealTarget | null | undefined
 ): boolean {

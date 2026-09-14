@@ -13,7 +13,7 @@ async function makeGitRepo(path: string): Promise<void> {
 
 describe('collectFolderCandidates', () => {
   test('indexes Developer children and nested git repos', async () => {
-    const home = await mkdtemp(join(tmpdir(), 'horus-folders-'))
+    const home = await mkdtemp(join(tmpdir(), 'kodi-folders-'))
     const developer = join(home, 'Developer')
     await makeGitRepo(join(developer, 'personal', 'echo'))
     await makeGitRepo(join(developer, 'vibes', 'echo'))
@@ -30,7 +30,7 @@ describe('collectFolderCandidates', () => {
   })
 
   test('includes previously opened folders outside the default scan roots', async () => {
-    const home = await mkdtemp(join(tmpdir(), 'horus-folders-'))
+    const home = await mkdtemp(join(tmpdir(), 'kodi-folders-'))
     const extra = join(home, 'Documents', 'notes')
     await mkdir(extra, { recursive: true })
 
@@ -42,7 +42,7 @@ describe('collectFolderCandidates', () => {
   // A wide directory is where that either keeps every candidate or quietly
   // drops one, so it is the shape worth pinning down.
   test('indexes every child of a wide directory exactly once', async () => {
-    const home = await mkdtemp(join(tmpdir(), 'horus-folders-wide-'))
+    const home = await mkdtemp(join(tmpdir(), 'kodi-folders-wide-'))
     const group = join(home, 'Developer', 'group')
     const names = Array.from({ length: 24 }, (_, index) => `repo-${String(index).padStart(2, '0')}`)
     await Promise.all(names.map((name) => makeGitRepo(join(group, name))))
@@ -63,7 +63,7 @@ describe('collectFolderCandidates', () => {
   })
 
   test('resolves remembered roots and default scan roots in the same round', async () => {
-    const home = await mkdtemp(join(tmpdir(), 'horus-folders-extra-'))
+    const home = await mkdtemp(join(tmpdir(), 'kodi-folders-extra-'))
     const echo = join(home, 'Developer', 'echo')
     await makeGitRepo(echo)
     const notes = join(home, 'Documents', 'notes')
@@ -83,7 +83,7 @@ describe('collectFolderCandidates', () => {
 
 describe('resolveOpenableFolder', () => {
   test('accepts a folder under a default scan root', async () => {
-    const home = await mkdtemp(join(tmpdir(), 'horus-open-'))
+    const home = await mkdtemp(join(tmpdir(), 'kodi-open-'))
     const folder = join(home, 'Developer', 'echo')
     await mkdir(folder, { recursive: true })
 
@@ -91,7 +91,7 @@ describe('resolveOpenableFolder', () => {
   })
 
   test('rejects an unapproved folder that is not under a scan root', async () => {
-    const home = await mkdtemp(join(tmpdir(), 'horus-open-'))
+    const home = await mkdtemp(join(tmpdir(), 'kodi-open-'))
     const folder = join(home, 'Downloads', 'echo')
     await mkdir(folder, { recursive: true })
 
@@ -100,15 +100,15 @@ describe('resolveOpenableFolder', () => {
   })
 
   test('accepts an approved folder outside home', async () => {
-    const home = await mkdtemp(join(tmpdir(), 'horus-home-'))
-    const approved = await mkdtemp(join(tmpdir(), 'horus-approved-'))
+    const home = await mkdtemp(join(tmpdir(), 'kodi-home-'))
+    const approved = await mkdtemp(join(tmpdir(), 'kodi-approved-'))
 
     expect(await resolveOpenableFolder(approved, { home, approvedRoots: [approved] })).toBe(await realpath(approved))
   })
 
   test('rejects the home directory itself and unapproved outside paths', async () => {
-    const home = await mkdtemp(join(tmpdir(), 'horus-home-'))
-    const outside = await mkdtemp(join(tmpdir(), 'horus-outside-'))
+    const home = await mkdtemp(join(tmpdir(), 'kodi-home-'))
+    const outside = await mkdtemp(join(tmpdir(), 'kodi-outside-'))
     const file = join(home, 'readme.txt')
     await writeFile(file, 'hi')
 

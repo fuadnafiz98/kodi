@@ -3,10 +3,10 @@ import type { DiffLineAnnotation, FileContents, LineAnnotation } from '@pierre/d
 import { EditProvider, WorkerPoolContextProvider, useWorkerPool } from '@pierre/diffs/react'
 import type { Editor, EditorOptions } from '@pierre/diffs/edit'
 
-import { DIFF_HIGHLIGHTER_LIMITS, DIFF_HIGHLIGHTER_OPTIONS, DIFF_WORKER_POOL_OPTIONS } from '../diffWorkerConfig'
-import type { AppPreferences } from '../preferences'
-import type { ReviewAnnotationMetadata } from '../ReviewComments'
-import { createDiffEditor } from '../useFileEditing'
+import { DIFF_HIGHLIGHTER_LIMITS, DIFF_HIGHLIGHTER_OPTIONS, DIFF_WORKER_POOL_OPTIONS } from '../diff/diffWorkerConfig'
+import type { AppPreferences } from '../settings/preferences'
+import type { ReviewAnnotationMetadata } from '../review/ReviewComments'
+import { createDiffEditor } from '../diff/useFileEditing'
 import { buildEditorKeymap } from './editorKeymap'
 import type { SelectionActionContext } from './selectionAction'
 

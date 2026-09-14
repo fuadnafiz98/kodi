@@ -1,6 +1,6 @@
 // Repeatable cold-start numbers for the installed app.
 //
-//   HORUS_STARTUP_SAMPLES=5 bun scripts/benchmark-startup.mjs
+//   KODI_STARTUP_SAMPLES=5 bun scripts/benchmark-startup.mjs
 //
 // It gates on the renderer's own startup marks and on `#repository-diff > *`,
 // never on a review-specific class: a restore into the file view is a perfectly
@@ -8,18 +8,18 @@
 // that runs out of time is reported with nulls rather than aborting the run.
 import { launch, median, quit, round, startupMarks } from './perf/cdp.mjs'
 
-const SAMPLE_COUNT = Number.parseInt(process.env.HORUS_STARTUP_SAMPLES ?? '5', 10)
-const TIMEOUT_MS = Number.parseInt(process.env.HORUS_STARTUP_TIMEOUT_MS ?? '20000', 10)
+const SAMPLE_COUNT = Number.parseInt(process.env.KODI_STARTUP_SAMPLES ?? '5', 10)
+const TIMEOUT_MS = Number.parseInt(process.env.KODI_STARTUP_TIMEOUT_MS ?? '20000', 10)
 
 if (!Number.isInteger(SAMPLE_COUNT) || SAMPLE_COUNT < 1) {
-  throw new Error('HORUS_STARTUP_SAMPLES must be a positive integer.')
+  throw new Error('KODI_STARTUP_SAMPLES must be a positive integer.')
 }
 
 const OBSERVATION = `({
   timeOrigin: performance.timeOrigin,
   paints: Object.fromEntries(performance.getEntriesByType('paint').map((e) => [e.name, e.startTime])),
   marks: Object.fromEntries(performance.getEntriesByType('mark')
-    .filter((e) => e.name.startsWith('horus:'))
+    .filter((e) => e.name.startsWith('kodi:'))
     .map((e) => [e.name, e.startTime])),
   explorer: document.querySelector('#repository-explorer') != null,
   viewer: document.querySelector('#repository-diff > *') != null

@@ -116,7 +116,7 @@ export class CodexAppServer {
     })
 
     await this.#request(CODEX_METHODS.initialize, {
-      clientInfo: { name: 'horus', title: 'Horus', version: '0.1.0' }
+      clientInfo: { name: 'kodi', title: 'Kodi', version: '0.1.0' }
     }, CODEX_STARTUP_TIMEOUT_MS)
   }
 
@@ -150,9 +150,9 @@ export class CodexAppServer {
   }
 
   #dispatch(message: Record<string, unknown>): void {
-    // Set HORUS_CODEX_DEBUG=1 to trace the JSON-RPC traffic; the
+    // Set KODI_CODEX_DEBUG=1 to trace the JSON-RPC traffic; the
     // protocol is experimental and its method names have moved before.
-    if (process.env.HORUS_CODEX_DEBUG === '1') {
+    if (process.env.KODI_CODEX_DEBUG === '1') {
       process.stderr.write(`codex ← ${JSON.stringify(message).slice(0, 300)}\n`)
     }
     if (typeof message.method === 'string') {
@@ -223,7 +223,7 @@ export class CodexAppServer {
         method !== 'item/permissions/requestApproval') {
       this.#replyToServer(requestId, null, {
         code: -32601,
-        message: `Horus does not implement ${method}.`
+        message: `Kodi does not implement ${method}.`
       })
       return
     }

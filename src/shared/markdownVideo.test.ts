@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 
 import {
-  isAllowedMarkdownMediaUrl,
+  isAllowedGitHubMediaUrl,
   isVideoMarkdownHref,
   isVideoMarkdownLink,
   markdownLinkText,
@@ -22,9 +22,9 @@ describe('markdown video links', () => {
   })
 
   test('allows only GitHub media hosts', () => {
-    expect(isAllowedMarkdownMediaUrl('https://github.com/user-attachments/assets/aaaa')).toBe(true)
-    expect(isAllowedMarkdownMediaUrl('https://private-user-images.githubusercontent.com/1/clip.mp4')).toBe(true)
-    expect(isAllowedMarkdownMediaUrl('https://example.com/clip.mp4')).toBe(false)
-    expect(isAllowedMarkdownMediaUrl('http://github.com/user-attachments/assets/aaaa')).toBe(false)
+    expect(isAllowedGitHubMediaUrl('https://github.com/user-attachments/assets/aaaa')).toBe(true)
+    expect(isAllowedGitHubMediaUrl('https://private-user-images.githubusercontent.com/1/clip.mp4')).toBe(true)
+    expect(isAllowedGitHubMediaUrl('https://example.com/clip.mp4')).toBe(false)
+    expect(isAllowedGitHubMediaUrl('http://github.com/user-attachments/assets/aaaa')).toBe(false)
   })
 })

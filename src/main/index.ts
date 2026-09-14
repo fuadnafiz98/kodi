@@ -1,7 +1,8 @@
 import { homedir } from 'node:os'
-import { isAbsolute, join } from 'node:path'
+import { isAbsolute, join, resolve } from 'node:path'
 import { stat } from 'node:fs/promises'
 import { readFile, writeFile } from 'node:fs/promises'
+import { existsSync, renameSync, rmSync } from 'node:fs'
 
 import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, nativeTheme, screen, shell, type RenderProcessGoneDetails, type WebContents } from 'electron'
 
@@ -15,17 +16,27 @@ import {
   type RepositorySnapshot
 } from '../shared/contracts.js'
 import { displayUserPath, folderNameFromPath } from '../shared/folderPath.js'
-import { findHorusReviewRequest, HORUS_PROTOCOL, parseHorusReviewUrl, type HorusReviewRequest } from '../shared/horusUrl.js'
+import {
+  findKodiFolderRequest,
+  findKodiReviewRequest,
+  KODI_PROTOCOL,
+  LEGACY_KODI_PROTOCOL,
+  parseKodiReviewUrl,
+  type KodiReviewRequest
+} from '../shared/kodiUrl.js'
 import {
   extractGitHubPullRequestUrl,
   githubRepoSlugFromPullRequestUrl,
   normalizeGitHubPullRequestUrl
 } from '../shared/pullRequestUrl.js'
 import { AgentService, coalesceAgentTextEvents } from './agentService.js'
+import { migrateLegacyReviewDirectory } from './agentReviewBundle.js'
 import { parseAgentAskRequest } from './agentRequest.js'
 import { FolderIndex, resolveOpenableFolder } from './folderIndex.js'
+import { getAvatarDataUrl } from './avatars.js'
 import { loadMarkdownMedia } from './markdownMedia.js'
-import { isPathWithinApprovedRoots, parseRemotes, pullRequestTargetsRemotes } from './repository.js'
+import { isPathWithinApprovedRoots, loadGlobalPullRequestInbox, parseRemotes, pullRequestTargetsRemotes } from './repository.js'
+import { normalizeInboxRepos } from '../shared/inboxRepos.js'
 import { PullRequestRootResolver } from './pullRequestRoots.js'
 import { clipboardWarmupDecision, warmupCooledDown } from './pullRequestWarmup.js'
 import { runCommand } from './gitCommands.js'
@@ -53,6 +64,7 @@ import {
 import {
   DEFAULT_SESSION_STATE,
   flushSessionState,
+  isWindowBackgroundHex,
   loadSessionState,
   rememberPullRequestFolder,
   rememberedPullRequestFolder,
@@ -74,13 +86,19 @@ process.on('uncaughtException', (error) => {
   console.error('Uncaught exception in main:', error)
 })
 
-const PRODUCT_NAME = 'Horus'
-const startHidden = process.env.HORUS_BACKGROUND === '1'
+const PRODUCT_NAME = 'Kodi'
+// Pre-rename env names keep working for anything still setting them.
+const startHidden = (process.env.KODI_BACKGROUND ?? process.env.HORUS_BACKGROUND) === '1'
+// KODI_PROBE: the perf harness runs the app with its window never shown.
+// Unlike KODI_BACKGROUND the session still restores — restore is half of
+// what the probes measure — and the instance lock is kept, so a human opening
+// Kodi mid-probe still reveals the window through second-instance.
+const probeHidden = (process.env.KODI_PROBE ?? process.env.HORUS_PROBE) === '1'
 const CLIPBOARD_WARMUP_MS = 2_000
 const WARMUP_COOLDOWN_MS = 60_000
 // How long the open request waits for the checkout before it goes without one.
 const EXTERNAL_REVIEW_ROOT_DEADLINE_MS = 150
-const remoteDebuggingPort = process.env.HORUS_REMOTE_DEBUGGING_PORT?.trim()
+const remoteDebuggingPort = (process.env.KODI_REMOTE_DEBUGGING_PORT ?? process.env.HORUS_REMOTE_DEBUGGING_PORT)?.trim()
 if (remoteDebuggingPort != null && remoteDebuggingPort !== '') {
   app.commandLine.appendSwitch('remote-debugging-port', remoteDebuggingPort)
 }
@@ -142,11 +160,15 @@ const WORKSPACE_CACHE_SAVE_DEBOUNCE_MS = 1_000
 let holdWindowHidden = startHidden
 let pendingOpenPullRequestUrl: string | null = null
 let pendingOpenPullRequestRoot: string | null = null
-const queuedExternalReviews: HorusReviewRequest[] = []
+// A `kodi .` open in flight: the snapshot handler waits on it so a boot-time
+// CLI open can never lose to the Welcome screen.
+let pendingFolderOpen: Promise<unknown> = Promise.resolve(null)
+const queuedExternalReviews: KodiReviewRequest[] = []
+const queuedFolderOpens: string[] = []
 const warmupFlights = new Map<string, Promise<void>>()
 const recentlyWarmedAt = new Map<string, number>()
 
-function enqueueExternalReview(request: HorusReviewRequest): void {
+function enqueueExternalReview(request: KodiReviewRequest): void {
   queuedExternalReviews.push(request)
 }
 
@@ -206,14 +228,15 @@ async function warmupPullRequest(url: string): Promise<void> {
   return work
 }
 
-async function applyExternalReview(request: HorusReviewRequest): Promise<void> {
+async function applyExternalReview(request: KodiReviewRequest): Promise<void> {
   if (!shouldRevealForReview(request.intent)) {
     await warmupPullRequest(request.url)
     return
   }
   pendingOpenPullRequestUrl = request.url
   pendingOpenPullRequestRoot = null
-  revealMainWindow()
+  // Probe runs measure the review in a hidden window; revealing would flash it.
+  if (!probeHidden) revealMainWindow()
   // The renderer has to resolve the checkout before it can ask for the review, so
   // the answer rides along with the open request. Bounded: a resolution that has
   // to walk the folder catalog must not hold the tab back.
@@ -228,15 +251,40 @@ async function applyExternalReview(request: HorusReviewRequest): Promise<void> {
 }
 
 function acceptExternalReview(value: string): void {
-  const request = parseHorusReviewUrl(value)
+  const request = parseKodiReviewUrl(value)
   if (request == null) return
   if (app.isReady()) void applyExternalReview(request)
   else enqueueExternalReview(request)
 }
 
+/**
+ * `kodi .` — a folder handed to the process instead of a picker. It uses the
+ * Open Folder dialog's semantics: anything the user names explicitly is fair,
+ * wherever it lives (the picker's scan-root constraint is picker guidance, not
+ * a gate). The open lands through openRepository so the renderer learns about
+ * it through the usual snapshot publish.
+ */
+async function applyExternalFolder(folderPath: string): Promise<void> {
+  const resolved = resolveExistingRoot(resolve(folderPath))
+  if (resolved == null) throw new Error('That folder is no longer on disk.')
+  if (!(await stat(resolved)).isDirectory()) throw new Error('Choose a folder, not a file.')
+  await openRepository(resolved)
+  if (!probeHidden && !startHidden) revealMainWindow()
+}
+
+function acceptExternalFolder(folderPath: string): void {
+  if (app.isReady()) {
+    pendingFolderOpen = applyExternalFolder(folderPath).catch((error: unknown) => {
+      console.warn(`Could not open folder ${folderPath}:`, error)
+    })
+  } else {
+    queuedFolderOpens.push(folderPath)
+  }
+}
+
 function startClipboardWarmup(): void {
   let seen = clipboard.readText()
-  // Nothing on screen means nobody is about to press Cmd+H, and a hidden Horus
+  // Nothing on screen means nobody is about to press Cmd+H, and a hidden Kodi
   // that scans on every copied URL is a background process burning a core.
   const pollClipboard = (): void => {
     const decision = clipboardWarmupDecision({
@@ -252,15 +300,26 @@ function startClipboardWarmup(): void {
   app.on('activate', pollClipboard)
 }
 
-const launchRequest = findHorusReviewRequest(process.argv)
+const launchRequest = findKodiReviewRequest(process.argv)
 if (launchRequest != null) enqueueExternalReview(launchRequest)
+const launchFolder = findKodiFolderRequest(process.argv, app.isPackaged)
+if (launchFolder != null) queuedFolderOpens.push(launchFolder)
 app.on('open-url', (event, url) => {
   event.preventDefault()
   acceptExternalReview(url)
 })
-// Only the installed app owns horus://. A `bun run dev` registration would
-// steal the scheme from ~/Applications/Horus.app and break Raycast.
-if (app.isPackaged) app.setAsDefaultProtocolClient(HORUS_PROTOCOL)
+// `open -a Kodi <path>` and Finder's Open With arrive here rather than on argv.
+app.on('open-file', (event, path) => {
+  event.preventDefault()
+  acceptExternalFolder(path)
+})
+// Only the installed app owns kodi://. A `bun run dev` registration would
+// steal the scheme from ~/Applications/Kodi.app and break Raycast.
+if (app.isPackaged) {
+  app.setAsDefaultProtocolClient(KODI_PROTOCOL)
+  // horus:// links in the wild still reach the renamed app.
+  app.setAsDefaultProtocolClient(LEGACY_KODI_PROTOCOL)
+}
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolveDelay) => {
@@ -382,13 +441,16 @@ function createMainWindow(): BrowserWindow {
     title: PRODUCT_NAME,
     titleBarStyle: 'hiddenInset',
     trafficLightPosition: { x: 16, y: 17 },
-    backgroundColor: WINDOW_BACKGROUND[sessionState.themeType],
+    backgroundColor: sessionState.windowBackground ?? WINDOW_BACKGROUND[sessionState.themeType],
     paintWhenInitiallyHidden: true,
     webPreferences: {
       preload: join(__dirname, '../preload/index.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      // A window that never shows is occluded from Chromium's point of view;
+      // probe measurements would stall on suspended rAF and throttled timers.
+      backgroundThrottling: !probeHidden,
       additionalArguments: [encodeRestoreHintArgument(currentRestoreHint())]
     }
   })
@@ -540,6 +602,7 @@ async function openRepository(folderPath: string, activate = true): Promise<Repo
   // the kind probe both work off this value.
   const resolved = resolveExistingRoot(folderPath)
   if (resolved == null) throw new Error('That folder is no longer on disk.')
+  void migrateLegacyReviewDirectory(resolved)
 
   const cached = cachedWorkspaceForRoot(resolved)
   const snapshot = cached != null
@@ -722,6 +785,7 @@ function computeRestoreHint(): SessionRestoreHint {
     lastRoot,
     restoreLastFolder: sessionState.restoreLastFolder,
     themeType: sessionState.themeType,
+    canvasColor: sessionState.windowBackground ?? WINDOW_BACKGROUND[sessionState.themeType],
     folderPresent,
     restoring: shouldRestoreLastFolder({
       startHidden,
@@ -774,6 +838,7 @@ function registerIpcHandlers(): void {
     // gets its question in first starts it instead of racing it.
     beginSessionRestore()
     await restoreLastSession
+    await pendingFolderOpen
     const live = repositorySessions.getActiveSnapshot()
     if (live != null) return live
     // Returning a cache JSON blob without hydrate made the renderer apply
@@ -892,8 +957,10 @@ function registerIpcHandlers(): void {
   )
   ipcMain.on(IPC_CHANNELS.cancelContentSearch, () => repositorySessions.cancelActiveContentSearch())
   ipcMain.handle(IPC_CHANNELS.getMarkdownMedia, (_event, url: unknown) => loadMarkdownMedia(url))
+  ipcMain.handle(IPC_CHANNELS.getAvatar, (_event, url: unknown) => getAvatarDataUrl(url))
   ipcMain.handle(IPC_CHANNELS.getGitIntegration, () => repositorySessions.requireActive().getGitIntegration())
   ipcMain.handle(IPC_CHANNELS.getPullRequestInbox, () => repositorySessions.requireActive().getPullRequestInbox())
+  ipcMain.handle(IPC_CHANNELS.getGlobalPullRequestInbox, (_event, repos: unknown) => loadGlobalPullRequestInbox(normalizeInboxRepos(repos)))
   ipcMain.handle(IPC_CHANNELS.getClosedPullRequests, () => repositorySessions.requireActive().getClosedPullRequests())
   ipcMain.on(IPC_CHANNELS.cancelPullRequestReview, (_event, root: unknown, requestId: unknown) => {
     if (typeof root !== 'string' || typeof requestId !== 'string' || requestId === '') return
@@ -1046,17 +1113,20 @@ function registerIpcHandlers(): void {
     if (typeof preferences !== 'object' || preferences == null) {
       throw new Error('Startup preferences must be an object.')
     }
-    const { themeType, restoreLastFolder } = preferences as Record<string, unknown>
+    const { themeType, restoreLastFolder, windowBackground } = preferences as Record<string, unknown>
     if (themeType !== 'dark' && themeType !== 'light') throw new Error('Theme type must be dark or light.')
     if (typeof restoreLastFolder !== 'boolean') throw new Error('restoreLastFolder must be a boolean.')
-    if (sessionState.themeType === themeType && sessionState.restoreLastFolder === restoreLastFolder) return
-    const repainting = sessionState.themeType !== themeType
-    sessionState = { ...sessionState, themeType, restoreLastFolder }
+    const canvas = isWindowBackgroundHex(windowBackground) ? windowBackground : WINDOW_BACKGROUND[themeType]
+    if (sessionState.themeType === themeType && sessionState.restoreLastFolder === restoreLastFolder
+      && sessionState.windowBackground === canvas) return
+    const typeChanged = sessionState.themeType !== themeType
+    const repainting = typeChanged || sessionState.windowBackground !== canvas
+    sessionState = { ...sessionState, themeType, restoreLastFolder, windowBackground: canvas }
     void saveSessionState(userDataPath, sessionState)
     // setBackgroundColor can flash on some macOS versions, so only on a real change.
     if (!repainting) return
-    nativeTheme.themeSource = themeType
-    BrowserWindow.fromWebContents(event.sender)?.setBackgroundColor(WINDOW_BACKGROUND[themeType])
+    if (typeChanged) nativeTheme.themeSource = themeType
+    BrowserWindow.fromWebContents(event.sender)?.setBackgroundColor(canvas)
   })
   ipcMain.handle(IPC_CHANNELS.setVisibility, (_event, visible: unknown) => {
     if (typeof visible !== 'boolean') throw new Error('Visibility must be a boolean.')
@@ -1155,6 +1225,30 @@ function beginSessionRestore(): void {
   startLiveRefresh(snapshot.root)
 }
 
+/**
+ * Rename-era migration: the Horus profile becomes the Kodi one on first launch
+ * so the session, caches, and window state carry over. It must run at module
+ * level and still loses to Chromium, which creates a bare userData skeleton
+ * while booting — so "already exists" is not the test. A directory without
+ * last-session.json holds only throwaway Chromium runtime state and can be
+ * replaced wholesale; one with it is a real profile and the legacy dir stays
+ * as a manual fallback.
+ */
+function migrateLegacyUserData(): void {
+  try {
+    const current = app.getPath('userData')
+    const legacy = join(app.getPath('appData'), 'Horus')
+    if (!existsSync(legacy)) return
+    if (existsSync(join(current, 'last-session.json'))) return
+    rmSync(current, { recursive: true, force: true })
+    renameSync(legacy, current)
+  } catch {
+    // A profile that cannot move is a fresh start, not a boot failure.
+  }
+}
+
+migrateLegacyUserData()
+
 app.whenReady().then(() => {
   markMainStartup('appReady')
   userDataPath = app.getPath('userData')
@@ -1164,24 +1258,42 @@ app.whenReady().then(() => {
   nativeTheme.themeSource = sessionState.themeType
   app.setAboutPanelOptions({ applicationName: PRODUCT_NAME })
   const initialReviews = queuedExternalReviews.splice(0)
-  holdWindowHidden = shouldHoldWindowHidden(startHidden, initialReviews)
+  holdWindowHidden = probeHidden || shouldHoldWindowHidden(startHidden, initialReviews)
   if (startHidden || holdWindowHidden) app.dock?.hide()
   registerIpcHandlers()
   // Half-bounce first. Hydrating 20k cached paths must not delay window.show()
-  // or the pending PR URL that Cmd+H / horus:// already queued.
+  // or the pending PR URL that Cmd+H / kodi:// already queued.
   createMainWindow()
   for (const request of initialReviews) void applyExternalReview(request)
-  // Hydrating the cached workspace — up to 25,000 paths — runs after the window
-  // has been handed to the compositor, not in the same tick as its creation.
-  setImmediate(beginSessionRestore)
+  const initialFolder = queuedFolderOpens.splice(0).at(-1) ?? null
+  if (initialFolder != null) {
+    // `kodi <folder>` names the session; the old last-folder restore must not
+    // hydrate over it. A failed open falls back to the usual restore inside the
+    // snapshot handler.
+    sessionRestoreStarted = true
+    pendingFolderOpen = applyExternalFolder(initialFolder).catch((error: unknown) => {
+      console.warn(`Could not open folder ${initialFolder}:`, error)
+    })
+  } else {
+    // Hydrating the cached workspace — up to 25,000 paths — runs after the window
+    // has been handed to the compositor, not in the same tick as its creation.
+    setImmediate(beginSessionRestore)
+  }
   void loadLastRendererTermination()
   applyDevelopmentDockIcon()
   void folderIndex.list(sessionState.approvedRoots)
   if (!startHidden) startClipboardWarmup()
   app.on('second-instance', (_event, argv) => {
-    const request = findHorusReviewRequest(argv)
+    const request = findKodiReviewRequest(argv)
     if (request != null) {
       applyExternalReview(request)
+      return
+    }
+    const folder = findKodiFolderRequest(argv, true)
+    if (folder != null) {
+      pendingFolderOpen = applyExternalFolder(folder).catch((error: unknown) => {
+        console.warn(`Could not open folder ${folder}:`, error)
+      })
       return
     }
     revealMainWindow()

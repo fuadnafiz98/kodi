@@ -283,6 +283,19 @@ export async function readGitObject(root: string, object: string): Promise<GitOb
  */
 export type CommandLane = 'interactive' | 'background'
 
+/**
+ * Callers whose priority can change mid-flight pass a source instead of a
+ * fixed lane: it is read at admission time and again when the waiter's slot is
+ * granted, so work queued as background can promote while it waits. A
+ * pull-request warmup is the case — a foreground reader joining it attaches,
+ * and every later hop resolves 'interactive' from that point on.
+ */
+export type CommandLaneSource = CommandLane | (() => CommandLane)
+
+export function resolveCommandLane(source: CommandLaneSource): CommandLane {
+  return typeof source === 'function' ? source() : source
+}
+
 export const MAX_CONCURRENT_COMMANDS = Math.max(4, cpus().length - 2)
 /**
  * Lane priority only orders the queue. A background burst that already filled
@@ -292,6 +305,7 @@ export const MAX_CONCURRENT_COMMANDS = Math.max(4, cpus().length - 2)
 export const MAX_BACKGROUND_COMMANDS = Math.max(1, MAX_CONCURRENT_COMMANDS - 2)
 
 interface CommandWaiter {
+  lane: CommandLaneSource
   grant(): void
 }
 
@@ -327,18 +341,19 @@ export class CommandSemaphore {
   }
 
   /** Resolves with the function that hands the slot back. Calling it twice is a no-op. */
-  acquire(lane: CommandLane, signal?: AbortSignal): Promise<() => void> {
+  acquire(source: CommandLaneSource, signal?: AbortSignal): Promise<() => void> {
     if (signal?.aborted === true) return Promise.reject(new Error(COMMAND_ABORTED_MESSAGE))
-    if (this.#hasSlot(lane)) return Promise.resolve(this.#take(lane))
+    if (this.#hasSlot(resolveCommandLane(source))) return Promise.resolve(this.#take(resolveCommandLane(source)))
     return new Promise<() => void>((resolveSlot, rejectSlot) => {
-      const queue = lane === 'interactive' ? this.#interactiveQueue : this.#backgroundQueue
+      const queue = resolveCommandLane(source) === 'interactive' ? this.#interactiveQueue : this.#backgroundQueue
       // Assigned before the waiter can be granted: a grant only ever comes from
       // another command releasing its slot, which cannot happen synchronously here.
       let detach = (): void => {}
       const waiter: CommandWaiter = {
+        lane: source,
         grant: () => {
           detach()
-          resolveSlot(this.#take(lane))
+          resolveSlot(this.#take(resolveCommandLane(source)))
         }
       }
       queue.push(waiter)
@@ -383,6 +398,13 @@ export class CommandSemaphore {
     if (!this.#hasSlot('interactive')) return null
     const interactive = this.#interactiveQueue.shift()
     if (interactive != null) return interactive
+    // A deferred lane is read again at grant time, so a waiter that queued as
+    // background but now resolves interactive is admitted on this pass instead
+    // of waiting for a background slot that may never free up.
+    const promotedIndex = this.#backgroundQueue.findIndex(
+      (waiter) => resolveCommandLane(waiter.lane) === 'interactive'
+    )
+    if (promotedIndex !== -1) return this.#backgroundQueue.splice(promotedIndex, 1)[0] ?? null
     if (!this.#hasSlot('background')) return null
     return this.#backgroundQueue.shift() ?? null
   }
@@ -398,7 +420,7 @@ export async function runCommand(
   allowedExitCodes: readonly number[] = [],
   input?: string,
   signal?: AbortSignal,
-  lane: CommandLane = 'interactive'
+  lane: CommandLaneSource = 'interactive'
 ): Promise<CommandResult> {
   const release = await commandSemaphore.acquire(lane, signal)
   try {

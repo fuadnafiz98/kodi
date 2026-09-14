@@ -92,7 +92,7 @@ async function buildFixture(repositoryPath: string): Promise<void> {
   await writeFile(join(repositoryPath, 'vendor', 'lib', 'x.js'), 'export const x = 1\n', 'utf8')
   await git(['add', '.gitignore', 'src/tracked.ts'])
   await git([
-    '-c', 'user.name=Better Code Diff Test',
+    '-c', 'user.name=Kodi Test',
     '-c', 'user.email=test@example.invalid',
     '-c', 'commit.gpgsign=false',
     'commit', '--quiet', '-m', 'Initial commit'
@@ -126,7 +126,7 @@ describe('partitionIgnoredEntries', () => {
 
 describe('listIgnoredPaths', () => {
   it('matches the pathspec-filtered git walk it replaced', async () => {
-    const repositoryPath = await mkdtemp(join(tmpdir(), 'better-code-diff-ignored-'))
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'kodi-ignored-'))
     try {
       await buildFixture(repositoryPath)
       const git = gitFor(repositoryPath)
@@ -154,7 +154,7 @@ describe('listIgnoredPaths', () => {
   })
 
   it('stops at a nested repository and skips excluded directories and bytecode', async () => {
-    const repositoryPath = await mkdtemp(join(tmpdir(), 'better-code-diff-ignored-shape-'))
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'kodi-ignored-shape-'))
     try {
       await buildFixture(repositoryPath)
       const listed = await listIgnoredPaths(gitFor(repositoryPath), listingOptions(repositoryPath))
@@ -172,7 +172,7 @@ describe('listIgnoredPaths', () => {
   })
 
   it('reports an ignored directory that is its own repository without descending into it', async () => {
-    const repositoryPath = await mkdtemp(join(tmpdir(), 'better-code-diff-ignored-root-repo-'))
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'kodi-ignored-root-repo-'))
     try {
       await buildFixture(repositoryPath)
       const listed = await listIgnoredPaths(gitFor(repositoryPath), listingOptions(repositoryPath))
@@ -185,7 +185,7 @@ describe('listIgnoredPaths', () => {
   })
 
   it('truncates at the path cap instead of walking the whole tree', async () => {
-    const repositoryPath = await mkdtemp(join(tmpdir(), 'better-code-diff-ignored-cap-'))
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'kodi-ignored-cap-'))
     try {
       await buildFixture(repositoryPath)
       const listed = await listIgnoredPaths(gitFor(repositoryPath), {
@@ -200,7 +200,7 @@ describe('listIgnoredPaths', () => {
   })
 
   it('rejects once the listing is aborted', async () => {
-    const repositoryPath = await mkdtemp(join(tmpdir(), 'better-code-diff-ignored-abort-'))
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'kodi-ignored-abort-'))
     try {
       await buildFixture(repositoryPath)
       const abort = new AbortController()
@@ -271,7 +271,7 @@ describe('withIgnoredListingDeadline', () => {
       await delay(30)
       return { stdout: Buffer.from(args.join(' ').length === 0 ? '' : '.env\0'), stderr: Buffer.alloc(0) }
     }
-    const repositoryPath = await mkdtemp(join(tmpdir(), 'better-code-diff-ignored-slow-'))
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'kodi-ignored-slow-'))
     try {
       const listing = listIgnoredPaths(slowGit, listingOptions(repositoryPath))
 

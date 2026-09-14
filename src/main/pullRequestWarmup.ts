@@ -8,7 +8,7 @@ export interface ClipboardWarmupDecision {
 }
 
 /**
- * A hidden Horus must not react to the clipboard at all — the copy usually
+ * A hidden Kodi must not react to the clipboard at all — the copy usually
  * belongs to another app — and it must not consume the text either, or the URL
  * is stale by the time the window comes back.
  */

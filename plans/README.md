@@ -1,17 +1,14 @@
-# Plans
+# Kodi plans
 
-Earlier numbered plans in this folder (Fable 001–026 performance
-close-out, PR-diff loading, memory, markdown preview chrome) were
-implemented in product code and removed.
+There are two plan documents:
 
-Leftover STOPs that are not product work live in code comments
-(local / non-GitHub 64 MB skip in `boundInactivePatchPayloads`;
-keep-mounted last-3 Activity in `worldViewCache` /
-`RetainedWorldCodeView`).
-
-## Current plan documents
-
-| Document | Scope | Status |
+| Document | Purpose | Status |
 | --- | --- | --- |
-| [perf-instant-plan.md](perf-instant-plan.md) | Instant-perf program: main git path (ignored walk, watcher self-retrigger, open() snapshot), renderer boot, Cmd+P palette, Cmd+H PR open, sessions/cache, hardening. Executor-sliced into waves/tracks with in-file status table. | ACTIVE — Wave 1 in progress |
-| [grok-github-fast.md](../grok-github-fast.md) | GitHub working-set replica, revised after critique. SQLite social-state cache, GitHub line map, cheap-signal skip, poller-first. Not executor-sliced. Diagrams: [`grok-github-fast.html`](../grok-github-fast.html). | PLAN — deferred |
+| [Performance and reliability](performance-and-reliability.md) | Implementation phases for startup, Cmd+H, files/folders, PR correctness, cached reads, memory, snooze, recovery, and benchmarks. Start here. | PROPOSED |
+| [GitHub architecture](grok-github-fast.md) | Supporting design for social-state caching, freshness, optional SQLite and mirrors, and mutation handling. | PROPOSED |
+
+The seven numbered drafts are now phases of the implementation program. The older [HTML diagrams](grok-github-fast.html) are historical and are not authoritative for the revised design.
+
+Preserve existing improvements: lazy viewer/highlighter loading, the pre-mount budget, persistent git cat-file, isolated palette search, inactive watcher pause, and hidden viewer release. Earlier implementation plans were removed before this audit.
+
+Future app changes must pass repository gates and end with `bun run update:mac`. This consolidation changes documentation only.

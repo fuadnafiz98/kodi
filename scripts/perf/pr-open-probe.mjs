@@ -1,21 +1,17 @@
-// `open horus://review?url=<pr>` against a warm app, then against a cold one:
+// `open kodi://review?url=<pr>` against a warm app, then against a cold one:
 // how long until the review tab, the review surface, the first file page and
 // the first code view.
 //
 //   PRS=https://github.com/owner/repo/pull/1 bun scripts/perf/pr-open-probe.mjs after
 import {
-  APP_PATH,
-  CDP,
   appendResult,
-  connect,
   guardExit,
   HOOKS,
   launch,
   quit,
   run,
   settle,
-  summaryLine,
-  waitForPage
+  summaryLine
 } from './cdp.mjs'
 import { createTimeline, summarizePullRequestProgress } from './timeline.mjs'
 
@@ -102,7 +98,7 @@ async function warmRuns() {
     for (const pullRequest of PRS) {
       await cdp.eval(`window.__probe.pr.length = 0`)
       const startedAt = Date.now()
-      await run(['open', `horus://review?url=${encodeURIComponent(pullRequest)}`])
+      await run(['open', `kodi://review?url=${encodeURIComponent(pullRequest)}`])
       const record = await measure(cdp, pullRequest, 'warm-app', startedAt)
       records.push(record)
       console.log(JSON.stringify(record))
@@ -117,16 +113,10 @@ async function warmRuns() {
 // The app is not running, so the URL cannot go through the scheme handler; the
 // argv form is the same path the Raycast fallback uses.
 async function coldRun(pullRequest) {
-  await quit()
   const port = 9497
-  const startedAt = Date.now()
-  await run([
-    'open', '-na', APP_PATH, '--args',
-    `--remote-debugging-port=${port}`,
-    `--horus-url=horus://review?url=${encodeURIComponent(pullRequest)}`
+  const { cdp, startedAt } = await launch(port, [
+    `--kodi-url=kodi://review?url=${encodeURIComponent(pullRequest)}`
   ])
-  const page = await waitForPage(port)
-  const cdp = new CDP(await connect(page.webSocketDebuggerUrl))
   try {
     // Progress events fired before the hook exists are lost, so install it as
     // early as the bridge allows and lean on the DOM gates for the rest.

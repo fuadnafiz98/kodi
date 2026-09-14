@@ -1,6 +1,6 @@
-# Horus
+# Kodi
 
-Horus is a local-first desktop application for exploring projects and reviewing code changes. Open a folder, browse its file tree, and inspect files in a focused diff surface. When the folder is a Git repository, the app compares the working tree with `HEAD` and shows Git status for each changed file.
+Kodi is a local-first desktop application for exploring projects and reviewing code changes. Open a folder, browse its file tree, and inspect files in a focused diff surface. When the folder is a Git repository, the app compares the working tree with `HEAD` and shows Git status for each changed file.
 
 ## Features
 
@@ -29,7 +29,7 @@ Clone the repository, install dependencies, and start the development app:
 
 ```sh
 git clone <repository-url>
-cd horus
+cd kodi
 bun install
 bun run dev
 ```
@@ -38,13 +38,13 @@ Use the Electron window opened by `bun run dev`. The renderer URL on its own doe
 
 ## Raycast
 
-The `extensions/horus` Raycast extension opens a GitHub pull request URL in Horus. Copying the URL, pasting it into the command, or enabling the 10-second clipboard warmer starts the review in the background so Enter does not wait on a cold fetch.
+The `extensions/kodi` Raycast extension opens a GitHub pull request URL in Kodi. Copying the URL, pasting it into the command, or enabling the 10-second clipboard warmer starts the review in the background so Enter does not wait on a cold fetch.
 
-1. Install Horus with `bun run update:mac` so the `horus://` link is registered.
-2. Run `bun run raycast:dev` (or `npm install && npm run dev` in `extensions/horus`). Do not Import Extension on the source folder — that produces `Missing executable`.
-3. Raycast will not put Horus under **Use with...** by itself. After install, paste a PR URL, click the gear on that section, and enable **Open in Horus** once.
+1. Install Kodi with `bun run update:mac` so the `kodi://` link is registered.
+2. Run `bun run raycast:dev` (or `npm install && npm run dev` in `extensions/kodi`). Do not Import Extension on the source folder — that produces `Missing executable`.
+3. Raycast will not put Kodi under **Use with...** by itself. After install, paste a PR URL, click the gear on that section, and enable **Open in Kodi** once.
 
-See `extensions/horus/README.md` for the commands and hotkey setup.
+See `extensions/kodi/README.md` for the commands and hotkey setup.
 
 ## Commands
 
@@ -61,7 +61,7 @@ See `extensions/horus/README.md` for the commands and hotkey setup.
 | `bun run lint` | Lint `src` with oxlint |
 | `bun test` | Run the test suite |
 | `bun run verify` | Lint, type-check, test, and build in one pass |
-| `bun run raycast:dev` | Register the local Horus Raycast extension |
+| `bun run raycast:dev` | Register the local Kodi Raycast extension |
 
 Run the complete local verification with:
 

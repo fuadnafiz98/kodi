@@ -1,0 +1,184 @@
+/* Review threads render inside the viewer chunks, never on the boot path, so their
+   rules travel with them. */
+.review-thread:not(.review-remote-thread) {
+  width: min(440px, calc(100% - 24px));
+  margin: 4px 12px 6px;
+  overflow: visible;
+  border: 0;
+  background: var(--floating-surface);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--text) 8%, transparent), var(--elev-1);
+  font-size: var(--text-sm);
+}
+.review-thread:not(.review-remote-thread) > header {
+  min-height: 0;
+  padding: 8px 10px 0;
+  border-bottom: 0;
+  background: transparent;
+}
+.review-thread:not(.review-remote-thread) > header strong {
+  color: var(--text);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-strong);
+}
+.review-avatar { width: 20px; height: 20px; flex: none; display: grid; place-items: center; border-radius: var(--corner-compact); background: var(--avatar-fill); color: var(--avatar-text); font-size: var(--text-2xs); font-weight: 680; }
+.review-thread:not(.review-remote-thread) .review-avatar { border-radius: 50%; }
+.review-thread > p { margin: 0; padding: 11px 12px; white-space: pre-wrap; }
+.review-thread:not(.review-remote-thread) > p { padding: 4px 10px 0; color: var(--text); }
+.review-thread { transition: opacity var(--duration-base) var(--ease-out), transform var(--duration-base) var(--ease-out); }
+.review-thread.resolved { opacity: 0.68; }
+.review-thread-actions { justify-content: flex-start; padding-top: 2px; }
+.review-thread:not(.review-remote-thread) .review-thread-actions {
+  gap: 2px;
+  padding: 4px 6px 6px;
+}
+.review-thread:not(.review-remote-thread) .review-thread-actions button {
+  height: 24px;
+  min-height: 24px;
+  border: 0;
+  background: transparent;
+  padding: 0 7px 0 5px;
+  font-weight: var(--weight-strong);
+}
+.review-thread:not(.review-remote-thread) .review-thread-actions button:hover:not(:disabled) {
+  background: var(--control-fill-hover);
+}
+.review-thread:not(.review-remote-thread) > .review-composer {
+  width: calc(100% - 16px);
+  margin: 6px 8px;
+  box-shadow: none;
+}
+/* DiffsHub-style composer: one floating row, avatar, field, send. Nested
+   `.review-card` rules would otherwise restyle the textarea and send button. */
+.review-composer {
+  --review-composer-pad: 6px;
+  width: min(560px, calc(100% - 20px));
+  min-height: 40px;
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  margin: 8px 10px 12px;
+  border: 0;
+  border-radius: var(--corner-modal);
+  padding: var(--review-composer-pad);
+  background: var(--floating-surface);
+  box-shadow: var(--elev-1);
+  color: var(--text);
+  font-family: var(--font-ui);
+  transition: opacity var(--duration-base) var(--ease-out), transform var(--duration-base) var(--ease-out);
+}
+@starting-style {
+  .review-composer { opacity: 0; transform: translateY(-3px); }
+}
+.review-thread > .review-composer { width: calc(100% - 20px); margin: 4px 10px 10px; }
+.review-composer-avatar {
+  width: 28px;
+  height: 28px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--avatar-fill);
+  color: var(--avatar-text);
+  font-size: var(--text-2xs);
+  font-weight: 680;
+}
+.review-composer textarea::placeholder { color: var(--faint); }
+.review-composer textarea:focus { outline: 0; }
+.review-composer-send svg {
+  width: 12px;
+  height: 12px;
+  rotate: 90deg;
+  translate: 0 -0.5px;
+}
+.review-composer-send:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 84%, var(--text)); }
+.review-composer-send:disabled {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  color: var(--accent-contrast);
+  opacity: 0.55;
+  cursor: default;
+}
+.review-thread-actions .danger { margin-left: auto; color: var(--status-danger-text); }
+/* A GitHub thread is one quotation: an identity line, the discussion, one reply
+   action. Everything in the header is metadata about the same thread, so it
+   shares a baseline instead of stacking bold names on top of each other. */
+.review-remote-thread { border-color: color-mix(in srgb, var(--accent) 30%, var(--border-strong)); }
+.review-remote-thread > header { min-height: 32px; display: flex; align-items: center; gap: 7px; padding: 0 8px 0 11px; border-bottom: 1px solid var(--border); background: var(--surface); }
+.review-remote-thread > header svg:first-child { width: var(--icon-md); height: var(--icon-md); flex: none; color: var(--muted); }
+.review-remote-thread > header strong { min-width: 0; overflow: hidden; color: var(--text); font-size: var(--text-sm); font-weight: var(--weight-bold); text-overflow: ellipsis; white-space: nowrap; }
+.review-remote-age { flex: none; color: var(--faint); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
+.review-remote-thread > header em { flex: none; border: 1px solid var(--border-strong); border-radius: 999px; padding: 0 7px; color: var(--muted); font-size: var(--text-xs); font-style: normal; font-weight: var(--weight-strong); line-height: 15px; }
+.review-remote-thread > header em[data-tone="resolved"] { border-color: color-mix(in srgb, var(--status-success-text) 38%, transparent); color: var(--status-success-text); }
+.review-remote-resolve { width: var(--control-height-sm); height: var(--control-height-sm); flex: none; margin-left: auto; border: 0; border-radius: var(--corner-compact); background: transparent; color: var(--muted); }
+.review-remote-resolve:hover:not(:disabled) { background: var(--control-fill-hover); color: var(--text); }
+.review-remote-comments { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; }
+.review-remote-comment { display: flex; flex-direction: column; gap: 3px; padding: 9px 12px; }
+.review-remote-comment + .review-remote-comment { border-top: 1px solid var(--border); }
+.review-remote-comment span { display: flex; align-items: center; gap: 6px; color: var(--faint); font-size: var(--text-xs); }
+.review-remote-comment span strong { color: var(--text-secondary); font-size: var(--text-xs); font-weight: var(--weight-bold); }
+.review-remote-body { max-width: 88ch; display: flex; flex-direction: column; gap: 6px; color: var(--text-secondary); font-size: var(--text-xs); line-height: 1.5; }
+.review-remote-body p, .review-remote-body h3, .review-remote-body h4, .review-remote-body h5, .review-remote-body h6 { margin: 0; text-wrap: pretty; overflow-wrap: anywhere; }
+.review-remote-body h3, .review-remote-body h4, .review-remote-body h5, .review-remote-body h6 { color: var(--text); font-size: var(--text-sm); font-weight: var(--weight-bold); }
+.review-remote-body ul, .review-remote-body ol { margin: 0; padding-left: 16px; display: flex; flex-direction: column; gap: 3px; }
+.review-remote-body blockquote { margin: 0; border-left: 2px solid var(--border-strong); padding-left: 9px; color: var(--muted); }
+.review-remote-body code { border-radius: var(--corner-inline); padding: 0 3px; background: var(--control-recessed); color: var(--text); font-family: var(--font-mono); font-size: var(--text-sm); }
+.review-remote-body pre { margin: 0; overflow-x: auto; border: 1px solid var(--border); border-radius: var(--corner-control); padding: 7px 9px; background: var(--control-recessed); }
+.review-remote-body pre code { padding: 0; background: transparent; }
+.review-remote-body strong { color: var(--text); font-weight: var(--weight-bold); }
+.review-remote-thread > footer { display: flex; padding: 0 10px 9px; }
+.review-remote-reply { display: inline-flex; align-items: center; gap: 5px; min-height: var(--control-height-sm); border: 1px solid var(--border-strong); border-radius: var(--corner-control); padding: 0 9px 0 7px; background: var(--control-fill); color: var(--text-secondary); font-size: var(--text-xs); font-weight: var(--weight-strong); cursor: pointer; }
+.review-remote-reply svg { width: var(--icon-sm); height: var(--icon-sm); }
+.review-remote-reply:hover:not(:disabled) { border-color: color-mix(in srgb, var(--accent) 45%, var(--border-strong)); background: var(--control-fill-hover); color: var(--text); }
+.review-reply { display: flex; gap: 8px; margin: 0 10px 9px; padding: 9px 2px 0; border-top: 1px solid var(--border); }
+.review-thread:not(.review-remote-thread) .review-reply {
+  margin: 6px 10px 4px;
+  padding: 6px 0 0;
+  border-top-color: color-mix(in srgb, var(--text) 8%, transparent);
+}
+.review-reply strong { font-size: var(--text-xs); }
+.review-reply p { margin: 2px 0 0; white-space: pre-wrap; }
+/* Offered when lines are selected: comment or ask the agent. Escape dismisses.
+   The pill is a transient affordance, so it floats over the following line
+   instead of pushing the diff apart: `[data-annotation-content]` is already
+   `position: relative` inside the shadow root, and an absolutely positioned
+   slotted child leaves the flow, collapsing the annotation row to zero. Only
+   the draft form it opens earns a real row. */
+.selection-actions {
+  position: absolute;
+  top: 2px;
+  left: 12px;
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  width: fit-content;
+  min-width: 0;
+  margin: 0;
+  border: 0;
+  border-radius: var(--corner-control);
+  padding: 3px;
+  background: var(--floating-surface);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--text) 8%, transparent);
+  transform-origin: 0 0;
+  transition: opacity 160ms var(--ease-out), transform 160ms var(--ease-out);
+}
+.selection-actions button {
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 0;
+  border-radius: var(--corner-compact);
+  padding: 0 8px 0 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-strong);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: scale var(--duration-fast) var(--ease-out), background-color var(--duration-fast) var(--ease-out), color var(--duration-fast) var(--ease-out);
+}
+.selection-actions button:hover:not(:disabled) { background: var(--control-fill-hover); color: var(--text); }
+.selection-actions button:active:not(:disabled) { scale: 0.96; }
+.selection-actions button svg { width: var(--icon-md); height: var(--icon-md); flex: none; }
+.selection-actions-comment { background: var(--accent-soft); color: var(--path-text); }
+.selection-actions-comment:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--path-text); }

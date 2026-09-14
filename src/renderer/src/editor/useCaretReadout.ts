@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { Editor } from '@pierre/diffs/edit'
 
-import type { ReviewAnnotationMetadata } from '../ReviewComments'
+import type { ReviewAnnotationMetadata } from '../review/ReviewComments'
 import { EMPTY_CARET, readCaret, type CaretReadout } from './caret'
 
 /**

@@ -60,7 +60,7 @@ describe('isReachable', () => {
 
 describe('loadWindowState', () => {
   it('round-trips through disk and drops an unreachable rect', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'horus-window-'))
+    const directory = await mkdtemp(join(tmpdir(), 'kodi-window-'))
     try {
       saveWindowState(directory, state({ x: 2000, y: 200, maximized: true }))
       expect(loadWindowState(directory, [LAPTOP, EXTERNAL])).toEqual(state({ x: 2000, y: 200, maximized: true }))
@@ -71,7 +71,7 @@ describe('loadWindowState', () => {
   })
 
   it('returns null when nothing was ever saved', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'horus-window-'))
+    const directory = await mkdtemp(join(tmpdir(), 'kodi-window-'))
     try {
       expect(loadWindowState(directory, [LAPTOP])).toBeNull()
     } finally {

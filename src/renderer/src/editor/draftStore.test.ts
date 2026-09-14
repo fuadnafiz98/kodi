@@ -34,7 +34,7 @@ const draft = {
 
 describe('draftStore', () => {
   test('scopes the storage key to the repository root', () => {
-    expect(draftStorageKey('/repo')).toBe('horus:drafts:v1:/repo')
+    expect(draftStorageKey('/repo')).toBe('kodi:drafts:v1:/repo')
     expect(draftStorageKey('/other')).not.toBe(draftStorageKey('/repo'))
   })
 

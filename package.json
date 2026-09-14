@@ -1,13 +1,13 @@
 {
-  "name": "horus",
+  "name": "kodi",
   "version": "0.1.0",
   "description": "A diff-first Git explorer for desktop.",
-  "author": "Horus Contributors",
+  "author": "Kodi Contributors",
   "main": "out/main/index.js",
   "type": "module",
   "scripts": {
     "dev": "bash scripts/run-electron-vite.sh",
-    "dev:background": "HORUS_BACKGROUND=1 bash scripts/run-electron-vite.sh",
+    "dev:background": "KODI_BACKGROUND=1 bash scripts/run-electron-vite.sh",
     "build": "electron-vite build",
     "icon": "bash scripts/generate-macos-icon.sh && node scripts/generate-windows-icon.mjs",
     "icon:mac": "bun run icon",
@@ -16,8 +16,8 @@
     "dist:linux": "bun run icon && bun run build && electron-builder --linux AppImage deb",
     "install:mac": "bash scripts/install-macos-app.sh",
     "update:mac": "bun run dist:mac && bun run install:mac",
-    "open:mac": "env -u ELECTRON_RUN_AS_NODE -u ELECTRON_NO_ASAR open -a \"Horus\"",
-    "raycast:dev": "npm --prefix extensions/horus run dev",
+    "open:mac": "env -u ELECTRON_RUN_AS_NODE -u ELECTRON_NO_ASAR open -a \"Kodi\"",
+    "raycast:dev": "npm --prefix extensions/kodi run dev",
     "update:mac:open": "bun run update:mac && bun run open:mac",
     "preview": "electron-vite preview",
     "typecheck": "tsc -b tsconfig.json",
@@ -31,6 +31,7 @@
     "perf:startup-probe": "bun scripts/perf/startup-probe.mjs",
     "perf:open-folder-probe": "bun scripts/perf/open-folder-probe.mjs",
     "perf:pr-open-probe": "bun scripts/perf/pr-open-probe.mjs",
+    "perf:theme-shots": "bun scripts/perf/theme-screenshots.mjs",
     "perf:patch-stream": "bun scripts/benchmark-patch-stream.mjs"
   },
   "comment:dependencies": "electron-builder packs `dependencies` into the app verbatim. Only packages the main process resolves at runtime belong here: the Claude Agent SDK, @vscode/ripgrep, and the native node-pty bridge. Everything the renderer uses is bundled by Vite into out/renderer, so shipping it again would be dead weight.",
@@ -89,8 +90,8 @@
   "comment:build.files": "The Claude Agent SDK's platform package is a 310 MB `claude` binary. agentService resolves the user's own CLI and passes it as pathToClaudeCodeExecutable, so shipping a second copy only inflates the download.",
   "comment:build.asarUnpack": "@vscode/ripgrep ships no bin/ of its own; the binary lives in the @vscode/ripgrep-<platform>-<arch> optional dependency. node-pty resolves build/Release first when the packaging machine built it, and falls back to prebuilds elsewhere, so both are declared rather than left to electron-builder's smartUnpack heuristic.",
   "build": {
-    "appId": "com.fuadnafiz.horus",
-    "productName": "Horus",
+    "appId": "com.fuadnafiz.kodi",
+    "productName": "Kodi",
     "directories": {
       "output": "release"
     },
@@ -129,15 +130,22 @@
     },
     "protocols": [
       {
-        "name": "Horus",
+        "name": "Kodi",
         "schemes": [
+          "kodi",
           "horus"
         ]
       }
     ],
+    "extraResources": [
+      {
+        "from": "resources/kodi",
+        "to": "kodi"
+      }
+    ],
     "dmg": {
-      "title": "Horus ${version}",
-      "artifactName": "Horus-${version}-${arch}.${ext}"
+      "title": "Kodi ${version}",
+      "artifactName": "Kodi-${version}-${arch}.${ext}"
     }
   }
 }

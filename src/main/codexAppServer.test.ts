@@ -26,13 +26,13 @@ describe('CodexAppServer', () => {
   test('surfaces a missing codex binary as a rejection, not a process crash', async () => {
     const server = new CodexAppServer()
 
-    await expect(server.listModels('/nonexistent/horus-codex-binary', process.cwd())).rejects.toThrow()
+    await expect(server.listModels('/nonexistent/kodi-codex-binary', process.cwd())).rejects.toThrow()
 
     server.stop()
   })
 
   test('stop rejects an initialize request that is still pending', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'horus-codex-test-'))
+    const directory = await mkdtemp(join(tmpdir(), 'kodi-codex-test-'))
     const executable = join(directory, 'codex-stub')
     await writeFile(executable, '#!/bin/sh\nwhile IFS= read -r line; do :; done\n', 'utf8')
     await chmod(executable, 0o755)

@@ -24,8 +24,8 @@ import {
 } from './workspaceCache.js'
 
 const snapshot = (paths: string[] = ['src/a.ts', 'src/b.ts']): RepositorySnapshot => ({
-  root: '/work/horus',
-  name: 'horus',
+  root: '/work/kodi',
+  name: 'kodi',
   kind: 'git',
   branch: 'main',
   head: 'abc123',
@@ -35,7 +35,7 @@ const snapshot = (paths: string[] = ['src/a.ts', 'src/b.ts']): RepositorySnapsho
 
 const cache = {
   version: 1 as const,
-  lastRoot: '/work/horus',
+  lastRoot: '/work/kodi',
   snapshot: snapshot(),
   selectedPath: 'src/a.ts',
   workspaceView: 'file' as const,

@@ -15,9 +15,9 @@ const TINY_PNG = Buffer.from(
 
 describe('imagePreview', () => {
   test('maps common raster extensions and ignores everything else', () => {
-    expect(imageMimeType('extensions/horus/assets/icon.png')).toBe('image/png')
+    expect(imageMimeType('extensions/kodi/assets/icon.png')).toBe('image/png')
     expect(imageMimeType('photo.JPEG')).toBe('image/jpeg')
-    expect(isImagePath('src/lib/horus.ts')).toBe(false)
+    expect(isImagePath('src/lib/kodi.ts')).toBe(false)
     expect(isImagePath('notes.svg')).toBe(true)
   })
 

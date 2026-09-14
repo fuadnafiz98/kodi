@@ -39,6 +39,7 @@ import {
   parsePorcelainV2Status,
   parsePullRequestConversation,
   PullRequestReviewCache,
+  pullRequestInboxVariables,
   pullRequestReviewLane,
   pullRequestReviewReply,
   pullRequestFilePageWave,
@@ -142,7 +143,7 @@ async function commitAll(repositoryPath: string, message: string): Promise<void>
 async function commitIndex(repositoryPath: string, message: string): Promise<void> {
   await runGit(
     repositoryPath,
-    '-c', 'user.name=Better Code Diff Test',
+    '-c', 'user.name=Kodi Test',
     '-c', 'user.email=test@example.invalid',
     '-c', 'commit.gpgsign=false',
     'commit', '--quiet', '-m', message
@@ -292,19 +293,19 @@ describe('mergeVisiblePaths', () => {
 
 describe('githubRepoSlugFromRemoteUrl', () => {
   it('extracts the slug from every GitHub remote form', () => {
-    expect(githubRepoSlugFromRemoteUrl('https://github.com/pierre/better-code-diff')).toBe('pierre/better-code-diff')
-    expect(githubRepoSlugFromRemoteUrl('https://github.com/pierre/better-code-diff.git')).toBe('pierre/better-code-diff')
-    expect(githubRepoSlugFromRemoteUrl('git@github.com:pierre/better-code-diff.git')).toBe('pierre/better-code-diff')
-    expect(githubRepoSlugFromRemoteUrl('ssh://git@github.com/pierre/better-code-diff.git')).toBe('pierre/better-code-diff')
+    expect(githubRepoSlugFromRemoteUrl('https://github.com/pierre/kodi')).toBe('pierre/kodi')
+    expect(githubRepoSlugFromRemoteUrl('https://github.com/pierre/kodi.git')).toBe('pierre/kodi')
+    expect(githubRepoSlugFromRemoteUrl('git@github.com:pierre/kodi.git')).toBe('pierre/kodi')
+    expect(githubRepoSlugFromRemoteUrl('ssh://git@github.com/pierre/kodi.git')).toBe('pierre/kodi')
   })
 
   it('lowercases the slug and ignores surrounding space and trailing slashes', () => {
-    expect(githubRepoSlugFromRemoteUrl('  https://github.com/Pierre/Better-Code-Diff/  ')).toBe('pierre/better-code-diff')
+    expect(githubRepoSlugFromRemoteUrl('  https://github.com/Pierre/Kodi/  ')).toBe('pierre/kodi')
   })
 
   it('returns null for remotes that are not GitHub repositories', () => {
-    expect(githubRepoSlugFromRemoteUrl('https://gitlab.com/pierre/better-code-diff.git')).toBeNull()
-    expect(githubRepoSlugFromRemoteUrl('git@github.example.com:pierre/better-code-diff.git')).toBeNull()
+    expect(githubRepoSlugFromRemoteUrl('https://gitlab.com/pierre/kodi.git')).toBeNull()
+    expect(githubRepoSlugFromRemoteUrl('git@github.example.com:pierre/kodi.git')).toBeNull()
     expect(githubRepoSlugFromRemoteUrl('https://github.com/pierre')).toBeNull()
     expect(githubRepoSlugFromRemoteUrl('')).toBeNull()
   })
@@ -312,26 +313,26 @@ describe('githubRepoSlugFromRemoteUrl', () => {
 
 describe('pullRequestTargetsRemotes', () => {
   const remotes = [
-    { name: 'origin', fetchUrl: 'git@github.com:Pierre/Better-Code-Diff.git', pushUrl: 'git@github.com:Pierre/Better-Code-Diff.git' },
-    { name: 'fork', fetchUrl: 'https://github.com/contributor/better-code-diff.git', pushUrl: '' }
+    { name: 'origin', fetchUrl: 'git@github.com:Pierre/Kodi.git', pushUrl: 'git@github.com:Pierre/Kodi.git' },
+    { name: 'fork', fetchUrl: 'https://github.com/contributor/kodi.git', pushUrl: '' }
   ]
 
   it('accepts a pull request hosted by one of the remotes', () => {
-    expect(pullRequestTargetsRemotes(remotes, 'https://github.com/pierre/better-code-diff/pull/12')).toBe(true)
-    expect(pullRequestTargetsRemotes(remotes, 'https://github.com/Contributor/Better-Code-Diff/pull/12/files')).toBe(true)
+    expect(pullRequestTargetsRemotes(remotes, 'https://github.com/pierre/kodi/pull/12')).toBe(true)
+    expect(pullRequestTargetsRemotes(remotes, 'https://github.com/Contributor/Kodi/pull/12/files')).toBe(true)
   })
 
   it('rejects a pull request from another repository', () => {
-    expect(pullRequestTargetsRemotes(remotes, 'https://github.com/attacker/better-code-diff/pull/12')).toBe(false)
+    expect(pullRequestTargetsRemotes(remotes, 'https://github.com/attacker/kodi/pull/12')).toBe(false)
     expect(pullRequestTargetsRemotes(remotes, 'https://github.com/pierre/other-repository/pull/12')).toBe(false)
-    expect(pullRequestTargetsRemotes([], 'https://github.com/pierre/better-code-diff/pull/12')).toBe(false)
+    expect(pullRequestTargetsRemotes([], 'https://github.com/pierre/kodi/pull/12')).toBe(false)
   })
 
   it('rejects non-GitHub remotes and malformed pull request URLs', () => {
-    const otherHost = [{ name: 'origin', fetchUrl: 'git@gitlab.com:pierre/better-code-diff.git', pushUrl: '' }]
+    const otherHost = [{ name: 'origin', fetchUrl: 'git@gitlab.com:pierre/kodi.git', pushUrl: '' }]
 
-    expect(pullRequestTargetsRemotes(otherHost, 'https://github.com/pierre/better-code-diff/pull/12')).toBe(false)
-    expect(pullRequestTargetsRemotes(remotes, 'https://github.com/pierre/better-code-diff/issues/12')).toBe(false)
+    expect(pullRequestTargetsRemotes(otherHost, 'https://github.com/pierre/kodi/pull/12')).toBe(false)
+    expect(pullRequestTargetsRemotes(remotes, 'https://github.com/pierre/kodi/issues/12')).toBe(false)
   })
 })
 
@@ -996,7 +997,7 @@ describe('replaceStatusEntry', () => {
 
 describe('GitObjectReader', () => {
   it('serves many reads from a single git process and reports blob type', async () => {
-    const repositoryPath = await mkdtemp(join(tmpdir(), 'better-code-diff-reader-'))
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'kodi-reader-'))
     try {
       await initRepository(repositoryPath)
       for (let index = 0; index < 40; index += 1) {
@@ -1025,7 +1026,7 @@ describe('GitObjectReader', () => {
   })
 
   it('keeps the stream aligned when an oversized object is skipped', async () => {
-    const repositoryPath = await mkdtemp(join(tmpdir(), 'better-code-diff-reader-big-'))
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'kodi-reader-big-'))
     try {
       await initRepository(repositoryPath)
       await writeFile(join(repositoryPath, 'small.txt'), 'small\n', 'utf8')
@@ -1085,7 +1086,7 @@ describe('PullRequestReviewCache', () => {
   })
 
   it('round-trips a review and misses on a different head oid', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'better-code-diff-pr-cache-'))
+    const directory = await mkdtemp(join(tmpdir(), 'kodi-pr-cache-'))
     try {
       const cache = new PullRequestReviewCache(join(directory, 'pr-cache'))
       const url = 'https://github.com/acme/app/pull/7'
@@ -1112,7 +1113,7 @@ describe('PullRequestReviewCache', () => {
   })
 
   it('treats a corrupt entry as a miss and never writes an empty review', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'better-code-diff-pr-cache-bad-'))
+    const directory = await mkdtemp(join(tmpdir(), 'kodi-pr-cache-bad-'))
     try {
       const cacheDirectory = join(directory, 'pr-cache')
       const cache = new PullRequestReviewCache(cacheDirectory)
@@ -1135,7 +1136,7 @@ describe('PullRequestReviewCache', () => {
   })
 
   it('sweeps the oldest entries past the entry cap', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'better-code-diff-pr-cache-sweep-'))
+    const directory = await mkdtemp(join(tmpdir(), 'kodi-pr-cache-sweep-'))
     try {
       const cacheDirectory = join(directory, 'pr-cache')
       const cache = new PullRequestReviewCache(cacheDirectory)
@@ -1159,7 +1160,7 @@ describe('PullRequestReviewCache', () => {
   })
 
   it('indexes the latest diff per URL so a reopen needs no head oid', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'better-code-diff-pr-index-'))
+    const directory = await mkdtemp(join(tmpdir(), 'kodi-pr-index-'))
     try {
       const cache = new PullRequestReviewCache(join(directory, 'pr-cache'))
       const url = 'https://github.com/acme/app/pull/7'
@@ -1185,7 +1186,7 @@ describe('PullRequestReviewCache', () => {
   })
 
   it('treats a corrupt or superseded index as a miss', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'better-code-diff-pr-index-bad-'))
+    const directory = await mkdtemp(join(tmpdir(), 'kodi-pr-index-bad-'))
     try {
       const cacheDirectory = join(directory, 'pr-cache')
       const cache = new PullRequestReviewCache(cacheDirectory)
@@ -1205,7 +1206,7 @@ describe('PullRequestReviewCache', () => {
 
 describe('RepositoryService content search', () => {
   it('caps the repository pass and still marks every hit in the open file', async () => {
-    const folderPath = await mkdtemp(join(tmpdir(), 'better-code-diff-search-cap-'))
+    const folderPath = await mkdtemp(join(tmpdir(), 'kodi-search-cap-'))
     const repository = new RepositoryService()
     try {
       for (let index = 0; index < 30; index += 1) {
@@ -1237,7 +1238,7 @@ describe('RepositoryService content search', () => {
   })
 
   it('ignores an open path that is not inside the repository', async () => {
-    const folderPath = await mkdtemp(join(tmpdir(), 'better-code-diff-search-escape-'))
+    const folderPath = await mkdtemp(join(tmpdir(), 'kodi-search-escape-'))
     const repository = new RepositoryService()
     try {
       await writeFile(join(folderPath, 'value.ts'), 'const needle = 1\n', 'utf8')
@@ -1299,7 +1300,7 @@ describe('RepositoryService pull request review', () => {
   }
 
   it('opens a cached pull request from the URL index before asking GitHub anything', async () => {
-    const { repositoryPath, repository, url } = await openCachedRepository('better-code-diff-pr-open-')
+    const { repositoryPath, repository, url } = await openCachedRepository('kodi-pr-open-')
     try {
       const events: PullRequestReviewProgress[] = []
       const promise = repository.getPullRequestReview(url, (progress) => events.push(progress), 'req-1')
@@ -1325,7 +1326,7 @@ describe('RepositoryService pull request review', () => {
   })
 
   it('lets a reader join the warmup flight instead of waiting behind it', async () => {
-    const { repositoryPath, repository, url } = await openCachedRepository('better-code-diff-pr-join-')
+    const { repositoryPath, repository, url } = await openCachedRepository('kodi-pr-join-')
     try {
       const events: PullRequestReviewProgress[] = []
       const warmup = repository.getPullRequestReview(url, undefined, `warmup:${url}`, 'warmup')
@@ -1353,7 +1354,7 @@ describe('RepositoryService', () => {
   })
 
   it('trims caches and fully releases repository state on dispose', async () => {
-    const repositoryPath = await mkdtemp(join(tmpdir(), 'better-code-diff-dispose-'))
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'kodi-dispose-'))
     const repository = new RepositoryService()
     try {
       await initRepository(repositoryPath)
@@ -1398,7 +1399,7 @@ describe('RepositoryService', () => {
   })
 
   it('deduplicates overlapping working-tree patches regardless of path order', async () => {
-    const repositoryPath = await mkdtemp(join(tmpdir(), 'better-code-diff-patch-dedupe-'))
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'kodi-patch-dedupe-'))
     const repository = new RepositoryService()
     const tracePath = join(repositoryPath, 'git-trace.json')
     const previousTrace = process.env.GIT_TRACE2_EVENT
@@ -1434,7 +1435,7 @@ describe('RepositoryService', () => {
   })
 
   it('aborts a working-tree patch superseded by a different path set', async () => {
-    const repositoryPath = await mkdtemp(join(tmpdir(), 'better-code-diff-patch-abort-'))
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'kodi-patch-abort-'))
     const repository = new RepositoryService()
     try {
       await initRepository(repositoryPath)
@@ -1456,7 +1457,7 @@ describe('RepositoryService', () => {
   })
 
   it('emits the first working-tree file before the joined patch resolves', async () => {
-    const repositoryPath = await mkdtemp(join(tmpdir(), 'better-code-diff-patch-first-'))
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'kodi-patch-first-'))
     const repository = new RepositoryService()
     try {
       await initRepository(repositoryPath)
@@ -1488,7 +1489,7 @@ describe('RepositoryService', () => {
   })
 
   it('emits an empty untracked first file, then the remaining tracked patch', async () => {
-    const repositoryPath = await mkdtemp(join(tmpdir(), 'better-code-diff-patch-empty-first-'))
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'kodi-patch-empty-first-'))
     const repository = new RepositoryService()
     try {
       await initRepository(repositoryPath)
@@ -1513,7 +1514,7 @@ describe('RepositoryService', () => {
   })
 
   it('replays streamed working-tree pages to a second caller of the same path set', async () => {
-    const repositoryPath = await mkdtemp(join(tmpdir(), 'better-code-diff-patch-join-'))
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'kodi-patch-join-'))
     const repository = new RepositoryService()
     try {
       await initRepository(repositoryPath)
@@ -1545,7 +1546,7 @@ describe('RepositoryService', () => {
   })
 
   it('diffs a glob-looking working-tree filename as a literal pathspec', async () => {
-    const repositoryPath = await mkdtemp(join(tmpdir(), 'better-code-diff-desk-glob-'))
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'kodi-desk-glob-'))
     const repository = new RepositoryService()
     try {
       await initRepository(repositoryPath)
@@ -1565,7 +1566,7 @@ describe('RepositoryService', () => {
   })
 
   it('keeps a working-tree rename as a rename hunk instead of a full-file add', async () => {
-    const repositoryPath = await mkdtemp(join(tmpdir(), 'better-code-diff-desk-rename-'))
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'kodi-desk-rename-'))
     const repository = new RepositoryService()
     try {
       await initRepository(repositoryPath)
@@ -1589,7 +1590,7 @@ describe('RepositoryService', () => {
   })
 
   it('shares one remotes request for the life of an open repository', async () => {
-    const repositoryPath = await mkdtemp(join(tmpdir(), 'better-code-diff-remotes-cache-'))
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'kodi-remotes-cache-'))
     const repository = new RepositoryService()
     try {
       await initRepository(repositoryPath)
@@ -1610,7 +1611,7 @@ describe('RepositoryService', () => {
   })
 
   it('opens a folder from a shallow listing without waiting on git status', async () => {
-    const repositoryPath = await mkdtemp(join(tmpdir(), 'better-code-diff-open-instant-'))
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'kodi-open-instant-'))
     const repository = new RepositoryService()
     const refresh = spyOn(repository, 'refresh')
     try {
@@ -1633,7 +1634,7 @@ describe('RepositoryService', () => {
   })
 
   it('loads status, file comparisons, and ripgrep content results', async () => {
-    const repositoryPath = await mkdtemp(join(tmpdir(), 'better-code-diff-test-'))
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'kodi-test-'))
 
     try {
       await runGit(repositoryPath, 'init', '--quiet')
@@ -1643,7 +1644,7 @@ describe('RepositoryService', () => {
       await runGit(
         repositoryPath,
         '-c',
-        'user.name=Better Code Diff Test',
+        'user.name=Kodi Test',
         '-c',
         'user.email=test@example.invalid',
         'commit',
@@ -1695,7 +1696,7 @@ describe('RepositoryService', () => {
   })
 
   it('renders a submodule as absent instead of a deleted commit object', async () => {
-    const repositoryPath = await mkdtemp(join(tmpdir(), 'better-code-diff-submodule-'))
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'kodi-submodule-'))
     const repository = new RepositoryService()
     try {
       await initRepository(repositoryPath)
@@ -1719,7 +1720,7 @@ describe('RepositoryService', () => {
   })
 
   it('opens an unchanged tracked file as a file preview', async () => {
-    const repositoryPath = await mkdtemp(join(tmpdir(), 'better-code-diff-clean-preview-'))
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'kodi-clean-preview-'))
     const repository = new RepositoryService()
     try {
       await initRepository(repositoryPath)
@@ -1747,7 +1748,7 @@ describe('RepositoryService', () => {
   })
 
   it('attaches a png preview instead of an empty binary comparison', async () => {
-    const repositoryPath = await mkdtemp(join(tmpdir(), 'better-code-diff-image-preview-'))
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'kodi-image-preview-'))
     const repository = new RepositoryService()
     const png = Buffer.from(
       'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
@@ -1771,7 +1772,7 @@ describe('RepositoryService', () => {
   })
 
   it('keeps tracked build output visible and consistent between a commit review files and patch', async () => {
-    const repositoryPath = await mkdtemp(join(tmpdir(), 'better-code-diff-tracked-dist-'))
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'kodi-tracked-dist-'))
     const repository = new RepositoryService()
     try {
       await initRepository(repositoryPath)
@@ -1796,7 +1797,7 @@ describe('RepositoryService', () => {
   })
 
   it('keeps a cache key stable across an unrelated commit and a byte-identical rewrite', async () => {
-    const repositoryPath = await mkdtemp(join(tmpdir(), 'better-code-diff-cachekey-'))
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'kodi-cachekey-'))
     const repository = new RepositoryService()
     try {
       await initRepository(repositoryPath)
@@ -1829,7 +1830,7 @@ describe('RepositoryService', () => {
   })
 
   it('saves an already-modified file without rebuilding the whole snapshot', async () => {
-    const repositoryPath = await mkdtemp(join(tmpdir(), 'better-code-diff-save-refresh-'))
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'kodi-save-refresh-'))
     const repository = new RepositoryService()
     const selfWrites: string[] = []
     try {
@@ -1862,7 +1863,7 @@ describe('RepositoryService', () => {
   })
 
   it('updates the status in place when a clean file becomes modified', async () => {
-    const repositoryPath = await mkdtemp(join(tmpdir(), 'better-code-diff-save-status-'))
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'kodi-save-status-'))
     const repository = new RepositoryService()
     try {
       await initRepository(repositoryPath)
@@ -1893,7 +1894,7 @@ describe('RepositoryService', () => {
   })
 
   it('saves an editable file and rejects a stale draft without overwriting disk changes', async () => {
-    const folderPath = await mkdtemp(join(tmpdir(), 'better-code-diff-save-test-'))
+    const folderPath = await mkdtemp(join(tmpdir(), 'kodi-save-test-'))
     const filePath = join(folderPath, 'value.ts')
 
     try {
@@ -1925,7 +1926,7 @@ describe('RepositoryService', () => {
   })
 
   it('omits oversized files from the working tree patch and matches Git for new files', async () => {
-    const repositoryPath = await mkdtemp(join(tmpdir(), 'better-code-diff-cap-test-'))
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'kodi-cap-test-'))
 
     try {
       await runGit(repositoryPath, 'init', '--quiet')
@@ -1971,7 +1972,7 @@ describe('RepositoryService', () => {
   })
 
   it('opens and searches an ordinary folder without Git metadata', async () => {
-    const folderPath = await mkdtemp(join(tmpdir(), 'better-code-diff-folder-test-'))
+    const folderPath = await mkdtemp(join(tmpdir(), 'kodi-folder-test-'))
 
     try {
       await mkdir(join(folderPath, 'src'))
@@ -2022,7 +2023,7 @@ describe('RepositoryService', () => {
   })
 
   it('loads local Git history and compares branches without checkout', async () => {
-    const repositoryPath = await mkdtemp(join(tmpdir(), 'better-code-diff-branch-test-'))
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'kodi-branch-test-'))
 
     try {
       await runGit(repositoryPath, 'init', '--quiet')
@@ -2070,7 +2071,7 @@ describe('RepositoryService', () => {
   })
 
   it('emits the first local-branch file before the review promise settles', async () => {
-    const repositoryPath = await mkdtemp(join(tmpdir(), 'better-code-diff-branch-first-'))
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'kodi-branch-first-'))
     const repository = new RepositoryService()
     try {
       await initRepository(repositoryPath)
@@ -2106,7 +2107,7 @@ describe('RepositoryService', () => {
   })
 
   it('emits the first commit file and aborts a superseded local review', async () => {
-    const repositoryPath = await mkdtemp(join(tmpdir(), 'better-code-diff-commit-first-'))
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'kodi-commit-first-'))
     const repository = new RepositoryService()
     try {
       await initRepository(repositoryPath)
@@ -2143,7 +2144,7 @@ describe('RepositoryService', () => {
   })
 
   it('keeps a branch rename as a rename hunk instead of a full-file add', async () => {
-    const repositoryPath = await mkdtemp(join(tmpdir(), 'better-code-diff-branch-rename-'))
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'kodi-branch-rename-'))
     const repository = new RepositoryService()
     try {
       await initRepository(repositoryPath)
@@ -2170,7 +2171,7 @@ describe('RepositoryService', () => {
   })
 
   it('replays streamed pages to a second caller of the same local review', async () => {
-    const repositoryPath = await mkdtemp(join(tmpdir(), 'better-code-diff-branch-join-'))
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'kodi-branch-join-'))
     const repository = new RepositoryService()
     try {
       await initRepository(repositoryPath)
@@ -2205,7 +2206,7 @@ describe('RepositoryService', () => {
   })
 
   it('counts omitted files in expectedFileCount so streamed reviews can finish', async () => {
-    const repositoryPath = await mkdtemp(join(tmpdir(), 'better-code-diff-branch-omit-'))
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'kodi-branch-omit-'))
     const repository = new RepositoryService()
     try {
       await initRepository(repositoryPath)
@@ -2240,7 +2241,7 @@ describe('RepositoryService', () => {
   })
 
   it('diffs a glob-looking filename as a literal pathspec', async () => {
-    const repositoryPath = await mkdtemp(join(tmpdir(), 'better-code-diff-branch-glob-'))
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'kodi-branch-glob-'))
     const repository = new RepositoryService()
     try {
       await initRepository(repositoryPath)
@@ -2262,7 +2263,7 @@ describe('RepositoryService', () => {
   })
 
   it('shares one git cycle between callers asking for the same state', async () => {
-    const repositoryPath = await mkdtemp(join(tmpdir(), 'better-code-diff-refresh-dedupe-'))
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'kodi-refresh-dedupe-'))
     const repository = new RepositoryService()
     try {
       await initRepository(repositoryPath)
@@ -2290,7 +2291,7 @@ describe('RepositoryService', () => {
   })
 
   it('does not hand a refresh that started before a write to a caller asking after it', async () => {
-    const repositoryPath = await mkdtemp(join(tmpdir(), 'better-code-diff-refresh-mutation-'))
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'kodi-refresh-mutation-'))
     const repository = new RepositoryService()
     try {
       await initRepository(repositoryPath)
@@ -2328,7 +2329,7 @@ describe('RepositoryService', () => {
   })
 
   it('runs a fresh cycle for the external change a watcher tick reports', async () => {
-    const repositoryPath = await mkdtemp(join(tmpdir(), 'better-code-diff-refresh-external-'))
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'kodi-refresh-external-'))
     const repository = new RepositoryService()
     try {
       await initRepository(repositoryPath)
@@ -2367,7 +2368,7 @@ describe('RepositoryService', () => {
   })
 
   it('refreshes without rewriting the index, and announces the write it might still make', async () => {
-    const repositoryPath = await mkdtemp(join(tmpdir(), 'better-code-diff-refresh-locks-'))
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'kodi-refresh-locks-'))
     const repository = new RepositoryService()
     const selfWrites: string[] = []
     try {
@@ -2394,7 +2395,7 @@ describe('RepositoryService', () => {
   })
 
   it('lists gitignored files without walking excluded directories, and re-lists them on the next refresh', async () => {
-    const repositoryPath = await mkdtemp(join(tmpdir(), 'better-code-diff-ignored-refresh-'))
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'kodi-ignored-refresh-'))
     const repository = new RepositoryService()
     try {
       await initRepository(repositoryPath)
@@ -2425,7 +2426,7 @@ describe('RepositoryService', () => {
   })
 
   it('drops a gitignored set that lands after a newer refresh replaced its run', async () => {
-    const repositoryPath = await mkdtemp(join(tmpdir(), 'better-code-diff-ignored-stale-'))
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'kodi-ignored-stale-'))
     const repository = new RepositoryService()
     try {
       await initRepository(repositoryPath)
@@ -2461,8 +2462,8 @@ describe('RepositoryService', () => {
   })
 
   it('marks the opening listing as a skeleton and every refreshed snapshot as live', async () => {
-    const repositoryPath = await mkdtemp(join(tmpdir(), 'better-code-diff-snapshot-stage-'))
-    const folderPath = await mkdtemp(join(tmpdir(), 'better-code-diff-snapshot-stage-folder-'))
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'kodi-snapshot-stage-'))
+    const folderPath = await mkdtemp(join(tmpdir(), 'kodi-snapshot-stage-folder-'))
     const repository = new RepositoryService()
     const folder = new RepositoryService()
     try {
@@ -2486,7 +2487,7 @@ describe('RepositoryService', () => {
   })
 
   it('opens an empty ordinary folder', async () => {
-    const folderPath = await mkdtemp(join(tmpdir(), 'better-code-diff-empty-folder-test-'))
+    const folderPath = await mkdtemp(join(tmpdir(), 'kodi-empty-folder-test-'))
 
     try {
       const repository = new RepositoryService()
@@ -2518,7 +2519,7 @@ describe('parsePullRequestConversation', () => {
                 diffSide: 'RIGHT',
                 comments: {
                   nodes: [
-                    { id: 'comment-1', body: 'Rename this.', author: { login: 'Reviewer' }, createdAt: '2026-08-17T10:00:00Z' }
+                    { id: 'comment-1', body: 'Rename this.', author: { login: 'Reviewer', avatarUrl: 'https://avatars.example/r.png' }, createdAt: '2026-08-17T10:00:00Z' }
                   ]
                 }
               },
@@ -2536,7 +2537,7 @@ describe('parsePullRequestConversation', () => {
           },
           reviews: {
             nodes: [
-              { id: 'review-1', state: 'CHANGES_REQUESTED', body: 'Almost.', author: { login: 'Reviewer' }, submittedAt: '2026-08-17T10:05:00Z' }
+              { id: 'review-1', state: 'CHANGES_REQUESTED', body: 'Almost.', author: { login: 'Reviewer', avatarUrl: 'https://avatars.example/r.png' }, submittedAt: '2026-08-17T10:05:00Z' }
             ]
           }
         }
@@ -2557,7 +2558,7 @@ describe('parsePullRequestConversation', () => {
         resolved: false,
         outdated: false,
         comments: [
-          { id: 'comment-1', body: 'Rename this.', authorLogin: 'Reviewer', createdAt: '2026-08-17T10:00:00Z' }
+          { id: 'comment-1', body: 'Rename this.', authorLogin: 'Reviewer', authorAvatarUrl: 'https://avatars.example/r.png', createdAt: '2026-08-17T10:00:00Z' }
         ]
       },
       {
@@ -2572,7 +2573,7 @@ describe('parsePullRequestConversation', () => {
       }
     ])
     expect(conversation.reviews).toEqual([
-      { id: 'review-1', state: 'CHANGES_REQUESTED', body: 'Almost.', authorLogin: 'Reviewer', submittedAt: '2026-08-17T10:05:00Z' }
+      { id: 'review-1', state: 'CHANGES_REQUESTED', body: 'Almost.', authorLogin: 'Reviewer', authorAvatarUrl: 'https://avatars.example/r.png', submittedAt: '2026-08-17T10:05:00Z' }
     ])
   })
 
@@ -2618,14 +2619,14 @@ describe('readGitObject', () => {
     await runGit(repositoryPath, 'add', name)
     await runGit(
       repositoryPath,
-      '-c', 'user.name=Better Code Diff Test',
+      '-c', 'user.name=Kodi Test',
       '-c', 'user.email=test@example.invalid',
       'commit', '--quiet', '-m', `add ${name}`
     )
   }
 
   it('returns a committed blob in a single git invocation', async () => {
-    const repositoryPath = await mkdtemp(join(tmpdir(), 'better-code-diff-catfile-'))
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'kodi-catfile-'))
     try {
       await runGit(repositoryPath, 'init', '--quiet')
       await commitFile(repositoryPath, 'tracked.txt', 'first line\nsecond line\n')
@@ -2641,7 +2642,7 @@ describe('readGitObject', () => {
   })
 
   it('reports a path that is absent from the commit as missing', async () => {
-    const repositoryPath = await mkdtemp(join(tmpdir(), 'better-code-diff-catfile-'))
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'kodi-catfile-'))
     try {
       await runGit(repositoryPath, 'init', '--quiet')
       await commitFile(repositoryPath, 'tracked.txt', 'value\n')
@@ -2655,7 +2656,7 @@ describe('readGitObject', () => {
   })
 
   it('abandons a blob larger than the diff cap without reading its contents', async () => {
-    const repositoryPath = await mkdtemp(join(tmpdir(), 'better-code-diff-catfile-'))
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'kodi-catfile-'))
     try {
       await runGit(repositoryPath, 'init', '--quiet')
       // Comfortably past the 2 MB cap, and incompressible enough that git stores it as is.
@@ -2672,7 +2673,7 @@ describe('readGitObject', () => {
   })
 
   it('reads an empty blob as empty rather than missing', async () => {
-    const repositoryPath = await mkdtemp(join(tmpdir(), 'better-code-diff-catfile-'))
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'kodi-catfile-'))
     try {
       await runGit(repositoryPath, 'init', '--quiet')
       await commitFile(repositoryPath, 'empty.txt', '')
@@ -2689,12 +2690,12 @@ describe('readGitObject', () => {
 
 describe('parsePorcelainV2Status against real git output', () => {
   it('reads every status kind, the branch, and the untracked set from one call', async () => {
-    const repositoryPath = await mkdtemp(join(tmpdir(), 'better-code-diff-v2-'))
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'kodi-v2-'))
     try {
       await runGit(repositoryPath, 'init', '--quiet')
       const commit = (message: string): Promise<void> => runGit(
         repositoryPath,
-        '-c', 'user.name=Better Code Diff Test',
+        '-c', 'user.name=Kodi Test',
         '-c', 'user.email=test@example.invalid',
         'commit', '--quiet', '-m', message
       )
@@ -2741,11 +2742,11 @@ describe('parsePorcelainV2Status against real git output', () => {
   })
 
   it('reports a conflicted file as conflicted', async () => {
-    const repositoryPath = await mkdtemp(join(tmpdir(), 'better-code-diff-v2-conflict-'))
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'kodi-v2-conflict-'))
     try {
       const git = (...args: string[]): Promise<void> => runGit(
         repositoryPath,
-        '-c', 'user.name=Better Code Diff Test',
+        '-c', 'user.name=Kodi Test',
         '-c', 'user.email=test@example.invalid',
         ...args
       )
@@ -2828,9 +2829,20 @@ describe('parsePullRequestInboxResponse', () => {
   })
 })
 
+describe('pullRequestInboxVariables', () => {
+  it('shares one base across every section query', () => {
+    expect(pullRequestInboxVariables('is:pr is:open repo:acme/core repo:zeta/app', 'octocat')).toEqual({
+      reviewRequested: 'is:pr is:open repo:acme/core repo:zeta/app review-requested:octocat',
+      assigned: 'is:pr is:open repo:acme/core repo:zeta/app assignee:octocat',
+      mentioned: 'is:pr is:open repo:acme/core repo:zeta/app mentions:octocat',
+      authored: 'is:pr is:open repo:acme/core repo:zeta/app author:octocat'
+    })
+  })
+})
+
 describe('RepositoryService.hydrate', () => {
   it('opens a cached file from disk without waiting on git', async () => {
-    const root = await realpath(await mkdtemp(join(tmpdir(), 'horus-hydrate-')))
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'kodi-hydrate-')))
     const repository = new RepositoryService()
     try {
       await writeFile(join(root, 'readme.md'), 'hello from cache\n', 'utf8')
@@ -2855,7 +2867,7 @@ describe('RepositoryService.hydrate', () => {
   })
 
   it('opens a vanished cached path as an empty file and names a path that was never listed', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'horus-hydrate-missing-'))
+    const root = await mkdtemp(join(tmpdir(), 'kodi-hydrate-missing-'))
     const repository = new RepositoryService()
     try {
       repository.hydrate({
@@ -2879,7 +2891,7 @@ describe('RepositoryService.hydrate', () => {
 
 describe('RepositoryService.open', () => {
   it('resolves the path once when the caller has already resolved it', async () => {
-    const folderPath = await mkdtemp(join(tmpdir(), 'better-code-diff-open-resolved-'))
+    const folderPath = await mkdtemp(join(tmpdir(), 'kodi-open-resolved-'))
     const resolvedPath = await realpath(folderPath)
     // macOS hands out symlinked temp roots, so an unresolved path is a different
     // string from its realpath and the two cases are distinguishable.

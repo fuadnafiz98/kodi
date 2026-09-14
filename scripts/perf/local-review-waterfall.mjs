@@ -57,7 +57,7 @@ function filePath(index) {
 }
 
 async function createFixture(fileCount) {
-  const root = await mkdtemp(join(tmpdir(), 'horus-local-review-waterfall-'))
+  const root = await mkdtemp(join(tmpdir(), 'kodi-local-review-waterfall-'))
   await runGit(root, ['-c', 'init.defaultBranch=main', 'init', '--quiet'])
   await mkdir(join(root, 'src'), { recursive: true })
   for (let index = 0; index < fileCount; index += 1) {
@@ -65,7 +65,7 @@ async function createFixture(fileCount) {
   }
   await runGit(root, ['add', '--all'])
   await runGit(root, [
-    '-c', 'user.name=Horus Perf',
+    '-c', 'user.name=Kodi Perf',
     '-c', 'user.email=perf@example.invalid',
     '-c', 'commit.gpgsign=false',
     'commit', '--quiet', '-m', 'Base'
@@ -76,7 +76,7 @@ async function createFixture(fileCount) {
   }
   await runGit(root, ['add', '--all'])
   await runGit(root, [
-    '-c', 'user.name=Horus Perf',
+    '-c', 'user.name=Kodi Perf',
     '-c', 'user.email=perf@example.invalid',
     '-c', 'commit.gpgsign=false',
     'commit', '--quiet', '-m', 'Feature'

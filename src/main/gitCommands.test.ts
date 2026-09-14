@@ -120,6 +120,34 @@ describe('CommandSemaphore', () => {
     interactive()
   })
 
+  it('promotes a queued background waiter whose lane source flips to interactive', async () => {
+    const semaphore = new CommandSemaphore(2, 1)
+    const background = await semaphore.acquire('background')
+    const interactive = await semaphore.acquire('interactive')
+    let promoted = false
+    const queued = settled(semaphore.acquire(() => (promoted ? 'interactive' : 'background')))
+    await delay(0)
+
+    expect(queued.done()).toBe(false)
+    expect(semaphore.waiting).toBe(1)
+
+    // An interactive slot freeing does not admit it while it still reads
+    // background: the background lane is already at its limit.
+    interactive()
+    await delay(0)
+    expect(queued.done()).toBe(false)
+    expect(semaphore.running).toBe(1)
+
+    // Once the source resolves interactive the grant lands on the interactive
+    // pass, so it never occupies the background slot it queued for.
+    promoted = true
+    background()
+    await delay(0)
+    expect(queued.done()).toBe(true)
+    expect(semaphore.backgroundRunning).toBe(0)
+    expect(semaphore.running).toBe(1)
+  })
+
   it('drops a waiting command when its signal aborts', async () => {
     const semaphore = new CommandSemaphore(1, 1)
     const held = await semaphore.acquire('interactive')

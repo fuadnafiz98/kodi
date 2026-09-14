@@ -76,6 +76,15 @@ export class PullRequestReviewFlight {
     return this.#streamed
   }
 
+  /**
+   * Only a foreground reader attaches, so this flips true the moment somebody
+   * is watching a flight that may have started as warmup. The lane source reads
+   * it to promote the fetch's remaining hops out of the background lane.
+   */
+  get foregroundAttached(): boolean {
+    return this.#requests.size > 0
+  }
+
   get promise(): Promise<PullRequestReview> {
     const promise = this.#promise
     if (promise == null) throw new Error('This pull request flight has not started.')

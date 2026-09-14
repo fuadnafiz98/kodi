@@ -76,9 +76,9 @@ describe('normalizeChangedPath', () => {
   it('drops lock files, save temporaries and generated directories', () => {
     expect(normalizeChangedPath('.git/index.lock')).toBeNull()
     expect(normalizeChangedPath('.git/refs/heads/main.lock')).toBeNull()
-    expect(normalizeChangedPath('src/.horus-save-1234')).toBeNull()
+    expect(normalizeChangedPath('src/.kodi-save-1234')).toBeNull()
     expect(normalizeChangedPath('node_modules/pkg/index.js')).toBeNull()
-    expect(normalizeChangedPath('.horus/review/changes.patch')).toBeNull()
+    expect(normalizeChangedPath('.kodi/review/changes.patch')).toBeNull()
     expect(normalizeChangedPath('.git/COMMIT_EDITMSG')).toBeNull()
   })
 })
@@ -103,12 +103,12 @@ describe('dropSelfWrites', () => {
 
 describe('resolveLinkedGitDirectory', () => {
   it('resolves the gitdir pointer of a linked worktree and ignores a normal repository', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'better-code-diff-worktree-'))
+    const root = await mkdtemp(join(tmpdir(), 'kodi-worktree-'))
     try {
       await writeFile(join(root, '.git'), `gitdir: ${join(root, 'real', 'worktrees', 'wt')}\n`, 'utf8')
       expect(resolveLinkedGitDirectory(root)).toBe(join(root, 'real', 'worktrees', 'wt'))
 
-      const plain = await mkdtemp(join(tmpdir(), 'better-code-diff-plain-'))
+      const plain = await mkdtemp(join(tmpdir(), 'kodi-plain-'))
       try {
         await mkdir(join(plain, '.git'))
         expect(resolveLinkedGitDirectory(plain)).toBeNull()
@@ -121,7 +121,7 @@ describe('resolveLinkedGitDirectory', () => {
   })
 
   it('resolves a relative gitdir pointer against the worktree root', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'better-code-diff-worktree-rel-'))
+    const root = await mkdtemp(join(tmpdir(), 'kodi-worktree-rel-'))
     try {
       await writeFile(join(root, '.git'), 'gitdir: ../shared/.git/worktrees/wt\n', 'utf8')
       expect(resolveLinkedGitDirectory(root)).toBe(join(root, '..', 'shared', '.git', 'worktrees', 'wt'))
@@ -192,7 +192,7 @@ async function rewriteMetadataUntil(file: string, satisfied: () => boolean): Pro
 
 describe('RepositoryWatcher', () => {
   it('publishes a targeted event after an existing file changes', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'better-code-diff-watcher-'))
+    const root = await mkdtemp(join(tmpdir(), 'kodi-watcher-'))
     const current = snapshot({ root, kind: 'folder', branch: null, head: null, statuses: [] })
     const events: RepositoryChangeEvent[] = []
     const errors: unknown[] = []
@@ -222,7 +222,7 @@ describe('RepositoryWatcher', () => {
   }, WATCH_TEST_TIMEOUT_MS)
 
   it('coalesces file changes while suspended and publishes after resume', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'better-code-diff-watcher-'))
+    const root = await mkdtemp(join(tmpdir(), 'kodi-watcher-'))
     const current = snapshot({ root, kind: 'folder', branch: null, head: null, statuses: [] })
     const events: RepositoryChangeEvent[] = []
     const errors: unknown[] = []
@@ -265,7 +265,7 @@ describe('RepositoryWatcher', () => {
   }, WATCH_TEST_TIMEOUT_MS)
 
   it('stops watching while paused and catches up once it is re-armed', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'better-code-diff-watcher-pause-'))
+    const root = await mkdtemp(join(tmpdir(), 'kodi-watcher-pause-'))
     const current = snapshot({ root, kind: 'folder', branch: null, head: null, statuses: [] })
     const events: RepositoryChangeEvent[] = []
     const errors: unknown[] = []
@@ -316,7 +316,7 @@ describe('RepositoryWatcher', () => {
   })
 
   it('drops the index write a refresh announced and still reports HEAD moving', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'better-code-diff-watcher-index-'))
+    const root = await mkdtemp(join(tmpdir(), 'kodi-watcher-index-'))
     const errors: unknown[] = []
     let refreshes = 0
     const watcher = new RepositoryWatcher(

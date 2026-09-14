@@ -120,7 +120,7 @@ export function createTerminalEnvironment(
   }
   environment.COLORTERM = 'truecolor'
   environment.TERM = 'xterm-256color'
-  environment.TERM_PROGRAM = 'Horus'
+  environment.TERM_PROGRAM = 'Kodi'
   environment.TERM_PROGRAM_VERSION = version
   if (process.platform !== 'win32') environment.PWD = cwd
   return environment

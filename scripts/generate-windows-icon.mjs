@@ -8,7 +8,7 @@ const sourceIcon = join(projectDirectory, 'build', 'icon-source.png')
 const windowsIcon = join(projectDirectory, 'build', 'icon.ico')
 const linuxIconDirectory = join(projectDirectory, 'build', 'icons')
 const sizes = [16, 24, 32, 48, 64, 128, 256, 512]
-const temporaryDirectory = mkdtempSync(join(tmpdir(), 'horus-icon-'))
+const temporaryDirectory = mkdtempSync(join(tmpdir(), 'kodi-icon-'))
 
 try {
   const images = sizes.map((size) => {

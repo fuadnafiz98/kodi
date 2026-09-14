@@ -18,9 +18,10 @@ import {
 } from './sessionRestore.js'
 
 const restoring = {
-  lastRoot: '/work/horus',
+  lastRoot: '/work/kodi',
   restoreLastFolder: true,
   themeType: 'light' as const,
+  canvasColor: null,
   folderPresent: true,
   restoring: true,
   pendingPullRequestUrl: null
@@ -52,6 +53,7 @@ describe('parseRestoreHint', () => {
       lastRoot: '/missing',
       restoreLastFolder: true,
       themeType: 'dark',
+      canvasColor: null,
       folderPresent: false,
       restoring: false,
       pendingPullRequestUrl: null
@@ -75,7 +77,7 @@ describe('shouldRestoreLastFolder', () => {
     expect(shouldRestoreLastFolder({
       startHidden: false,
       restoreLastFolder: true,
-      lastRoot: '/work/horus',
+      lastRoot: '/work/kodi',
       folderPresent: true
     })).toBe(true)
   })
@@ -93,7 +95,7 @@ describe('shouldRestoreLastFolder', () => {
     const ready = {
       startHidden: false,
       restoreLastFolder: true,
-      lastRoot: '/work/horus',
+      lastRoot: '/work/kodi',
       folderPresent: true
     }
     expect(shouldRestoreLastFolder({ ...ready, startHidden: true })).toBe(false)
@@ -153,7 +155,7 @@ describe('sessionWorkspaceStage', () => {
   it('does not flash Welcome when a snapshot is already in hand', () => {
     expect(sessionWorkspaceStage({
       hasNewWorld: false,
-      snapshot: { root: '/work/horus' },
+      snapshot: { root: '/work/kodi' },
       restorePending: true,
       pullRequestPending: false
     })).toBe('workspace')
@@ -162,7 +164,7 @@ describe('sessionWorkspaceStage', () => {
   it('paints the cached workspace even if a synthetic new tab still exists', () => {
     expect(sessionWorkspaceStage({
       hasNewWorld: true,
-      snapshot: { root: '/work/horus' },
+      snapshot: { root: '/work/kodi' },
       restorePending: true,
       pullRequestPending: false
     })).toBe('workspace')
@@ -189,7 +191,7 @@ describe('sessionWorkspaceStage', () => {
   it('keeps a deep-linked pull request on Welcome even when a cached folder exists', () => {
     expect(sessionWorkspaceStage({
       hasNewWorld: true,
-      snapshot: { root: '/work/horus' },
+      snapshot: { root: '/work/kodi' },
       restorePending: true,
       pullRequestPending: true
     })).toBe('welcome')
@@ -216,14 +218,14 @@ describe('startupSnapshotAction', () => {
   it('ignores a snapshot that arrives after the first effect was cancelled', () => {
     expect(startupSnapshotAction({
       cancelled: true,
-      snapshot: { root: '/work/horus' }
+      snapshot: { root: '/work/kodi' }
     })).toBe('ignore')
   })
 
   it('applies a late snapshot on the live effect', () => {
     expect(startupSnapshotAction({
       cancelled: false,
-      snapshot: { root: '/work/horus' }
+      snapshot: { root: '/work/kodi' }
     })).toBe('apply')
   })
 
@@ -284,13 +286,13 @@ describe('applyRestoreHintToDocument', () => {
   it('marks the boot document for a restored folder', () => {
     const dataset: Record<string, string | undefined> = {}
     applyRestoreHintToDocument({ dataset }, restoring)
-    expect(dataset.horusTheme).toBe('light')
-    expect(dataset.horusRestore).toBe('folder')
+    expect(dataset.kodiTheme).toBe('light')
+    expect(dataset.kodiRestore).toBe('folder')
   })
 
   it('marks Welcome when there is nothing to restore', () => {
     const dataset: Record<string, string | undefined> = {}
     applyRestoreHintToDocument({ dataset }, EMPTY_RESTORE_HINT)
-    expect(dataset.horusRestore).toBe('welcome')
+    expect(dataset.kodiRestore).toBe('welcome')
   })
 })

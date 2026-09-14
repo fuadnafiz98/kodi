@@ -9,10 +9,10 @@ import { flushWorkspaceCache, loadWorkspaceCache, saveWorkspaceCache } from './w
 
 const cache = {
   version: 1 as const,
-  lastRoot: '/work/horus',
+  lastRoot: '/work/kodi',
   snapshot: {
-    root: '/work/horus',
-    name: 'horus',
+    root: '/work/kodi',
+    name: 'kodi',
     kind: 'git' as const,
     branch: 'main',
     head: 'abc',
@@ -33,7 +33,7 @@ const store = {
 
 describe('workspaceCacheStore', () => {
   it('round-trips a multi-slot store through disk', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'horus-workspace-cache-'))
+    const directory = await mkdtemp(join(tmpdir(), 'kodi-workspace-cache-'))
     try {
       expect(loadWorkspaceCache(directory)).toEqual(EMPTY_WORKSPACE_CACHE_STORE)
       await saveWorkspaceCache(directory, store)
@@ -45,7 +45,7 @@ describe('workspaceCacheStore', () => {
   })
 
   it('leaves no temp file behind and reads a version 1 file as one slot', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'horus-workspace-migrate-'))
+    const directory = await mkdtemp(join(tmpdir(), 'kodi-workspace-migrate-'))
     try {
       await writeFile(join(directory, 'last-workspace.json'), JSON.stringify(cache), 'utf8')
       expect(loadWorkspaceCache(directory)).toEqual(store)
@@ -59,7 +59,7 @@ describe('workspaceCacheStore', () => {
   })
 
   it('returns the empty store for corrupt JSON', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'horus-workspace-corrupt-'))
+    const directory = await mkdtemp(join(tmpdir(), 'kodi-workspace-corrupt-'))
     try {
       await mkdir(directory, { recursive: true })
       await writeFile(join(directory, 'last-workspace.json'), '{not-json', 'utf8')

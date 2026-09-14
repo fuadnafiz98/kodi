@@ -2,7 +2,7 @@ import {
   forgetStorageKey,
   persistManagedValue,
   type BudgetStorage
-} from '../storageBudget'
+} from '../review/storageBudget'
 
 export interface DraftRecord {
   path: string
@@ -25,7 +25,7 @@ const MAX_PERSISTED_DRAFTS_TOTAL_BYTES = 2 * 1024 * 1024
 export type DraftStorage = BudgetStorage
 
 export function draftStorageKey(root: string): string {
-  return `horus:drafts:v1:${root}`
+  return `kodi:drafts:v1:${root}`
 }
 
 function isDraftRecord(value: unknown): value is DraftRecord {

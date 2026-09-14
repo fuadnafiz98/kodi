@@ -1,0 +1,39 @@
+#!/bin/zsh
+# kodi — open a folder in Kodi. `kodi .` opens the current directory.
+#
+# Ships inside the app bundle at Contents/Resources/kodi; the installer links
+# it onto your PATH. It talks to the app through LaunchServices (`open`), so a
+# running Kodi receives the folder through the normal single-instance flow.
+set -euo pipefail
+
+# ${0:A} resolves the PATH symlink back to the bundled script, so this always
+# lands on Kodi.app no matter where the link lives.
+app="$(cd "$(dirname "${0:A}")/../.." >/dev/null && pwd)"
+target="${1:-.}"
+
+case "$target" in
+  -h|--help)
+    echo "usage: kodi [folder]"
+    exit 0
+    ;;
+  -*)
+    echo "kodi: unknown option: $target" >&2
+    exit 2
+    ;;
+esac
+
+if [[ "$target" = /* ]]; then
+  resolved="$target"
+else
+  resolved="$(cd "$target" 2>/dev/null && pwd)" || {
+    echo "kodi: no such folder: $target" >&2
+    exit 1
+  }
+fi
+[[ -d "$resolved" ]] || { echo "kodi: not a folder: $target" >&2; exit 1; }
+
+# Dev shells often export ELECTRON_RUN_AS_NODE; it leaks through `open` and
+# boots the app as plain Node.
+# `--kodi-folder=$resolved` stays one token: a second-instance argv reaches the
+# running app switch-first, which would detach a space-separated value.
+exec env -u ELECTRON_RUN_AS_NODE open -na "$app" --args "--kodi-folder=$resolved"

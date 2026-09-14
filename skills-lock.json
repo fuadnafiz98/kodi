@@ -188,6 +188,12 @@
       "skillPath": "skills/review-comments/SKILL.md",
       "computedHash": "9d1a85731cfd62fe307ddb56a5046c559a52e8b6aae0fd29c6f534dc5fc8f32f"
     },
+    "thermo-nuclear-code-quality-review": {
+      "source": "cursor/plugins",
+      "sourceType": "github",
+      "skillPath": "cursor-team-kit/skills/thermo-nuclear-code-quality-review/SKILL.md",
+      "computedHash": "9052b01b46b1d8dbf94c45f9313ec1983443f9a460e83d49cdc7fe0f640ca476"
+    },
     "vercel-react-best-practices": {
       "source": "vercel-labs/agent-skills",
       "sourceType": "github",

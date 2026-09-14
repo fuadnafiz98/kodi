@@ -8,7 +8,7 @@
 # EPOCHREALTIME is read in-process: a `date`/`python3` subprocess per spawn
 # would cost more than most of the commands being measured.
 #
-# Set HORUS_GIT_SHIM_LOG to the file to append to; without it the shim is a
+# Set KODI_GIT_SHIM_LOG to the file to append to; without it the shim is a
 # transparent pass-through.
 emulate -L zsh
 zmodload zsh/datetime
@@ -34,7 +34,7 @@ if [[ -z $real_binary || ${real_binary:A} == ${0:A} ]]; then
   exit 127
 fi
 
-if [[ -z ${HORUS_GIT_SHIM_LOG:-} ]]; then
+if [[ -z ${KODI_GIT_SHIM_LOG:-} ]]; then
   exec $real_binary "$@"
 fi
 
@@ -44,6 +44,6 @@ typeset status_code=$?
 typeset -F elapsed_ms=$(( ($EPOCHREALTIME - started) * 1000 ))
 
 printf '%s\t%.1f\t%d\t%s\t%s\n' \
-  $started $elapsed_ms $status_code $tool "$*" >> $HORUS_GIT_SHIM_LOG
+  $started $elapsed_ms $status_code $tool "$*" >> $KODI_GIT_SHIM_LOG
 
 exit $status_code

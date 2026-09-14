@@ -31,7 +31,7 @@ const OBSERVATION = `({
   timeOrigin: performance.timeOrigin,
   paints: ${PAINTS},
   marks: Object.fromEntries(performance.getEntriesByType('mark')
-    .filter((e) => e.name.startsWith('horus:'))
+    .filter((e) => e.name.startsWith('kodi:'))
     .map((e) => [e.name, e.startTime])),
   explorer: document.querySelector('#repository-explorer') != null,
   diff: document.querySelector('#repository-diff > *') != null,
@@ -73,14 +73,14 @@ const PALETTE_RESULTS = `(() => {
 
 // P15 exposes the review metrics on the window for exactly this assertion; until
 // it lands the probe reports null rather than a wrong zero.
-const WORKSPACE_RENDERS = `window.__horusMetrics?.workspaceRenders ?? null`
+const WORKSPACE_RENDERS = `window.__kodiMetrics?.workspaceRenders ?? null`
 
 const PALETTE_ROW_COUNT = `document.querySelectorAll('.command-palette-results button').length`
 
 // The app's own share of Cmd+P. `openMs` below carries four CDP input round
 // trips and a poll on top of it, so a regression is read from this one.
 const PALETTE_OPEN_APP_MS = `(() => {
-  const entry = performance.getEntriesByName('horus:palette-open-to-focus').at(-1)
+  const entry = performance.getEntriesByName('kodi:palette-open-to-focus').at(-1)
   return entry == null ? null : entry.duration
 })()`
 

@@ -12,6 +12,8 @@ export interface SessionState {
   approvedRoots: string[]
   restoreLastFolder: boolean
   themeType: WindowThemeType
+  /** Exact canvas color of the active theme; absent predates themed palettes. */
+  windowBackground?: string | null
   pullRequestFolders: Record<string, string>
 }
 
@@ -20,7 +22,14 @@ export const DEFAULT_SESSION_STATE: SessionState = {
   approvedRoots: [],
   restoreLastFolder: true,
   themeType: 'dark',
+  windowBackground: null,
   pullRequestFolders: {}
+}
+
+const WINDOW_BACKGROUND_HEX = /^#[0-9a-f]{6}$/i
+
+export function isWindowBackgroundHex(value: unknown): value is string {
+  return typeof value === 'string' && WINDOW_BACKGROUND_HEX.test(value)
 }
 
 const FILE_NAME = 'last-session.json'
@@ -28,7 +37,7 @@ let pendingSave: Promise<void> = Promise.resolve()
 
 export function parseSessionState(raw: unknown): SessionState {
   if (typeof raw !== 'object' || raw == null) return DEFAULT_SESSION_STATE
-  const { lastRoot, approvedRoots, restoreLastFolder, themeType, pullRequestFolders } = raw as Record<string, unknown>
+  const { lastRoot, approvedRoots, restoreLastFolder, themeType, windowBackground, pullRequestFolders } = raw as Record<string, unknown>
   const parsedLastRoot = typeof lastRoot === 'string' && lastRoot !== '' ? lastRoot : null
   return {
     lastRoot: parsedLastRoot,
@@ -39,6 +48,7 @@ export function parseSessionState(raw: unknown): SessionState {
       ? restoreLastFolder
       : DEFAULT_SESSION_STATE.restoreLastFolder,
     themeType: themeType === 'light' ? 'light' : 'dark',
+    windowBackground: isWindowBackgroundHex(windowBackground) ? windowBackground : null,
     pullRequestFolders: parsePullRequestFolders(pullRequestFolders)
   }
 }

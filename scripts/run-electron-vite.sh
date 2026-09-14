@@ -9,9 +9,9 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
 fi
 
 electron_version="$(bun -e 'console.log(require("./node_modules/electron/package.json").version)')"
-cache_base="$HOME/Library/Caches/Horus"
+cache_base="$HOME/Library/Caches/Kodi"
 branded_dist="$cache_base/electron-$electron_version-v1"
-brand_marker="$branded_dist/.horus-brand"
+brand_marker="$branded_dist/.kodi-brand"
 
 if [[ ! -f "$brand_marker" ]]; then
   mkdir -p "$cache_base"
@@ -23,14 +23,14 @@ if [[ ! -f "$brand_marker" ]]; then
   info_plist="$app_bundle/Contents/Info.plist"
   plist_buddy=/usr/libexec/PlistBuddy
 
-  "$plist_buddy" -c 'Set :CFBundleName Horus' "$info_plist"
-  if ! "$plist_buddy" -c 'Set :CFBundleDisplayName Horus' "$info_plist" 2>/dev/null; then
-    "$plist_buddy" -c 'Add :CFBundleDisplayName string Horus' "$info_plist"
+  "$plist_buddy" -c 'Set :CFBundleName Kodi' "$info_plist"
+  if ! "$plist_buddy" -c 'Set :CFBundleDisplayName Kodi' "$info_plist" 2>/dev/null; then
+    "$plist_buddy" -c 'Add :CFBundleDisplayName string Kodi' "$info_plist"
   fi
-  "$plist_buddy" -c 'Set :CFBundleIdentifier com.fuadnafiz.horus.development' "$info_plist"
+  "$plist_buddy" -c 'Set :CFBundleIdentifier com.fuadnafiz.kodi.development' "$info_plist"
 
   codesign --force --deep --sign - "$app_bundle" >/dev/null
-  touch "$staging_dir/dist/.horus-brand"
+  touch "$staging_dir/dist/.kodi-brand"
   mv "$staging_dir/dist" "$branded_dist"
   trap - EXIT
   rmdir "$staging_dir"

@@ -85,6 +85,8 @@ export interface PerformanceMetrics {
 export interface StartupPreferences {
   themeType: 'dark' | 'light'
   restoreLastFolder: boolean
+  /** The theme's canvas color — the window is painted with it before first paint. */
+  windowBackground?: string
 }
 
 export interface RendererTermination {
@@ -129,6 +131,8 @@ export interface GitCommit {
 
 export interface PullRequestAuthor {
   login: string
+  /** Present on inbox rows fetched over GraphQL; `gh pr list` authors omit it. */
+  avatarUrl?: string
 }
 
 export interface PullRequestChecks {
@@ -190,6 +194,7 @@ export interface RemoteReviewComment {
   id: string
   body: string
   authorLogin: string
+  authorAvatarUrl: string
   createdAt: string
 }
 
@@ -209,6 +214,7 @@ export interface RemoteReviewSummary {
   state: string
   body: string
   authorLogin: string
+  authorAvatarUrl: string
   submittedAt: string | null
 }
 
@@ -629,8 +635,16 @@ export interface RepositoryApi {
   searchContent(query: string, forOpenPath?: string | null): Promise<ContentSearchResult[]>
   cancelContentSearch(): void
   getMarkdownMedia(url: string): Promise<MarkdownMediaPayload>
+  /** Resolves to a `data:` URL, or null when the avatar is unavailable. */
+  getAvatar(url: string): Promise<string | null>
   getGitIntegration(): Promise<GitIntegrationSnapshot>
   getPullRequestInbox(): Promise<PullRequestInboxSnapshot>
+  /**
+   * Sessionless inbox for the welcome screen. `repos` is an `owner/name`
+   * allow-list from preferences; empty asks GitHub for every repository the
+   * viewer can see.
+   */
+  getGlobalPullRequestInbox(repos?: readonly string[]): Promise<PullRequestInboxSnapshot>
   getClosedPullRequests(): Promise<PullRequestSummary[]>
   switchBranch(name: string): Promise<RepositorySnapshot>
   getLocalBranchReview(baseRef: string, headRef: string, requestId?: string): Promise<LocalBranchReview>
@@ -709,8 +723,10 @@ export const IPC_CHANNELS = {
   searchContent: 'repository:search-content',
   cancelContentSearch: 'repository:cancel-content-search',
   getMarkdownMedia: 'repository:get-markdown-media',
+  getAvatar: 'repository:get-avatar',
   getGitIntegration: 'repository:get-git-integration',
   getPullRequestInbox: 'repository:get-pull-request-inbox',
+  getGlobalPullRequestInbox: 'repository:get-global-pull-request-inbox',
   getClosedPullRequests: 'repository:get-closed-pull-requests',
   switchBranch: 'repository:switch-branch',
   getLocalBranchReview: 'repository:get-local-branch-review',

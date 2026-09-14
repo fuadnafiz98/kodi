@@ -1,0 +1,76 @@
+{
+  "$schema": "https://www.raycast.com/schemas/extension.json",
+  "name": "kodi",
+  "title": "Kodi",
+  "description": "Paste a GitHub pull request URL to open it in Kodi. Typing the URL starts the review in the background so Enter is ready.",
+  "icon": "icon.png",
+  "author": "fuadnafiz98",
+  "categories": [
+    "Developer Tools"
+  ],
+  "platforms": [
+    "macOS"
+  ],
+  "commands": [
+    {
+      "name": "open-in-kodi",
+      "title": "Open in Kodi",
+      "subtitle": "Kodi",
+      "description": "Open a pasted or copied GitHub pull request URL in Kodi",
+      "mode": "no-view",
+      "keywords": [
+        "kodi",
+        "pr",
+        "github",
+        "pull request",
+        "review"
+      ]
+    },
+    {
+      "name": "open-pull-request",
+      "title": "Open Pull Request",
+      "subtitle": "Kodi",
+      "description": "Open a GitHub pull request URL in Kodi",
+      "mode": "view",
+      "keywords": [
+        "pr",
+        "github",
+        "review",
+        "diff"
+      ],
+      "arguments": [
+        {
+          "name": "url",
+          "placeholder": "GitHub pull request URL",
+          "type": "text",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "open-clipboard-pull-request",
+      "title": "Open Clipboard Pull Request",
+      "subtitle": "Kodi",
+      "description": "Open the GitHub pull request URL on the clipboard in Kodi",
+      "mode": "no-view",
+      "keywords": [
+        "clipboard",
+        "pr",
+        "github"
+      ]
+    }
+  ],
+  "dependencies": {
+    "@raycast/api": "^1.104.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "@types/react": "^19.0.10",
+    "typescript": "^5.9.3"
+  },
+  "scripts": {
+    "dev": "npx ray develop",
+    "build": "npx ray build",
+    "lint": "npx ray lint"
+  }
+}

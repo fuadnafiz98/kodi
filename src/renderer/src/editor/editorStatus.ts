@@ -1,4 +1,4 @@
-import type { DocumentView } from '../documentView'
+import type { DocumentView } from '../review/documentView'
 import type { CaretReadout } from './caret'
 
 export type EditorStatusMode = 'read' | 'edit' | 'preview'

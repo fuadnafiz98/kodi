@@ -1,8 +1,8 @@
-// Shared plumbing for the Horus performance probes: launching the installed
+// Shared plumbing for the Kodi performance probes: launching the installed
 // app with a remote-debugging port, a small Chrome DevTools Protocol client,
 // and the result file the probes append to.
 //
-// Every probe is responsible for leaving no Horus process behind. `guardExit()`
+// Every probe is responsible for leaving no Kodi process behind. `guardExit()`
 // covers the signal paths; the probes themselves quit in a `finally`.
 import { appendFile, mkdir } from 'node:fs/promises'
 import { homedir } from 'node:os'
@@ -11,8 +11,23 @@ import { fileURLToPath } from 'node:url'
 
 const PERF_DIRECTORY = dirname(fileURLToPath(import.meta.url))
 
-export const APP_PATH = process.env.HORUS_APP ?? join(homedir(), 'Applications/Horus.app')
-export const RESULTS_DIRECTORY = process.env.HORUS_PERF_RESULTS_DIR ?? join(PERF_DIRECTORY, 'results')
+export const APP_PATH = process.env.KODI_APP ?? join(homedir(), 'Applications/Kodi.app')
+export const APP_BINARY = join(APP_PATH, 'Contents/MacOS/Kodi')
+export const RESULTS_DIRECTORY = process.env.KODI_PERF_RESULTS_DIR ?? join(PERF_DIRECTORY, 'results')
+
+// KODI_PROBE_HIDDEN=1 runs the app with its window never shown: nothing
+// flashes on screen, nothing steals focus, no dock bounce. The app binary is
+// exec'd directly so LaunchServices never activates it, KODI_PROBE keeps the
+// window hidden (while still restoring the session, unlike KODI_BACKGROUND),
+// and the Chromium switches keep an occluded window from throttling rAF and
+// timers — the palette's rAF handoff would stall otherwise. `windowShown`
+// reports null in this mode; that is the honest answer.
+const HIDDEN = process.env.KODI_PROBE_HIDDEN === '1'
+const UNTHROTTLE_ARGS = [
+  '--disable-backgrounding-occluded-windows',
+  '--disable-renderer-backgrounding',
+  '--disable-background-timer-throttling'
+]
 
 // A renderer that is busy parsing a chunk answers late; 15 s is long enough that
 // only a genuinely wedged page trips it, short enough that a probe still ends.
@@ -27,16 +42,16 @@ export async function run(command) {
 export async function waitForExit(timeoutMs = QUIT_TIMEOUT_MS) {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
-    if (await run(['pgrep', '-x', 'Horus']) !== 0) return true
+    if (await run(['pgrep', '-x', 'Kodi']) !== 0) return true
     await Bun.sleep(30)
   }
   return false
 }
 
 export async function quit() {
-  await run(['osascript', '-e', 'tell application "Horus" to quit'])
+  await run(['osascript', '-e', 'tell application "Kodi" to quit'])
   if (await waitForExit()) return
-  await run(['pkill', '-x', 'Horus'])
+  await run(['pkill', '-x', 'Kodi'])
   await Bun.sleep(600)
 }
 
@@ -66,14 +81,14 @@ export async function waitForPage(port, timeoutMs = 20_000) {
     }
     await Bun.sleep(5)
   }
-  throw new Error(`No Horus page target appeared on port ${port}.`)
+  throw new Error(`No Kodi page target appeared on port ${port}.`)
 }
 
 export function connect(webSocketDebuggerUrl) {
   return new Promise((resolveSocket, reject) => {
     const socket = new WebSocket(webSocketDebuggerUrl)
     socket.onopen = () => resolveSocket(socket)
-    socket.onerror = () => reject(new Error('Could not connect to the Horus renderer.'))
+    socket.onerror = () => reject(new Error('Could not connect to the Kodi renderer.'))
   })
 }
 
@@ -193,7 +208,21 @@ export class CDP {
 export async function launch(port, extraArgs = []) {
   await quit()
   const startedAt = Date.now()
-  await run(['open', '-na', APP_PATH, '--args', `--remote-debugging-port=${port}`, ...extraArgs])
+  if (HIDDEN) {
+    const env = { ...process.env, KODI_PROBE: '1' }
+    delete env.ELECTRON_RUN_AS_NODE
+    delete env.ELECTRON_NO_ASAR
+    Bun.spawn([APP_BINARY, `--remote-debugging-port=${port}`, ...UNTHROTTLE_ARGS, ...extraArgs], {
+      env,
+      stdout: 'ignore',
+      stderr: 'ignore'
+    })
+  } else {
+    // Same guard as `bun run open:mac`: a leaked ELECTRON_RUN_AS_NODE makes the
+    // packaged binary run as bare Node and exit before the debug port exists.
+    await run(['env', '-u', 'ELECTRON_RUN_AS_NODE', '-u', 'ELECTRON_NO_ASAR',
+      'open', '-na', APP_PATH, '--args', `--remote-debugging-port=${port}`, ...extraArgs])
+  }
   const page = await waitForPage(port)
   return { cdp: new CDP(await connect(page.webSocketDebuggerUrl)), startedAt }
 }
@@ -277,15 +306,15 @@ export const LONG_TASKS = `(() => {
 })()`
 
 /**
- * `markRendererStartup` writes `horus:explorer-committed`; every consumer here
+ * `markRendererStartup` writes `kodi:explorer-committed`; every consumer here
  * reads `explorerCommitted`. Getting this wrong is silent — the medians simply
  * report null — so the conversion lives in one tested place.
  */
 export function markKey(markName) {
-  return markName.replace(/^horus:/, '').replace(/-([a-z])/g, (_all, letter) => letter.toUpperCase())
+  return markName.replace(/^kodi:/, '').replace(/-([a-z])/g, (_all, letter) => letter.toUpperCase())
 }
 
-/** `{ 'horus:react-committed': 12 }` -> `{ reactCommitted: 12 }`, offset applied. */
+/** `{ 'kodi:react-committed': 12 }` -> `{ reactCommitted: 12 }`, offset applied. */
 export function startupMarks(rawMarks, originOffsetMs = 0) {
   const marks = {}
   for (const [name, value] of Object.entries(rawMarks ?? {})) {

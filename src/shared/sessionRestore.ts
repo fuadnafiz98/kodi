@@ -4,6 +4,8 @@ export interface SessionRestoreHint {
   lastRoot: string | null
   restoreLastFolder: boolean
   themeType: 'dark' | 'light'
+  /** The theme's exact canvas color — index.html paints it before the bundle loads. */
+  canvasColor?: string | null
   folderPresent: boolean
   restoring: boolean
   /**
@@ -14,12 +16,13 @@ export interface SessionRestoreHint {
   pendingPullRequestUrl: string | null
 }
 
-export const RESTORE_HINT_ARG_PREFIX = '--horus-restore='
+export const RESTORE_HINT_ARG_PREFIX = '--kodi-restore='
 
 export const EMPTY_RESTORE_HINT: SessionRestoreHint = {
   lastRoot: null,
   restoreLastFolder: true,
   themeType: 'dark',
+  canvasColor: null,
   folderPresent: false,
   restoring: false,
   pendingPullRequestUrl: null
@@ -40,6 +43,7 @@ export function parseRestoreHint(raw: unknown): SessionRestoreHint {
     lastRoot,
     restoreLastFolder,
     themeType,
+    canvasColor,
     folderPresent,
     restoring,
     pendingPullRequestUrl
@@ -51,6 +55,7 @@ export function parseRestoreHint(raw: unknown): SessionRestoreHint {
     lastRoot: parsedLastRoot,
     restoreLastFolder: parsedRestore,
     themeType: themeType === 'light' ? 'light' : 'dark',
+    canvasColor: typeof canvasColor === 'string' && /^#[0-9a-f]{6}$/i.test(canvasColor) ? canvasColor : null,
     folderPresent: parsedPresent,
     restoring: restoring === true && parsedPresent && parsedRestore,
     pendingPullRequestUrl: normalizeGitHubPullRequestUrl(
@@ -94,7 +99,7 @@ export function sessionWorkspaceStage(input: {
   restorePending: boolean
   pullRequestPending: boolean
 }): SessionWorkspaceStage {
-  // Cmd+H / horus:// opens a New tab. Restore must not cover that with the
+  // Cmd+H / kodi:// opens a New tab. Restore must not cover that with the
   // opening canvas or the last-folder workspace.
   if (input.hasNewWorld && input.pullRequestPending) return 'welcome'
   // A cached snapshot is the real workspace. Paint it even if worlds still
@@ -144,11 +149,19 @@ export function isPrematureSessionError(error: unknown): boolean {
 }
 
 export function applyRestoreHintToDocument(
-  documentElement: { dataset: Record<string, string | undefined> } | null | undefined,
+  documentElement: {
+    dataset: Record<string, string | undefined>
+    style?: { setProperty(name: string, value: string): void }
+  } | null | undefined,
   hint: SessionRestoreHint | null | undefined
 ): void {
   if (documentElement == null) return
   const resolved = hint ?? EMPTY_RESTORE_HINT
-  documentElement.dataset.horusTheme = resolved.themeType
-  documentElement.dataset.horusRestore = sessionRestoreExpected(resolved) ? 'folder' : 'welcome'
+  documentElement.dataset.kodiTheme = resolved.themeType
+  documentElement.dataset.kodiRestore = sessionRestoreExpected(resolved) ? 'folder' : 'welcome'
+  // A themed canvas overrides the light/dark boot defaults index.html ships;
+  // useAppPersistence later sets the same variable, so the handoff is seamless.
+  if (resolved.canvasColor != null) {
+    documentElement.style?.setProperty('--canvas', resolved.canvasColor)
+  }
 }

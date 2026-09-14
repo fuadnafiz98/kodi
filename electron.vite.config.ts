@@ -16,7 +16,7 @@ import type { Plugin } from 'vite'
 // all keep working under it.
 function contentSecurityPolicyPlugin(): Plugin {
   return {
-    name: 'horus:csp',
+    name: 'kodi:csp',
     transformIndexHtml: {
       order: 'pre',
       handler(_html, context) {
@@ -50,22 +50,20 @@ function contentSecurityPolicyPlugin(): Plugin {
 // it, so the base64-inlined wasm chunk — 622,336 bytes in the last build — is
 // shipped and never fetched. The stub throws instead of resolving empty so a
 // future engine switch fails loudly at the import rather than deep inside shiki.
-// Keep in lockstep with EDITOR_THEMES in src/renderer/src/preferences.ts.
-// The preferences test fails CI if a selectable theme is missing here.
-const SHIKI_THEME_ALLOWLIST = new Set([
-  'pierre-dark',
-  'pierre-dark-soft',
-  'github-dark',
-  'vitesse-dark',
-  'pierre-light',
-  'github-light',
-  'vitesse-light',
-  'light-plus'
-])
+// The allowlist IS the preference table: every selectable theme ships, nothing
+// else does, and the light/dark split comes from EDITOR_THEMES rather than
+// name-sniffing (catppuccin-latte carries no 'light' in its name).
+import { EDITOR_THEMES, getEditorThemeType } from './src/shared/editorThemes.js'
+
+const SHIKI_THEME_ALLOWLIST = new Set(Object.keys(EDITOR_THEMES))
+const THEME_TYPE: Record<string, 'dark' | 'light'> = Object.fromEntries(
+  Object.keys(EDITOR_THEMES).map((name) => [name, getEditorThemeType(name as keyof typeof EDITOR_THEMES)])
+)
+const lightTheme = (name: string): boolean => THEME_TYPE[name] === 'light'
 
 function trimShikiThemesPlugin(): Plugin {
   return {
-    name: 'horus:trim-shiki-themes',
+    name: 'kodi:trim-shiki-themes',
     enforce: 'pre',
     transform(_code, id) {
       const normalized = id.split('?')[0]?.replaceAll('\\', '/') ?? id
@@ -74,7 +72,7 @@ function trimShikiThemesPlugin(): Plugin {
       if (normalized.endsWith('/shiki/dist/themes.mjs') || normalized.endsWith('/shiki/dist/themes.js')) {
         const names = [...SHIKI_THEME_ALLOWLIST].filter((name) => !name.startsWith('pierre-'))
         const info = names.map((name) => {
-          const type = name.includes('light') || name === 'light-plus' ? 'light' : 'dark'
+          const type = lightTheme(name) ? 'light' : 'dark'
           return `{id:${JSON.stringify(name)},displayName:${JSON.stringify(name)},type:${JSON.stringify(type)},import:()=>import(${JSON.stringify(`@shikijs/themes/${name}`)})}`
         })
         return [
@@ -85,7 +83,7 @@ function trimShikiThemesPlugin(): Plugin {
       }
       if (normalized.endsWith('/collections/shiki.js')) {
         const names = [...SHIKI_THEME_ALLOWLIST].filter((name) => !name.startsWith('pierre-'))
-        const light = names.filter((name) => name.includes('light') || name === 'light-plus')
+        const light = names.filter(lightTheme)
         const lightNames = new Set(light)
         const dark = names.filter((name) => !lightNames.has(name))
         const imports = names.map((name) =>
@@ -106,7 +104,7 @@ function trimShikiThemesPlugin(): Plugin {
       }
       if (normalized.endsWith('/collections/pierre.js')) {
         const names = [...SHIKI_THEME_ALLOWLIST].filter((name) => name.startsWith('pierre-'))
-        const light = names.filter((name) => name.includes('light'))
+        const light = names.filter(lightTheme)
         const lightNames = new Set(light)
         const dark = names.filter((name) => !lightNames.has(name))
         const imports = names.map((name) =>
@@ -149,14 +147,14 @@ const SHARED_HIGHLIGHTER_SIGNATURE =
 
 function lazyHighlighterEnginePlugin(): Plugin {
   return {
-    name: 'horus:lazy-highlighter-engine',
+    name: 'kodi:lazy-highlighter-engine',
     enforce: 'pre',
     transform(code, id) {
       const normalized = id.split('?')[0]?.replaceAll('\\', '/') ?? id
       if (!normalized.endsWith(SHARED_HIGHLIGHTER_MODULE)) return null
       if (!code.includes(HIGHLIGHTER_ENGINE_IMPORT) || !code.includes(SHARED_HIGHLIGHTER_SIGNATURE)) {
         throw new Error(
-          "@pierre/diffs shared_highlighter.js no longer matches horus:lazy-highlighter-engine. Update the anchors after checking that getSharedHighlighter is still async, or remove the plugin and accept the engine on the boot path."
+          "@pierre/diffs shared_highlighter.js no longer matches kodi:lazy-highlighter-engine. Update the anchors after checking that getSharedHighlighter is still async, or remove the plugin and accept the engine on the boot path."
         )
       }
       return code
@@ -179,14 +177,14 @@ const THEME_NORMALIZER_CALL = 'return normalizeTheme(unwrapDefault(await loader(
 
 function lazyThemeNormalizerPlugin(): Plugin {
   return {
-    name: 'horus:lazy-theme-normalizer',
+    name: 'kodi:lazy-theme-normalizer',
     enforce: 'pre',
     transform(code, id) {
       const normalized = id.split('?')[0]?.replaceAll('\\', '/') ?? id
       if (!normalized.endsWith(THEME_NORMALIZER_MODULE)) return null
       if (!code.includes(THEME_NORMALIZER_IMPORT) || !code.includes(THEME_NORMALIZER_CALL)) {
         throw new Error(
-          '@pierre/theming createTheme.js no longer matches horus:lazy-theme-normalizer. Update the anchors after checking that the loader is still async, or remove the plugin and accept the tokenizer on the boot path.'
+          '@pierre/theming createTheme.js no longer matches kodi:lazy-theme-normalizer. Update the anchors after checking that the loader is still async, or remove the plugin and accept the tokenizer on the boot path.'
         )
       }
       return code
@@ -201,7 +199,7 @@ function lazyThemeNormalizerPlugin(): Plugin {
 
 function preloadBootChunkPlugin(): Plugin {
   return {
-    name: 'horus:preload-boot',
+    name: 'kodi:preload-boot',
     transformIndexHtml: {
       order: 'post',
       handler(_html, context) {
@@ -293,9 +291,9 @@ function vendorChunk(id: string): string | undefined {
 }
 
 function dropShikiWasmPlugin(): Plugin {
-  const stubId = '\0horus:shiki-wasm-stub'
+  const stubId = '\0kodi:shiki-wasm-stub'
   return {
-    name: 'horus:drop-shiki-wasm',
+    name: 'kodi:drop-shiki-wasm',
     // Vite's own resolver is a core plugin and wins over unenforced user
     // plugins, so without 'pre' the specifier is already resolved by the time
     // this runs and the chunk ships anyway.
@@ -305,7 +303,7 @@ function dropShikiWasmPlugin(): Plugin {
     },
     load(id) {
       if (id !== stubId) return null
-      return "throw new Error('shiki/wasm is stubbed out of this build; the highlighter uses the JS regex engine. Remove the horus:drop-shiki-wasm plugin to ship the oniguruma engine.')\n"
+      return "throw new Error('shiki/wasm is stubbed out of this build; the highlighter uses the JS regex engine. Remove the kodi:drop-shiki-wasm plugin to ship the oniguruma engine.')\n"
     }
   }
 }
@@ -318,12 +316,12 @@ interface CompilerLogEvent {
 }
 
 // A component the compiler skips is a component nothing in it is memoised in, and
-// the build says nothing about it. HORUS_COMPILER_LOG=1 prints one line per skip
+// the build says nothing about it. KODI_COMPILER_LOG=1 prints one line per skip
 // with the reason; src/renderer/src/reactCompiler.test.ts keeps the hot components
 // honest without the build.
 function reactCompilerOptions(): Record<string, unknown> {
   const options: Record<string, unknown> = { target: '19' }
-  if (process.env.HORUS_COMPILER_LOG !== '1') return options
+  if (process.env.KODI_COMPILER_LOG !== '1') return options
   options.logger = {
     logEvent(filename: string | null, event: CompilerLogEvent) {
       if (event.kind === 'CompileSuccess') return

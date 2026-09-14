@@ -1,0 +1,49 @@
+/* The review bar renders inside the workspace chunk, after the boot stylesheet has
+   already decided how long the first paint takes. */
+/* The session bar merges checkpoint status and the way into the composer into
+   one strip — status on the left, actions on the right. */
+.review-session-status { min-width: 0; flex: 1; display: flex; align-items: center; gap: 10px; }
+.review-session-checkpoint { min-width: 0; display: flex; align-items: center; gap: 6px; overflow: hidden; color: var(--text-secondary); white-space: nowrap; }
+.review-session-checkpoint svg { width: var(--icon-sm); height: var(--icon-sm); flex: none; color: var(--faint); }
+.review-session-checkpoint code { font-family: var(--font-mono); font-size: 0.95em; }
+.review-session-since { border: 0; padding: 0; background: transparent; color: var(--muted); font: inherit; white-space: nowrap; }
+.review-session-since.muted { color: var(--faint); }
+button.review-session-since { cursor: pointer; }
+button.review-session-since:hover { color: var(--text); text-decoration: underline; text-underline-offset: 2px; }
+.review-session-summary { min-width: 0; overflow: hidden; color: var(--faint); text-overflow: ellipsis; white-space: nowrap; }
+.review-session-summary.success { color: var(--status-success-text); }
+.review-session-actions { flex: none; display: flex; gap: 6px; }
+.pr-review-bar.expanded { display: block; padding: 10px var(--gutter); }
+.pr-review-bar textarea { width: 100%; min-height: 68px; display: block; resize: vertical; border: 1px solid var(--border-strong); border-radius: var(--corner-control); padding: 8px 9px; background: var(--surface-input); color: var(--text); font-size: var(--text-sm); line-height: 1.5; }
+.pr-review-bar.expanded > p { margin: 7px 0 0; color: var(--muted); font-size: var(--text-2xs); }
+.pr-review-bar.expanded > div { display: flex; justify-content: flex-end; gap: 6px; margin-top: 8px; }
+.pr-review-finish {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px var(--gutter) 14px;
+  border-top: 1px solid var(--border);
+  background: var(--panel-subtle);
+}
+.pr-review-finish > strong { color: var(--text); font-size: var(--text-sm); font-weight: var(--weight-strong); }
+.pr-review-finish textarea {
+  width: 100%;
+  min-height: 68px;
+  display: block;
+  resize: vertical;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--corner-control);
+  padding: 8px 9px;
+  background: var(--surface-input);
+  color: var(--text);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+.pr-review-finish > p { margin: 0; color: var(--muted); font-size: var(--text-2xs); }
+.pr-review-finish > div { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 6px; }
+.pr-review-readonly { gap: 8px; font-size: var(--text-xs); }
+/* The disk-conflict banner shares this bar; its two choices are non-blocking, so
+   they read as inline links rather than a dialog's buttons. */
+.pr-review-readonly[role="alert"] { border-bottom-color: var(--danger-border); background: var(--danger-bg); color: var(--danger-message); }
+.pr-review-readonly .bar-button:first-of-type { margin-left: auto; }

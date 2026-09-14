@@ -1,5 +1,5 @@
 ---
-description: After finishing app work, package and replace the installed Horus.app
+description: After finishing app work, package and replace the installed Kodi.app
 alwaysApply: true
 ---
 
@@ -7,8 +7,8 @@ alwaysApply: true
 
 When you finish a change that belongs in the desktop app (UI, renderer, main, preload, packaging), do not stop at tests or a running `bun run dev` session.
 
-1. Run `bun run update:mac`. That packages an arm64 build and overwrites `~/Applications/Horus.app`.
-2. The install script quits any running Horus process. That is expected.
+1. Run `bun run update:mac`. That packages an arm64 build and overwrites `~/Applications/Kodi.app`.
+2. The install script quits any running Kodi process. That is expected.
 3. Do not open the installed app afterward unless the user asked.
 
 Skip this only when the change cannot affect the packaged app (docs-only, rules-only, or the user said not to install).

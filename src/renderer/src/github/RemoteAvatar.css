@@ -1,0 +1,2 @@
+.remote-avatar { width: 20px; height: 20px; flex: none; display: grid; place-items: center; border-radius: 50%; background: var(--avatar-fill); color: var(--avatar-text); font-size: var(--text-2xs); font-weight: 680; }
+img.remote-avatar { display: block; object-fit: cover; background: var(--control-fill); outline: 1px solid color-mix(in srgb, var(--text) 10%, transparent); outline-offset: -1px; }

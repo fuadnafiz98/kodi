@@ -2,9 +2,9 @@
 set -euo pipefail
 
 sample_label="${1:-manual}"
-sample_count="${HORUS_PERF_SAMPLES:-5}"
-sample_interval="${HORUS_PERF_INTERVAL:-2}"
-process_name_pattern="${HORUS_PROCESS_NAME:-^(Horus|Electron)$}"
+sample_count="${KODI_PERF_SAMPLES:-5}"
+sample_interval="${KODI_PERF_INTERVAL:-2}"
+process_name_pattern="${KODI_PROCESS_NAME:-^(Kodi|Electron)$}"
 
 root_pid="$({
   ps -axo pid=,ppid=,comm= | awk -v pattern="$process_name_pattern" '
@@ -18,7 +18,7 @@ root_pid="$({
 } || true)"
 
 if [[ -z "$root_pid" ]]; then
-  echo "Horus is not running." >&2
+  echo "Kodi is not running." >&2
   exit 1
 fi
 

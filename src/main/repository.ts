@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { constants as fileConstants } from 'node:fs'
 import { access, lstat, mkdir, readdir, readFile, readlink, realpath, rename, stat, unlink, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
-import { cpus } from 'node:os'
+import { cpus, homedir } from 'node:os'
 import { basename, dirname, isAbsolute, resolve, sep } from 'node:path'
 
 import type {
@@ -41,6 +41,7 @@ import type {
   WorkingTreePatch
 } from '../shared/contracts.js'
 import { createImagePreviewSide } from '../shared/imagePreview.js'
+import { inboxRepoScope } from '../shared/inboxRepos.js'
 import { normalizeGitHubPullRequestUrl } from '../shared/pullRequestUrl.js'
 import { MAX_CACHED_PATHS } from '../shared/workspaceCache.js'
 import {
@@ -53,6 +54,7 @@ import {
   runCommand,
   splitNullDelimited,
   type CommandLane,
+  type CommandLaneSource,
   type CommandResult,
   type GitObjectRead
 } from './gitCommands.js'
@@ -251,7 +253,7 @@ const PULL_REQUEST_INBOX_QUERY = `
     state
     isDraft
     updatedAt
-    author { login }
+    author { login avatarUrl }
   }
 `
 
@@ -301,12 +303,12 @@ const PULL_REQUEST_THREADS_QUERY = `
             startLine
             diffSide
             comments(first: 50) {
-              nodes { id body author { login } createdAt }
+              nodes { id body author { login avatarUrl } createdAt }
             }
           }
         }
         reviews(first: 50) {
-          nodes { id state body submittedAt author { login } }
+          nodes { id state body submittedAt author { login avatarUrl } }
         }
       }
     }
@@ -431,7 +433,7 @@ export async function runGitHubReadCommand(
   args: readonly string[],
   cwd: string,
   signal?: AbortSignal,
-  lane: CommandLane = 'interactive'
+  lane: CommandLaneSource = 'interactive'
 ): Promise<CommandResult> {
   const retryDelays = [0, 250, 750] as const
   let lastError: unknown
@@ -911,7 +913,68 @@ function toInboxPullRequest(value: unknown): InboxPullRequest | null {
   if (typeof url !== 'string' || !/^https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/\d+$/i.test(url)) return null
   const login = typeof author === 'object' && author != null ? (author as Record<string, unknown>).login : null
   if (typeof login !== 'string' || login === '') return null
-  return { number, title, url, state, isDraft: isDraft === true, author: { login }, updatedAt }
+  const avatarUrl = typeof author === 'object' && author != null ? (author as Record<string, unknown>).avatarUrl : null
+  return {
+    number,
+    title,
+    url,
+    state,
+    isDraft: isDraft === true,
+    author: { login, avatarUrl: typeof avatarUrl === 'string' ? avatarUrl : '' },
+    updatedAt
+  }
+}
+
+// The welcome inbox is not tied to a checkout: one viewer login answers for the
+// whole app run, and the search runs against every repository the viewer can see.
+let globalViewerLogin: Promise<string> | null = null
+
+async function getGlobalViewerLogin(ghExecutable: string): Promise<string> {
+  globalViewerLogin ??= runGitHubReadCommand(
+    ghExecutable,
+    ['api', 'user', '--jq', '.login'],
+    homedir()
+  ).then((result) => {
+    const login = result.stdout.toString('utf8').trim()
+    if (!/^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,38})$/.test(login)) {
+      throw new Error('GitHub returned an invalid viewer login.')
+    }
+    return login
+  }, (error: unknown) => {
+    globalViewerLogin = null
+    throw error
+  })
+  return globalViewerLogin
+}
+
+/** One search string per section — every section shares the same repo scope. */
+export function pullRequestInboxVariables(base: string, login: string): Record<string, string> {
+  const variables: Record<string, string> = {}
+  for (const { alias, qualifier } of PULL_REQUEST_INBOX_SECTIONS) {
+    variables[alias] = `${base} ${qualifier}:${login}`
+  }
+  return variables
+}
+
+/** The sessionless welcome-screen inbox: what needs the viewer across all repositories. */
+export async function loadGlobalPullRequestInbox(repos: readonly string[] = []): Promise<PullRequestInboxSnapshot> {
+  try {
+    const ghExecutable = await getGhExecutable()
+    const login = await getGlobalViewerLogin(ghExecutable)
+    const scope = inboxRepoScope(repos)
+    const variables = pullRequestInboxVariables(`is:pr is:open${scope === '' ? '' : ` ${scope}`}`, login)
+    const result = await runCommand(
+      ghExecutable,
+      ['api', 'graphql', '--input', '-'],
+      homedir(),
+      [],
+      JSON.stringify({ query: PULL_REQUEST_INBOX_QUERY, variables })
+    )
+    const entries = parsePullRequestInboxResponse(parseJson<unknown>(result, 'GitHub CLI'))
+    return { available: true, message: null, sections: sectionPullRequestInbox(entries) }
+  } catch (error) {
+    return { available: false, message: gitHubIntegrationErrorMessage(error), sections: [] }
+  }
 }
 
 export function sectionPullRequestInbox(entries: readonly PullRequestInboxEntry[]): PullRequestInboxSection[] {
@@ -947,6 +1010,7 @@ function parseRemoteReviewComments(value: unknown): RemoteReviewComment[] {
       id,
       body: readString(body),
       authorLogin: readString((author as { login?: unknown } | null)?.login, 256),
+      authorAvatarUrl: readString((author as { avatarUrl?: unknown } | null)?.avatarUrl, 2048),
       createdAt: readString(createdAt, 64)
     })
   }
@@ -993,6 +1057,7 @@ export function parsePullRequestConversation(value: unknown): Omit<PullRequestCo
         state: readString(review.state, 64),
         body: readString(review.body),
         authorLogin: readString((review.author as { login?: unknown } | null)?.login, 256),
+        authorAvatarUrl: readString((review.author as { avatarUrl?: unknown } | null)?.avatarUrl, 2048),
         submittedAt: typeof review.submittedAt === 'string' ? review.submittedAt.slice(0, 64) : null
       })
     }
@@ -1829,9 +1894,9 @@ export class RepositoryService {
     const root = this.#requireRoot()
     if (!this.#pathSet.has(path)) throw new Error('The selected path is not in the repository.')
     if (Buffer.byteLength(contents, 'utf8') > MAX_DIFF_FILE_BYTES) {
-      throw new Error('Files larger than 2 MB cannot be edited in Horus.')
+      throw new Error('Files larger than 2 MB cannot be edited in Kodi.')
     }
-    if (contents.includes('\0')) throw new Error('Binary files cannot be edited in Horus.')
+    if (contents.includes('\0')) throw new Error('Binary files cannot be edited in Kodi.')
 
     // The conflict check is the one place that must see the disk, not the cache.
     const currentVersion = await this.#readWorkingFile(path, root, true)
@@ -1859,7 +1924,7 @@ export class RepositoryService {
       throw new Error('The selected file resolves outside the repository.')
     }
 
-    const temporaryPath = resolve(dirname(resolvedPath), `.horus-save-${randomUUID()}`)
+    const temporaryPath = resolve(dirname(resolvedPath), `.kodi-save-${randomUUID()}`)
     try {
       await writeFile(temporaryPath, contents, { encoding: 'utf8', flag: 'wx', mode: metadata.mode })
       this.#selfWriteObserver?.(path)
@@ -2246,7 +2311,7 @@ export class RepositoryService {
   async #resolvePullRequestIdentity(
     ghExecutable: string,
     selector: string,
-    lane: CommandLane = 'interactive'
+    lane: CommandLaneSource = 'interactive'
   ): Promise<{ owner: string; name: string; number: number }> {
     const cached = this.#pullRequestIdentities.get(selector)
     if (cached != null) return cached
@@ -2380,11 +2445,7 @@ export class RepositoryService {
       // GraphQL search does not understand `@me`, so the viewer login is
       // substituted in; it is cached for the life of the repository.
       const login = await this.#getGitHubViewerLogin(ghExecutable)
-      const base = `repo:${slug} is:pr is:open`
-      const variables: Record<string, string> = {}
-      for (const { alias, qualifier } of PULL_REQUEST_INBOX_SECTIONS) {
-        variables[alias] = `${base} ${qualifier}:${login}`
-      }
+      const variables = pullRequestInboxVariables(`repo:${slug} is:pr is:open`, login)
       const result = await runCommand(
         ghExecutable,
         ['api', 'graphql', '--input', '-'],
@@ -2820,13 +2881,16 @@ export class RepositoryService {
     }
     flight.join(onProgress)
     this.#reviewFlights.set(normalized, flight)
+    const flightLane = pullRequestReviewLane(intent)
     try {
       const review = await flight
         .start((emit) => this.#loadPullRequestReview(
           normalized,
           flight.abort.signal,
           emit,
-          pullRequestReviewLane(intent)
+          // A warmup that gains a foreground reader mid-flight stops queueing
+          // behind speculative work — the semaphore re-reads this at every hop.
+          () => (flight.foregroundAttached ? 'interactive' : flightLane)
         ))
       return pullRequestReviewReply(review, onProgress != null && flight.streamed)
     } finally {
@@ -2841,7 +2905,7 @@ export class RepositoryService {
     normalizedSelector: string,
     signal: AbortSignal,
     emit: PullRequestProgressListener,
-    lane: CommandLane
+    lane: CommandLaneSource
   ): Promise<PullRequestReview> {
     const cached = await this.#openCachedPullRequestReview(normalizedSelector, emit)
     if (cached == null) {
@@ -2923,7 +2987,7 @@ export class RepositoryService {
     cached: PullRequestReview,
     signal: AbortSignal,
     emit: PullRequestProgressListener,
-    lane: CommandLane
+    lane: CommandLaneSource
   ): Promise<PullRequestReview> {
     this.#emitPullRequestChecks(ghExecutable, normalizedSelector, signal, emit, lane)
     let headRefOid = ''
@@ -2960,7 +3024,7 @@ export class RepositoryService {
     normalizedSelector: string,
     signal: AbortSignal,
     emit: PullRequestProgressListener,
-    lane: CommandLane
+    lane: CommandLaneSource
   ): Promise<PullRequestReview> {
     const collectedFiles: PullRequestFile[] = []
     const collectedOmitted: OmittedDiffFile[] = []
@@ -3134,7 +3198,7 @@ export class RepositoryService {
     ghExecutable: string,
     selector: string,
     signal: AbortSignal,
-    lane: CommandLane
+    lane: CommandLaneSource
   ): Promise<{ checks: PullRequestChecks | null; mergeable: string | null } | null> {
     if (!this.#checkFieldsSupported) return null
     try {
@@ -3162,7 +3226,7 @@ export class RepositoryService {
     selector: string,
     signal: AbortSignal,
     emit: PullRequestProgressListener,
-    lane: CommandLane
+    lane: CommandLaneSource
   ): void {
     void this.#loadPullRequestChecks(ghExecutable, selector, signal, lane).then((result) => {
       if (result == null || signal.aborted) return
@@ -3179,7 +3243,7 @@ export class RepositoryService {
     selector: string,
     signal: AbortSignal,
     emit: (page: PullRequestPatchPage) => void,
-    lane: CommandLane
+    lane: CommandLaneSource
   ): Promise<'complete' | 'aborted' | 'too-large'> {
     try {
       const diffResult = await runGitHubReadCommand(
@@ -3211,7 +3275,7 @@ export class RepositoryService {
     selector: string,
     signal: AbortSignal,
     emit: (page: PullRequestPatchPage) => void,
-    lane: CommandLane
+    lane: CommandLaneSource
   ): Promise<void> {
     const { owner, name, number } = await this.#resolvePullRequestIdentity(ghExecutable, selector, lane)
     const readPage = async (page: number): Promise<RawPullRequestFile[]> => {
@@ -3317,7 +3381,7 @@ export class RepositoryService {
     }
   }
 
-  async #getGitHubViewerLogin(ghExecutable: string, lane: CommandLane = 'interactive'): Promise<string> {
+  async #getGitHubViewerLogin(ghExecutable: string, lane: CommandLaneSource = 'interactive'): Promise<string> {
     if (this.#githubViewerLogin != null) return this.#githubViewerLogin
     const result = await runGitHubReadCommand(
       ghExecutable,
@@ -3511,7 +3575,7 @@ export class RepositoryService {
     return this.#remotes
   }
 
-  async #git(args: readonly string[], signal?: AbortSignal, lane: CommandLane = 'interactive'): Promise<CommandResult> {
+  async #git(args: readonly string[], signal?: AbortSignal, lane: CommandLaneSource = 'interactive'): Promise<CommandResult> {
     if (this.#kind !== 'git') throw new Error('The open folder is not a Git repository.')
     return runCommand('git', ['-C', this.#requireRoot(), ...args], undefined, [], undefined, signal, lane)
   }

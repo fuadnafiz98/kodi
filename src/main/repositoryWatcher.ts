@@ -15,12 +15,12 @@ const MAX_OPERATION_DEFERRAL_MS = 5_000
 // A save writes a sibling temp file and renames it over the target; without this
 // the temp file surfaces as an untracked path in whatever snapshot lands between
 // the write and the rename.
-const SELF_WRITE_PREFIX = '.horus-save-'
+const SELF_WRITE_PREFIX = '.kodi-save-'
 const SELF_WRITE_WINDOW_MS = 1_000
 const OPERATION_MARKERS = ['index.lock', 'rebase-merge', 'rebase-apply', 'MERGE_HEAD', 'CHERRY_PICK_HEAD'] as const
 const EXCLUDED_SEGMENTS = new Set([
   '.cache', '.next', '.nuxt', '.output', '.parcel-cache', '.svelte-kit', '.turbo',
-  '.vercel', '.vite', '.horus', 'DerivedData', 'build', 'coverage', 'dist', 'node_modules',
+  '.vercel', '.vite', '.kodi', '.horus', 'DerivedData', 'build', 'coverage', 'dist', 'node_modules',
   'out', 'target'
 ])
 

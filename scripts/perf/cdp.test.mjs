@@ -13,11 +13,11 @@ afterEach(async () => {
 
 describe('markKey', () => {
   test('turns the emitted mark names into the keys the medians read', () => {
-    expect(markKey('horus:renderer-loaded')).toBe('rendererLoaded')
-    expect(markKey('horus:react-committed')).toBe('reactCommitted')
-    expect(markKey('horus:snapshot-ready')).toBe('snapshotReady')
-    expect(markKey('horus:explorer-committed')).toBe('explorerCommitted')
-    expect(markKey('horus:viewer-committed')).toBe('viewerCommitted')
+    expect(markKey('kodi:renderer-loaded')).toBe('rendererLoaded')
+    expect(markKey('kodi:react-committed')).toBe('reactCommitted')
+    expect(markKey('kodi:snapshot-ready')).toBe('snapshotReady')
+    expect(markKey('kodi:explorer-committed')).toBe('explorerCommitted')
+    expect(markKey('kodi:viewer-committed')).toBe('viewerCommitted')
   })
 
   test('leaves a name that is already a key alone', () => {
@@ -27,7 +27,7 @@ describe('markKey', () => {
 
 describe('startupMarks', () => {
   test('renames and shifts marks onto the process clock', () => {
-    expect(startupMarks({ 'horus:react-committed': 120.4, 'horus:viewer-committed': 163.6 }, 300))
+    expect(startupMarks({ 'kodi:react-committed': 120.4, 'kodi:viewer-committed': 163.6 }, 300))
       .toEqual({ reactCommitted: 420, viewerCommitted: 464 })
   })
 
@@ -84,12 +84,12 @@ describe('summaryLine', () => {
 
 describe('appendResult', () => {
   test('appends one timestamped JSON line per run', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'horus-perf-results-'))
+    const directory = await mkdtemp(join(tmpdir(), 'kodi-perf-results-'))
     directories.push(directory)
-    process.env.HORUS_PERF_RESULTS_DIR = directory
+    process.env.KODI_PERF_RESULTS_DIR = directory
     // The results directory is read at module load, so this needs its own copy.
     const { appendResult } = await import(`./cdp.mjs?results=${encodeURIComponent(directory)}`)
-    delete process.env.HORUS_PERF_RESULTS_DIR
+    delete process.env.KODI_PERF_RESULTS_DIR
 
     const file = await appendResult('after', { probe: 'startup', summary: { medians: { fcpMs: 180 } } })
     await appendResult('after', { probe: 'startup', summary: { medians: { fcpMs: 174 } } })

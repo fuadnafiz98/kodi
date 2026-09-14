@@ -1,8 +1,8 @@
 import { useState } from 'react'
 import type { Editor } from '@pierre/diffs/edit'
 
-import type { ReviewAnnotationMetadata } from '../ReviewComments'
-import type { DocumentView } from '../documentView'
+import type { ReviewAnnotationMetadata } from '../review/ReviewComments'
+import type { DocumentView } from '../review/documentView'
 import { EditorShortcutsSheet } from './EditorShortcutsSheet'
 import { caretSelectionLabel, editorStatusLabel, type EditorStatusMode } from './editorStatus'
 import { formatEditorShortcut } from './editorKeymap'

@@ -11,7 +11,7 @@ export function videoMimeTypeFromHref(href: string): string {
   return 'video/mp4'
 }
 
-export function isAllowedMarkdownMediaUrl(url: string): boolean {
+export function isAllowedGitHubMediaUrl(url: string): boolean {
   let parsed: URL
   try {
     parsed = new URL(url)

@@ -11,6 +11,7 @@ export const SKIPPED_DIRECTORY_NAMES = new Set([
   '.cache',
   '.git',
   '.horus',
+  '.kodi',
   '.next',
   '.turbo',
   '.venv',

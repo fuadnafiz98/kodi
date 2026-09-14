@@ -16,11 +16,12 @@ import {
 
 describe('parseSessionState', () => {
   it('reads a complete record', () => {
-    expect(parseSessionState({ lastRoot: '/work/horus', approvedRoots: ['/work/horus'], restoreLastFolder: false, themeType: 'light' })).toEqual({
-      lastRoot: '/work/horus',
-      approvedRoots: ['/work/horus'],
+    expect(parseSessionState({ lastRoot: '/work/kodi', approvedRoots: ['/work/kodi'], restoreLastFolder: false, themeType: 'light' })).toEqual({
+      lastRoot: '/work/kodi',
+      approvedRoots: ['/work/kodi'],
       restoreLastFolder: false,
       themeType: 'light',
+      windowBackground: null,
       pullRequestFolders: {}
     })
   })
@@ -31,7 +32,7 @@ describe('parseSessionState', () => {
     expect(parseSessionState({ lastRoot: 7 }).lastRoot).toBeNull()
     expect(parseSessionState({ restoreLastFolder: 'yes' }).restoreLastFolder).toBe(true)
     expect(parseSessionState({ themeType: 'sepia' }).themeType).toBe('dark')
-    expect(parseSessionState({ lastRoot: '/work/horus' }).approvedRoots).toEqual(['/work/horus'])
+    expect(parseSessionState({ lastRoot: '/work/kodi' }).approvedRoots).toEqual(['/work/kodi'])
     expect(parseSessionState({
       pullRequestFolders: {
         'Acme/App': '/Users/me/Developer/app',
@@ -51,21 +52,22 @@ describe('parseSessionState', () => {
 
 describe('loadSessionState', () => {
   it('round-trips through disk and defaults when the file is missing', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'horus-session-'))
+    const directory = await mkdtemp(join(tmpdir(), 'kodi-session-'))
     try {
       expect(loadSessionState(directory)).toEqual(DEFAULT_SESSION_STATE)
       await saveSessionState(directory, {
-        lastRoot: '/work/horus',
-        approvedRoots: ['/work/horus'],
+        lastRoot: '/work/kodi',
+        approvedRoots: ['/work/kodi'],
         restoreLastFolder: false,
         themeType: 'light',
         pullRequestFolders: { 'acme/app': '/Users/me/Developer/app' }
       })
       expect(loadSessionState(directory)).toEqual({
-        lastRoot: '/work/horus',
-        approvedRoots: ['/work/horus'],
+        lastRoot: '/work/kodi',
+        approvedRoots: ['/work/kodi'],
         restoreLastFolder: false,
         themeType: 'light',
+        windowBackground: null,
         pullRequestFolders: { 'acme/app': '/Users/me/Developer/app' }
       })
     } finally {
@@ -74,7 +76,7 @@ describe('loadSessionState', () => {
   })
 
   it('serializes rapid saves in call order', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'horus-session-order-'))
+    const directory = await mkdtemp(join(tmpdir(), 'kodi-session-order-'))
     try {
       const first = saveSessionState(directory, {
         lastRoot: '/work/first',
@@ -97,6 +99,7 @@ describe('loadSessionState', () => {
         approvedRoots: ['/work/first', '/work/second'],
         restoreLastFolder: false,
         themeType: 'light',
+        windowBackground: null,
         pullRequestFolders: {}
       })
     } finally {
@@ -105,7 +108,7 @@ describe('loadSessionState', () => {
   })
 
   it('flushes the in-flight write before quit', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'horus-session-flush-'))
+    const directory = await mkdtemp(join(tmpdir(), 'kodi-session-flush-'))
     try {
       void saveSessionState(directory, {
         lastRoot: '/work/quit',

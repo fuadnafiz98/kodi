@@ -758,7 +758,7 @@ function describeClaudeTool(toolName: string, input: Record<string, unknown>): s
 
 export function composeAgentPrompt(question: string, reviewContext = ''): string {
   const instructions = [
-    'Horus already loaded this review into the matching local checkout.',
+    'Kodi already loaded this review into the matching local checkout.',
     'The working directory is that checkout. Stay inside it.',
     'Do not fetch remotes, clone repositories, or call GitHub, gh, or the network.',
     'If a review bundle path is listed, read that patch first, then only the listed files and their direct callers or callees.',

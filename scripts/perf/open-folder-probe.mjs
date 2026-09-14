@@ -7,7 +7,7 @@ import { appendResult, guardExit, HOOKS, launch, LONG_TASKS, quit, round, summar
 import { createTimeline } from './timeline.mjs'
 
 const LABEL = process.argv[2] ?? 'run'
-const FOLDERS = (process.env.FOLDERS ?? 'imux,materialsx-core-3,imux,better-code-diff').split(',')
+const FOLDERS = (process.env.FOLDERS ?? 'imux,materialsx-core-3,imux,kodi').split(',')
 
 // One deadline for the whole open, not one per condition: a condition that never
 // arrives must not push the ones after it out by its own timeout.

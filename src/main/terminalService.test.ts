@@ -88,7 +88,7 @@ describe('terminal configuration', () => {
     expect(environment.ELECTRON_RUN_AS_NODE).toBeUndefined()
     expect(environment.GOOGLE_API_KEY).toBeUndefined()
     expect(environment.TERM).toBe('xterm-256color')
-    expect(environment.TERM_PROGRAM).toBe('Horus')
+    expect(environment.TERM_PROGRAM).toBe('Kodi')
   })
 
   test('rejects malformed or excessive dimensions', () => {

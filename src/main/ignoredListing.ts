@@ -10,6 +10,7 @@ export const EXCLUDED_DIRECTORIES = [
   '.cache',
   '.eggs',
   '.horus',
+  '.kodi',
   '.mypy_cache',
   '.next',
   '.nox',

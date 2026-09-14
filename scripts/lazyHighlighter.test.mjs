@@ -4,14 +4,14 @@ import { resolve } from 'node:path'
 
 // The renderer keeps shiki's tokenizer engine — 143 KB of textmate and oniguruma
 // that only the worker and an attached editor ever run — off the boot path by
-// rewriting two vendored modules at build time (`horus:lazy-highlighter-engine`
-// and `horus:lazy-theme-normalizer` in electron.vite.config.ts). Both rewrites
+// rewriting two vendored modules at build time (`kodi:lazy-highlighter-engine`
+// and `kodi:lazy-theme-normalizer` in electron.vite.config.ts). Both rewrites
 // are anchored on exact source text, so a dependency bump that moves the text
 // fails the build with no hint about which upgrade caused it. Asserting the same
 // anchors here names the cause at `bun test` time instead.
 const REWRITES = [
   {
-    plugin: 'horus:lazy-highlighter-engine',
+    plugin: 'kodi:lazy-highlighter-engine',
     module: 'node_modules/@pierre/diffs/dist/highlighter/shared_highlighter.js',
     // The rewrite moves this import inside the function below it, which is only
     // legal while that function is async.
@@ -20,7 +20,7 @@ const REWRITES = [
     engineCall: 'createHighlighter({'
   },
   {
-    plugin: 'horus:lazy-theme-normalizer',
+    plugin: 'kodi:lazy-theme-normalizer',
     module: 'node_modules/@pierre/theming/dist/modules/createTheme.js',
     staticImport: 'import { normalizeTheme } from "shiki/core";',
     asyncSite: 'return async () => {',

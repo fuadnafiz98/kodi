@@ -201,6 +201,20 @@ describe('PullRequestReviewFlight', () => {
     flight.detach('warmup')
     expect(flight.abort.signal.aborted).toBe(false)
   })
+
+  test('reports a foreground reader once one attaches', () => {
+    const flight = new PullRequestReviewFlight()
+    expect(flight.foregroundAttached).toBe(false)
+
+    flight.attach('tab-a')
+    expect(flight.foregroundAttached).toBe(true)
+
+    flight.attach('tab-b')
+    flight.detach('tab-a')
+    expect(flight.foregroundAttached).toBe(true)
+    flight.detach('tab-b')
+    expect(flight.foregroundAttached).toBe(false)
+  })
 })
 
 describe('ReviewFlight', () => {
