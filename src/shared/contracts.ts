@@ -197,7 +197,7 @@ export interface PullRequestFile {
   previousPath?: string
   additions: number
   deletions: number
-  /** Full blob IDs are preferred for checkpoint and viewed-state identity. */
+  /** Full blob IDs are preferred for viewed-state identity. */
   baseBlobOid?: string
   headBlobOid?: string
   /** Hash of the complete patch section when a full blob ID is unavailable. */
@@ -215,8 +215,14 @@ export interface RemoteReviewComment {
 export interface RemoteReviewThread {
   id: string
   path: string
+  /** Null once the thread is outdated: it has no position on the current diff. */
   line: number | null
   startLine: number | null
+  /** Where the thread sat on the commit it was written against. */
+  originalLine: number | null
+  originalStartLine: number | null
+  /** The hunk GitHub quotes under an outdated thread, as a unified-diff fragment. */
+  diffHunk: string
   side: 'LEFT' | 'RIGHT'
   resolved: boolean
   outdated: boolean
@@ -236,6 +242,12 @@ export interface PullRequestConversation {
   available: boolean
   message: string | null
   body: string
+  /**
+   * The pull request's head commit at the moment this was read. The conversation
+   * poll is the only continuous read of an open pull request, so it is also how
+   * the app notices that someone pushed.
+   */
+  headOid: string
   threads: RemoteReviewThread[]
   reviews: RemoteReviewSummary[]
   complete?: boolean
@@ -667,6 +679,9 @@ export interface RepositoryApi {
   revealPath(path: string): Promise<void>
   refresh(): Promise<RepositorySnapshot>
   getComparison(path: string): Promise<FileComparison>
+  /** A text file at a commit, or null when the object is missing, binary or oversized. */
+  getRevisionFile(revision: string, path: string): Promise<DiffFileContents | null>
+  hasRevision(revision: string): Promise<boolean>
   saveWorkingFile(request: WorkingFileSaveRequest): Promise<FileComparison>
   getWorkingTreePatch(paths: string[], requestId?: string): Promise<WorkingTreePatch>
   /**
@@ -694,9 +709,19 @@ export interface RepositoryApi {
   fetchRemote(): Promise<GitIntegrationSnapshot>
   pullCurrentBranch(): Promise<RepositorySnapshot>
   pushCurrentBranch(): Promise<GitIntegrationSnapshot>
-  getPullRequestReview(root: string, selector: number | string, requestId: string): Promise<PullRequestReview>
+  /**
+   * `refresh` skips the cached copy on disk. A reader adopting a head that was
+   * pushed under them knows the cache is stale first hand; without this the
+   * reload repaints the same old head and only revalidation notices.
+   */
+  getPullRequestReview(
+    root: string,
+    selector: number | string,
+    requestId: string,
+    refresh?: boolean
+  ): Promise<PullRequestReview>
   cancelPullRequestReview(root: string, requestId: string): void
-  getPullRequestConversation(root: string, selector: number | string): Promise<PullRequestConversation>
+  getPullRequestConversation(root: string, selector: number | string, force?: boolean): Promise<PullRequestConversation>
   replyToPullRequestThread(root: string, threadId: string, body: string): Promise<void>
   setPullRequestThreadResolved(root: string, threadId: string, resolved: boolean): Promise<void>
   mergePullRequest(root: string, selector: number | string, strategy: PullRequestMergeStrategy): Promise<void>
@@ -762,6 +787,8 @@ export const IPC_CHANNELS = {
   revealPath: 'app:reveal-path',
   refresh: 'repository:refresh',
   getComparison: 'repository:get-comparison',
+  getRevisionFile: 'repository:get-revision-file',
+  hasRevision: 'repository:has-revision',
   saveWorkingFile: 'repository:save-working-file',
   getWorkingTreePatch: 'repository:get-working-tree-patch',
   searchContent: 'repository:search-content',

@@ -1,15 +1,10 @@
 import { lazy, memo, Suspense } from 'react'
-import {
-  IconBranch,
-  IconGear,
-  IconSearch,
-  IconSparkles,
-  IconTerminalFill
-} from '@pierre/icons'
+import { IconGear, IconSearch, IconTerminal } from '@pierre/icons'
 
 import type { RepositorySnapshot } from '../../../shared/contracts'
 import type { RecentFolder } from '../explorer/recentFolders'
 import { ReviewLocator } from '../review/ReviewLocator'
+import { IconSparklesOutline } from './IconSparklesOutline'
 import { formatKeybinding, formatTerminalToggleShortcut, type KeybindingMap } from '../settings/keybindings'
 
 // The HUD samples the main process and draws a chart; nothing about it is worth
@@ -38,7 +33,6 @@ interface TitlebarProps {
   onLocatorSubmit(): void
   onSearchOpen(): void
   onSettingsOpen(): void
-  onGitOpen(): void
   agentOpen: boolean
   onAgentToggle(): void
   terminalOpen: boolean
@@ -60,7 +54,6 @@ export const Titlebar = memo(function Titlebar({
   onLocatorSubmit,
   onSearchOpen,
   onSettingsOpen,
-  onGitOpen,
   agentOpen,
   onAgentToggle,
   terminalOpen,
@@ -105,11 +98,6 @@ export const Titlebar = memo(function Titlebar({
                 <IconSearch />
               </button>
             )}
-            {snapshot?.kind === 'git' ? (
-              <button className="icon-button" type="button" onClick={onGitOpen} aria-label="Open branches and pull requests" title="Branches and pull requests">
-                <IconBranch />
-              </button>
-            ) : null}
             <button className="icon-button" type="button" onClick={onSettingsOpen} aria-label="Open settings" title="Settings">
               <IconGear />
             </button>
@@ -123,7 +111,7 @@ export const Titlebar = memo(function Titlebar({
                   title={`Toggle Terminal (${formatTerminalToggleShortcut()})`}
                   onClick={onTerminalToggle}
                 >
-                  <IconTerminalFill />
+                  <IconTerminal />
                 </button>
                 <button
                   className={`icon-button agent-titlebar-button ${agentOpen ? 'active' : ''}`}
@@ -133,7 +121,7 @@ export const Titlebar = memo(function Titlebar({
                   title={agentOpen ? 'Close Agent' : 'Ask Agent'}
                   onClick={onAgentToggle}
                 >
-                  <IconSparkles />
+                  <IconSparklesOutline />
                 </button>
               </>
             ) : null}

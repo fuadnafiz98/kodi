@@ -1,4 +1,6 @@
-import { IconShieldKeyhole, IconSparkles } from '@pierre/icons'
+import { IconShieldKeyhole } from '@pierre/icons'
+
+import { IconSparklesOutline } from '../app/IconSparklesOutline'
 
 import { QUICK_PROMPTS } from './agentPanelOptions'
 
@@ -20,7 +22,7 @@ export function AgentEmptyState({
 }: AgentEmptyStateProps): React.JSX.Element {
   return (
     <div className="agent-dock-empty">
-      <IconSparkles className="agent-empty-mark" aria-hidden="true" />
+      <IconSparklesOutline className="agent-empty-mark" aria-hidden="true" />
       <div>
         <h3>Review with an agent</h3>
         <p>Ask about {contextLabel}, or select diff lines and press <kbd>⌘I</kbd>.</p>

@@ -7,20 +7,25 @@ export interface DiffLayoutToggleProps {
   onDiffStyleChange(style: DiffStyle): void
 }
 
+/**
+ * Offers the other layout rather than presenting both. Which one is on is
+ * already unmistakable from the diff itself — two columns or one — so a
+ * two-button segmented control spent twice the width saying what the content
+ * says for free. No `aria-pressed`: split and unified are two values of one
+ * mode, not an on/off, so the label names the destination instead.
+ *
+ * The glyph changes with the state, unlike the sidebar toggle, which keeps one
+ * glyph so it can be found by muscle memory. This is reached a handful of times
+ * a session, from a toolbar the reader is already looking at, and the glyph is
+ * the only thing naming the layout it would switch to.
+ */
 export function DiffLayoutToggle({ diffStyle, onDiffStyleChange }: DiffLayoutToggleProps): React.JSX.Element {
+  const next: DiffStyle = diffStyle === 'split' ? 'unified' : 'split'
   return (
-    <>
-      <span className="diff-control-divider" aria-hidden="true" />
-      <div className="segmented-control diff-layout-control" role="group" aria-label="Diff layout">
-        <button type="button" aria-label="Split diff" aria-pressed={diffStyle === 'split'}
-          data-tooltip="Split view" className={diffStyle === 'split' ? 'active' : undefined} onClick={() => onDiffStyleChange('split')}>
-          <IconDiffSplit />
-        </button>
-        <button type="button" aria-label="Unified diff" aria-pressed={diffStyle === 'unified'}
-          data-tooltip="Unified view" className={diffStyle === 'unified' ? 'active' : undefined} onClick={() => onDiffStyleChange('unified')}>
-          <IconDiffUnified />
-        </button>
-      </div>
-    </>
+    <button type="button" aria-label={`Switch to ${next} diff`}
+      data-tooltip={next === 'split' ? 'Split view' : 'Unified view'}
+      onClick={() => onDiffStyleChange(next)}>
+      {next === 'split' ? <IconDiffSplit aria-hidden="true" /> : <IconDiffUnified aria-hidden="true" />}
+    </button>
   )
 }

@@ -1,4 +1,4 @@
-import { CENTERED_COLLAPSED_SEPARATOR_CSS } from './collapsedSeparator'
+import { COLLAPSED_SEPARATOR_CSS } from './collapsedSeparator'
 import { COPY_FILE_PATH_CSS } from './copyFilePath'
 import { DRAG_SELECTION_CSS } from './dragSelection'
 import { SPLIT_DIFF_RESIZE_CSS } from './splitDiffResize'
@@ -183,12 +183,12 @@ export const REDUCED_MOTION_CSS = `
  * Pierre injects annotations as a row after the line. A pointer on that row is
  * mapped to the previous line, then data-selected-line is copied onto this row
  * and the paired split column — the “section” on the left and right.
- * The slotted card is also left-flush against the number gutter / split
- * divider, so a white card edge disappears into the white rule.
+ * The row itself carries no padding: a floating child (the selection action
+ * bar) must collapse it to zero height, or selecting a line pushes the diff
+ * down. Cards that do earn a row inset themselves with `.review-annotation`.
  */
 export const ANNOTATION_LAYOUT_CSS = `
   [data-annotation-content] {
-    padding: 8px 12px 10px;
     box-sizing: border-box;
   }
 
@@ -227,7 +227,13 @@ export const VIEWER_BASE_CSS = `
   [data-separator-content],
   [data-selection-action],
   [data-diff-span],
-  [data-code]::-webkit-scrollbar-thumb {
+  [data-code]::-webkit-scrollbar-thumb,
+  /* The editor appends its own stylesheet into this same shadow root, so its
+     find panel, its inputs and the corners of a selection box are ours to shape
+     too — they round 9, 6 and 3px otherwise. */
+  [data-editor-widget],
+  [data-input-box] input,
+  [data-rtl], [data-rtr], [data-rbl], [data-rbr] {
     corner-shape: squircle;
   }
 
@@ -251,6 +257,28 @@ export const VIEWER_BASE_CSS = `
     background: var(--control-fill);
   }
 
+  /* The gutter utility lives inside the number cell. Pierre's default slot is
+     a zero-width box on the cell's right edge whose 1lh button hangs left into
+     the 2ch padding lane via negative margin — and covers the digits on wide
+     numbers. The lane is instead widened into a real utility lane and the slot
+     becomes the lane itself: pinned to the cell's left edge, button parked at
+     its right end so it sits beside the digits the way Pierre's button does,
+     at any digit width. The lane keeps clear of the number text, so digits
+     stay uncovered and selectable. */
+  [data-column-number] {
+    padding-left: 26px;
+  }
+
+  [data-gutter-utility-slot] {
+    left: 0;
+    right: auto;
+    width: 26px;
+    box-sizing: border-box;
+    padding-right: 4px;
+    justify-content: flex-end;
+    align-items: center;
+  }
+
   /* A percentage radius resolves horizontally against width and vertically
      against height, so on this non-square button it drew stretched ellipses
      rather than a squircle. */
@@ -265,7 +293,7 @@ export const VIEWER_BASE_CSS = `
   }
 
   ${DRAG_SELECTION_CSS}
-  ${CENTERED_COLLAPSED_SEPARATOR_CSS}
+  ${COLLAPSED_SEPARATOR_CSS}
   ${SPLIT_DIFF_RESIZE_CSS}
   ${COPY_FILE_PATH_CSS}
   ${REVIEW_CARET_CSS}

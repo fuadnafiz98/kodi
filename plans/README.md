@@ -1,10 +1,12 @@
 # Kodi plans
 
-There are two plan documents:
+Current implementation and follow-up documents:
 
 | Document | Purpose | Status |
 | --- | --- | --- |
-| [Performance and reliability](performance-and-reliability.md) | Implementation phases for startup, Cmd+H, files/folders, PR correctness, cached reads, memory, snooze, recovery, and benchmarks. Start here. | PROPOSED |
+| [Performance and reliability follow-up](performance-and-reliability-follow-up.md) | Audit at `c23562a`, 2026-09-15: remaining correctness, retention, lifecycle, local latency, and benchmark acceptance work. Start here for further implementation. | TODO |
+| [Performance and reliability](performance-and-reliability.md) | Original program and acceptance targets. Implementation exists, but the follow-up identifies unmet criteria. | PARTIALLY IMPLEMENTED / NOT FULLY ACCEPTED |
+| [Performance report](performance-report.md) | Historical before/after observations. See the follow-up's measurement interpretation before using these as acceptance evidence. | HISTORICAL |
 | [GitHub architecture](grok-github-fast.md) | Supporting design for social-state caching, freshness, optional SQLite and mirrors, and mutation handling. | PROPOSED |
 
 The seven numbered drafts are now phases of the implementation program. The older [HTML diagrams](grok-github-fast.html) are historical and are not authoritative for the revised design.

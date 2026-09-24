@@ -58,6 +58,7 @@ test('conversation bytes are charged and annotated items reuse the same base arr
     available: true,
     message: null,
     body: 'Hello',
+    headOid: 'a'.repeat(40),
     threads: [],
     reviews: []
   }

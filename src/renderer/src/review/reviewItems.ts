@@ -173,6 +173,51 @@ export function createReviewItem<Metadata>(comparison: FileComparison): CodeView
   }
 }
 
+/**
+ * Content identity for a patch-parsed file, for callers that have no git object
+ * ID to lean on. Two hashes with different seeds and orders, so a file cannot
+ * collide with its own reverse.
+ */
+function hashPatchLines(lines: readonly string[], seed: number): number {
+  let hash = seed
+  for (const line of lines) {
+    for (let index = 0; index < line.length; index += 1) {
+      hash = Math.imul(hash ^ line.charCodeAt(index), 16_777_619)
+    }
+    hash = Math.imul(hash ^ 0, 16_777_619)
+  }
+  return hash >>> 0
+}
+
+export function patchContentSignature(type: string, additions: readonly string[], deletions: readonly string[]): string {
+  const first = hashPatchLines([type, ...additions, '\u0001', ...deletions], 2_166_136_261)
+  const second = hashPatchLines([type, ...deletions, '\u0002', ...additions], 2_654_435_761)
+  return `patch:${first.toString(16).padStart(8, '0')}${second.toString(16).padStart(8, '0')}`
+}
+
+/**
+ * `parsePatchFiles` keys each file by where it sat in the text it was parsed
+ * from — `${version}-${patchIndex}-${fileIndex}`. The viewer treats `cacheKey`
+ * as content identity: its highlight worker and its render cache both look a
+ * diff up by that key alone and never compare the lines. Pages arrive in
+ * whatever order the eight fetches finish, and a reload may serve one cached
+ * page where the first pass streamed several, so the same key came back on a
+ * different file — and the renderer then drew the new file's hunks against the
+ * old file's highlighted lines. Past the end of them it throws
+ * `deletionLine and additionLine are null`, and the file blanks out.
+ *
+ * Keying by content closes it. `version` stays in front so the load state's
+ * page seams keep working.
+ */
+function patchCacheKey(fileDiff: { name: string; prevName?: string | null; type: string;
+  additionLines: readonly string[]; deletionLines: readonly string[]
+  prevObjectId?: string | null; newObjectId?: string | null }, version: string): string {
+  const identity = fileDiff.newObjectId != null
+    ? `${fileDiff.prevObjectId ?? 'none'}..${fileDiff.newObjectId}`
+    : patchContentSignature(fileDiff.type, fileDiff.additionLines, fileDiff.deletionLines)
+  return `${version}:${fileDiff.prevName ?? ''}>${fileDiff.name}:${identity}`
+}
+
 export function createPatchReviewItems<Metadata>(patch: string, version: string): CodeViewItem<Metadata>[] {
   const seenPaths = new Set<string>()
   const items: CodeViewItem<Metadata>[] = []
@@ -180,6 +225,7 @@ export function createPatchReviewItems<Metadata>(patch: string, version: string)
     for (const fileDiff of parsedPatch.files) {
       if (seenPaths.has(fileDiff.name)) continue
       seenPaths.add(fileDiff.name)
+      fileDiff.cacheKey = patchCacheKey(fileDiff, version)
       items.push({ id: reviewItemId(fileDiff.name), type: 'diff', fileDiff })
     }
   }
@@ -224,14 +270,14 @@ export interface ReviewItemPosition {
   top: number
 }
 
-export function findCollapseFollowItemId(
-  activeItemId: string | null,
-  collapsingItemId: string,
-  items: readonly Pick<CodeViewItem, 'id'>[]
-): string | null {
-  if (activeItemId !== collapsingItemId) return null
-  const collapsingIndex = items.findIndex((item) => item.id === collapsingItemId)
-  return collapsingIndex < 0 ? null : items[collapsingIndex + 1]?.id ?? null
+/**
+ * A file collapsed from its sticky header — the file starts above the viewport —
+ * must have its header held where it was clicked. Left alone, the page loses the
+ * whole file's height at once and the header the pointer is on vanishes upward,
+ * which reads as the review jumping to another file.
+ */
+export function shouldPinCollapsedHeader(itemTop: number | undefined, scrollTop: number): boolean {
+  return itemTop != null && itemTop < scrollTop
 }
 
 export function findNextUnreadReviewItemId(

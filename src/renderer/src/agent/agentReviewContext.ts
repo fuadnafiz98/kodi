@@ -5,8 +5,8 @@ const AGENT_CONTEXT_FILE_LIMIT = 80
 
 export function agentSubjectForWorld(world: ReviewWorld | null): AgentRequestSubject | null {
   if (world == null || world.source === 'new') return null
-  const pullRequestUrl = world.source === 'patch' || world.source === 'since'
-    ? world.review.kind === 'github' ? world.review.pullRequest.url : undefined
+  const pullRequestUrl = world.source === 'patch' && world.review.kind === 'github'
+    ? world.review.pullRequest.url
     : undefined
   return {
     tabId: world.worldId,

@@ -3,7 +3,6 @@ import { CachedWorkspaceFallback } from './CachedWorkspaceFallback'
 import type { RepositorySnapshot } from '../../../shared/contracts'
 import type { useAgentSession } from '../agent/useAgentSession'
 
-const NO_PATHS: readonly string[] = Object.freeze([])
 
 export interface WorkspaceRootHostProps {
   view: WorkspaceLayoutProps
@@ -44,21 +43,13 @@ export function WorkspaceRootHost({
       reviewWorldSource={gitWorkflow.activeWorld?.source === 'new'
         ? 'desk'
         : gitWorkflow.activeWorld?.source ?? 'desk'}
-      reviewCheckpoint={gitWorkflow.reviewCheckpoint}
-      checkpointChangedFileCount={gitWorkflow.checkpointChangedFileCount}
-      checkpointRemovedFileCount={gitWorkflow.checkpointRemovedFileCount}
-      reviewReady={gitWorkflow.reviewReady}
-      sinceRemovedPaths={gitWorkflow.activeWorld?.source === 'since'
-        ? gitWorkflow.activeWorld.removedPaths : NO_PATHS}
-      sinceUncertainPaths={gitWorkflow.activeWorld?.source === 'since'
-        ? gitWorkflow.activeWorld.uncertainPaths : NO_PATHS}
       collisionPaths={collisionPaths}
       initialReviewScrollTop={gitWorkflow.initialReviewScrollTop}
       onReviewScrollPositionChange={gitWorkflow.rememberReviewScroll}
       onSelectPath={view.selectPath} onDiffStyleChange={view.setDiffStyle}
-      onWorkspaceViewChange={view.setWorkspaceView} onClosePullRequestReview={gitWorkflow.closeReview}
-      onSetReviewCheckpoint={gitWorkflow.setReviewCheckpoint}
-      onOpenSinceReview={gitWorkflow.openSinceReview}
+      onWorkspaceViewChange={view.setWorkspaceView}
+      onReloadReview={(url) => gitWorkflow.openPullRequestReview(url, snapshot,
+        gitWorkflow.activeWorld?.worldId ?? null, { refresh: true })}
       submittingPullRequestReview={gitWorkflow.submittingReview} pullRequestReviewMessage={gitWorkflow.submissionMessage}
       onSubmitPullRequestReview={gitWorkflow.submitReview} onComparisonSaved={view.onComparisonSaved}
       onError={view.setError}

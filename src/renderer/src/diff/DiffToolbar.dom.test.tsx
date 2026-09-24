@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { cleanup, render, screen } from '@testing-library/react'
 
-import type { FileEditControls } from '../app/AppView'
+import type { DiffStyle, FileEditControls } from '../app/AppView'
 import { DiffToolbar } from './DiffToolbar'
 import { formatEditorShortcut } from '../editor/editorKeymap'
 
@@ -101,6 +101,27 @@ test('DiffToolbar reveals the explorer when the sidebar is hidden', () => {
     sidebarShortcut="⌘B"
     onDiffStyleChange={() => {}} onWordWrapToggle={() => {}} onFoldUnchangedToggle={() => {}} />)
 
-  screen.getByRole('button', { name: 'Show explorer' }).click()
+  // Same control as the sidebar heading's, so it carries the same name in both
+  // places and only aria-expanded says which way it goes.
+  const toggle = screen.getByRole('button', { name: 'Toggle explorer' })
+  expect(toggle.getAttribute('aria-expanded')).toBe('false')
+  toggle.click()
   expect(shown).toBe(true)
+})
+
+// Split and unified are two values of one mode, so the button names where it
+// would take you rather than claiming a pressed state for one of them.
+test('the diff layout control offers the other layout', () => {
+  const styles: DiffStyle[] = []
+  render(<DiffToolbar comparison={null} selectedPath="src/app.ts" isGitRepository isFilePreview={false}
+    diffStyle="split" workspaceView="multi" reviewFileCount={4} wordWrap={false} foldUnchanged
+    fileEdit={editControls()} onDiffStyleChange={(style) => { styles.push(style) }}
+    onWordWrapToggle={() => {}} onFoldUnchangedToggle={() => {}} />)
+
+  const toggle = screen.getByRole('button', { name: 'Switch to unified diff' })
+  expect(toggle.hasAttribute('aria-pressed')).toBe(false)
+  expect(screen.queryByRole('button', { name: 'Split diff' })).toBeNull()
+
+  toggle.click()
+  expect(styles).toEqual(['unified'])
 })

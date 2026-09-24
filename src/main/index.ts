@@ -1069,6 +1069,10 @@ function registerIpcHandlers(): void {
     }
     return repository.getComparison(path)
   })
+  ipcMain.handle(IPC_CHANNELS.getRevisionFile, (_event, revision: unknown, path: unknown) =>
+    repositorySessions.requireActive().getRevisionFile(revision, path))
+  ipcMain.handle(IPC_CHANNELS.hasRevision, (_event, revision: unknown) =>
+    repositorySessions.tryGetActive()?.hasRevision(revision) ?? false)
   ipcMain.handle(IPC_CHANNELS.saveWorkingFile, async (_event, request: unknown) => {
     const repository = repositorySessions.requireActive()
     const comparison = await repository.saveWorkingFile(request)
@@ -1174,8 +1178,10 @@ function registerIpcHandlers(): void {
   ipcMain.handle(IPC_CHANNELS.killTerminal, (event, sessionId: unknown) => {
     terminalService.kill(event.sender.id, sessionId)
   })
-  ipcMain.handle(IPC_CHANNELS.getPullRequestConversation, (_event, root: unknown, selector: number | string) =>
-    repositorySessions.require(requireRepositoryRoot(root)).getPullRequestConversation(selector))
+  ipcMain.handle(IPC_CHANNELS.getPullRequestConversation,
+    (_event, root: unknown, selector: number | string, force: unknown) =>
+      repositorySessions.require(requireRepositoryRoot(root))
+        .getPullRequestConversation(selector, { force: force === true }))
   ipcMain.handle(IPC_CHANNELS.replyToPullRequestThread, (_event, root: unknown, threadId: unknown, body: unknown) =>
     repositorySessions.require(requireRepositoryRoot(root)).replyToPullRequestThread(threadId, body))
   ipcMain.handle(IPC_CHANNELS.setPullRequestThreadResolved, (_event, root: unknown, threadId: unknown, resolved: unknown) =>
@@ -1212,7 +1218,13 @@ function registerIpcHandlers(): void {
     repositorySessions.requireActive().pullCurrentBranch().then(trackSnapshot)
   )
   ipcMain.handle(IPC_CHANNELS.pushCurrentBranch, () => repositorySessions.requireActive().pushCurrentBranch())
-  ipcMain.handle(IPC_CHANNELS.getPullRequestReview, (event, root: unknown, selector: number | string, requestId: unknown) => {
+  ipcMain.handle(IPC_CHANNELS.getPullRequestReview, (
+    event,
+    root: unknown,
+    selector: number | string,
+    requestId: unknown,
+    refresh: unknown
+  ) => {
     const repositoryRoot = requireRepositoryRoot(root)
     if (typeof requestId !== 'string' || requestId === '' || requestId.length > 200) {
       throw new Error('Pull request load ID must be short non-empty text.')
@@ -1227,7 +1239,7 @@ function registerIpcHandlers(): void {
           requestId
         })
       }
-    }, requestId)
+    }, requestId, 'foreground', refresh === true)
   })
   ipcMain.handle(IPC_CHANNELS.checkoutPullRequest, (_event, number: number) =>
     repositorySessions.requireActive().checkoutPullRequest(number).then(trackSnapshot)

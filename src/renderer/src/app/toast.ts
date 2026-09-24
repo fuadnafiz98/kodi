@@ -65,7 +65,38 @@ function dismiss(toast: HTMLElement): void {
 
 // Toasts live outside React: the diff viewer's shadow-root listeners are the
 // main callers, and routing them through app state would rebuild the viewer.
-export function showToast(message: string, action?: { label: string; run(): void }): void {
+const SVG_NS = 'http://www.w3.org/2000/svg'
+// IconCheckCircle from @pierre/icons, drawn by hand: toasts live outside React.
+const SUCCESS_ICON_PATHS = [
+  'M12.08 5.975a.75.75 0 0 0-1.16-.95L6.943 9.884 5.03 7.97a.75.75 0 0 0-1.06 1.06l2.5 2.5a.75.75 0 0 0 1.11-.055z',
+  'M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8m1.5 0a6.5 6.5 0 1 1 13 0 6.5 6.5 0 0 1-13 0'
+]
+
+function successIcon(): SVGSVGElement {
+  const svg = document.createElementNS(SVG_NS, 'svg')
+  svg.setAttribute('viewBox', '0 0 16 16')
+  svg.setAttribute('fill', 'currentColor')
+  svg.setAttribute('aria-hidden', 'true')
+  for (const d of SUCCESS_ICON_PATHS) {
+    const path = document.createElementNS(SVG_NS, 'path')
+    path.setAttribute('d', d)
+    // The ring is two concentric subpaths; evenodd keeps its middle open.
+    path.setAttribute('fill-rule', 'evenodd')
+    svg.append(path)
+  }
+  return svg
+}
+
+export interface ToastOptions {
+  /** A completed, consequential action — it earns a mark and a longer read. */
+  tone?: 'success'
+}
+
+export function showToast(
+  message: string,
+  action?: { label: string; run(): void },
+  options: ToastOptions = {}
+): void {
   const host = toastHost()
   const live = [...host.children].filter(
     (node): node is HTMLElement => node instanceof HTMLElement && node.dataset.state !== 'leaving'
@@ -74,6 +105,10 @@ export function showToast(message: string, action?: { label: string; run(): void
 
   const toast = document.createElement('div')
   toast.className = 'kodi-toast'
+  if (options.tone != null) {
+    toast.dataset.tone = options.tone
+    toast.append(successIcon())
+  }
   const label = document.createElement('span')
   label.textContent = message
   toast.append(label)

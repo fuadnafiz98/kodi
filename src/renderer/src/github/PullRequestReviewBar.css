@@ -1,18 +1,14 @@
 /* The review bar renders inside the workspace chunk, after the boot stylesheet has
    already decided how long the first paint takes. */
-/* The session bar merges checkpoint status and the way into the composer into
-   one strip — status on the left, actions on the right. */
-.review-session-status { min-width: 0; flex: 1; display: flex; align-items: center; gap: 10px; }
-.review-session-checkpoint { min-width: 0; display: flex; align-items: center; gap: 6px; overflow: hidden; color: var(--text-secondary); white-space: nowrap; }
-.review-session-checkpoint svg { width: var(--icon-sm); height: var(--icon-sm); flex: none; color: var(--faint); }
-.review-session-checkpoint code { font-family: var(--font-mono); font-size: 0.95em; }
-.review-session-since { border: 0; padding: 0; background: transparent; color: var(--muted); font: inherit; white-space: nowrap; }
-.review-session-since.muted { color: var(--faint); }
-button.review-session-since { cursor: pointer; }
-button.review-session-since:hover { color: var(--text); text-decoration: underline; text-underline-offset: 2px; }
-.review-session-summary { min-width: 0; overflow: hidden; color: var(--faint); text-overflow: ellipsis; white-space: nowrap; }
+/* The review session rides on the diff toolbar row: an optional status line,
+   an adoptable push, and the composer toggle. Nothing is drawn around it — the
+   toolbar is the surface. */
+.review-session-inline { min-width: 0; display: flex; align-items: center; gap: 8px; }
+.review-session-summary { min-width: 0; overflow: hidden; color: var(--faint); font-size: var(--text-xs); text-overflow: ellipsis; white-space: nowrap; }
 .review-session-summary.success { color: var(--status-success-text); }
-.review-session-actions { flex: none; display: flex; gap: 6px; }
+.review-session-summary.warning { color: var(--status-warning-text); }
+.review-session-inline .bar-button { flex: none; }
+.review-session-inline .bar-button[data-active] { border-color: var(--border-strong); background: var(--control-fill-selected); color: var(--text); }
 .pr-review-bar.expanded { display: block; padding: 10px var(--gutter); }
 .pr-review-bar textarea { width: 100%; min-height: 68px; display: block; resize: vertical; border: 1px solid var(--border-strong); border-radius: var(--corner-control); padding: 8px 9px; background: var(--surface-input); color: var(--text); font-size: var(--text-sm); line-height: 1.5; }
 .pr-review-bar.expanded > p { margin: 7px 0 0; color: var(--muted); font-size: var(--text-2xs); }

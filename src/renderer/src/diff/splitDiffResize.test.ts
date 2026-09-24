@@ -1,12 +1,28 @@
 import { describe, expect, it } from 'bun:test'
 
-import { CENTERED_COLLAPSED_SEPARATOR_CSS } from './collapsedSeparator'
+import { COLLAPSED_SEPARATOR_CSS } from './collapsedSeparator'
 import {
   clampSplitPercentage,
   resistedSplitPercentage,
   splitPercentageFromPointer,
   syncSplitDiffResizeLifecycle
 } from './splitDiffResize'
+
+/**
+ * The declarations of the rule whose selector list contains `selector` exactly.
+ * `toContain` on the whole sheet cannot tell "this rule sets it" from "some
+ * longer selector elsewhere does", which is the distinction these grid
+ * placements turn on.
+ */
+function declarationsFor(css: string, selector: string): string {
+  for (const block of css.replace(/\/\*[\s\S]*?\*\//g, '').split('}')) {
+    const parts = block.split('{')
+    if (parts.length < 2) continue
+    const selectors = (parts.at(-2) ?? '').split(',').map((entry) => entry.trim())
+    if (selectors.includes(selector)) return parts.at(-1) ?? ''
+  }
+  return ''
+}
 
 describe('split diff resizing', () => {
   it('keeps both code panes within useful limits', () => {
@@ -30,34 +46,60 @@ describe('split diff resizing', () => {
     expect(resistedSplitPercentage(85, 1_000)).toBeLessThan(85)
   })
 
-  it('centres unmodified-line labels in the code column, not on the host', () => {
-    expect(CENTERED_COLLAPSED_SEPARATOR_CSS).toContain(
+  it('renders the unmodified-line label in the code column, not on the host', () => {
+    expect(COLLAPSED_SEPARATOR_CSS).toContain(
       '[data-content] [data-separator="line-info-basic"] [data-separator-wrapper]'
     )
-    expect(CENTERED_COLLAPSED_SEPARATOR_CSS).toContain(
+    expect(COLLAPSED_SEPARATOR_CSS).toContain(
       '[data-gutter] [data-separator="line-info-basic"] [data-separator-content]'
     )
-    expect(CENTERED_COLLAPSED_SEPARATOR_CSS).not.toContain('width: 100cqi')
-    expect(CENTERED_COLLAPSED_SEPARATOR_CSS).not.toContain('--kodi-split-before-width')
+    expect(COLLAPSED_SEPARATOR_CSS).not.toContain('width: 100cqi')
+    expect(COLLAPSED_SEPARATOR_CSS).not.toContain('--kodi-split-before-width')
   })
 
   it('keeps expand chevrons on the unmodified-lines seam', () => {
-    expect(CENTERED_COLLAPSED_SEPARATOR_CSS).toContain(
+    expect(COLLAPSED_SEPARATOR_CSS).toContain(
       '[data-gutter] [data-separator="line-info-basic"] [data-expand-button]'
     )
-    expect(CENTERED_COLLAPSED_SEPARATOR_CSS).toContain(
+    expect(COLLAPSED_SEPARATOR_CSS).toContain(
       '[data-content] [data-separator="line-info-basic"] [data-expand-button]'
     )
-    expect(CENTERED_COLLAPSED_SEPARATOR_CSS).toContain(
+    expect(COLLAPSED_SEPARATOR_CSS).toContain(
       'grid-template-columns: 28px 28px minmax(0, 1fr)'
     )
   })
 
+  // Pierre pins the label to grid column 2, which is the second button's track
+  // as soon as a hunk can expand both ways: the count and the down chevron drew
+  // in one 28px cell.
+  it('keeps the unmodified-line count out of the expand buttons’ tracks', () => {
+    expect(declarationsFor(
+      COLLAPSED_SEPARATOR_CSS,
+      '[data-content] [data-separator="line-info-basic"] [data-separator-content]'
+    )).toContain('grid-column: -2 / -1')
+    expect(declarationsFor(
+      COLLAPSED_SEPARATOR_CSS,
+      '[data-diff-type="split"] [data-additions] [data-content] [data-separator="line-info-basic"] [data-separator-content]'
+    )).toContain('grid-column: 1 / -1')
+  })
+
+  // The code column is as wide as the file's longest line, so a centred label
+  // sits past the right edge of the pane on anything but a narrow file.
+  it('leads the seam with the count instead of centring it', () => {
+    const seam = declarationsFor(
+      COLLAPSED_SEPARATOR_CSS,
+      '[data-separator="line-info-basic"] [data-separator-content]'
+    )
+    expect(seam).toContain('justify-content: flex-start')
+    expect(seam).not.toContain('justify-content: center')
+    expect(COLLAPSED_SEPARATOR_CSS).not.toContain('[data-separator-content]::before')
+  })
+
   it('keeps one unmodified-line count in split view', () => {
-    expect(CENTERED_COLLAPSED_SEPARATOR_CSS).toContain(
+    expect(COLLAPSED_SEPARATOR_CSS).toContain(
       '[data-diff-type="split"] [data-additions] [data-unmodified-lines]'
     )
-    expect(CENTERED_COLLAPSED_SEPARATOR_CSS).toContain('display: none')
+    expect(COLLAPSED_SEPARATOR_CSS).toContain('display: none')
   })
 
   it('updates the split track when the handle moves', () => {

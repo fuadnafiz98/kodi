@@ -5,6 +5,7 @@ import type {
   PullRequestMergeStrategy,
   PullRequestSummary
 } from '../../../shared/contracts'
+import { ComparisonRefs } from '../diff/ComparisonRefs'
 import { ActionIcon } from '../git/GitActionIcon'
 import { formatRelativeDate, isMutatingAction } from '../git/gitPanelModel'
 
@@ -41,7 +42,7 @@ export function PullRequestRow({
       </div>
       <div className="pr-row-meta">
         <span>{summary.author.login}</span>
-        {details != null ? <span>{details.headRefName} → {details.baseRefName}</span> : null}
+        {details != null ? <span><ComparisonRefs from={details.headRefName} to={details.baseRefName} /></span> : null}
         <span>{formatRelativeDate(summary.updatedAt)}</span>
       </div>
       <div className="pr-row-actions">

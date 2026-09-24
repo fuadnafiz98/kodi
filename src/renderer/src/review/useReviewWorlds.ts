@@ -9,7 +9,6 @@ import type {
 } from '../../../shared/contracts'
 import { githubRepoSlugFromPullRequestUrl } from '../../../shared/pullRequestUrl'
 import type { WorkspaceView } from '../app/AppView'
-import type { ReviewCheckpoint, SinceReview } from './reviewCheckpoints'
 import { automaticWorkspaceView, firstOpenPathForSnapshot } from '../explorer/workspaceMode'
 import { worldViewCache } from './worldViewCache'
 
@@ -55,27 +54,7 @@ export interface PatchWorld {
   patchLength: number
 }
 
-export interface SinceWorld {
-  source: 'since'
-  worldId: string
-  label: string
-  root: string
-  snapshot: RepositorySnapshot
-  baseOid: string
-  headOid: string
-  parentWorldId: string
-  checkpointHeadOid: string
-  checkpointCreatedAt: string
-  changedPaths: readonly string[]
-  removedPaths: string[]
-  uncertainPaths: string[]
-  loadStatus: 'ready' | 'released'
-  review: Extract<RepositoryReview, { kind: 'github' }>
-  patchPages: readonly string[]
-  patchLength: number
-}
-
-export type ReviewWorld = NewWorld | DeskWorld | PatchWorld | SinceWorld
+export type ReviewWorld = NewWorld | DeskWorld | PatchWorld
 
 export interface WorldRegistryState {
   worlds: ReviewWorld[]
@@ -105,7 +84,6 @@ type WorldRegistryAction =
       originWorldId: string | null
       supersedesWorldId?: string | null
     }
-  | { type: 'open-since'; world: SinceWorld }
   | {
       type: 'append-patch-page'
       worldId: string
@@ -123,13 +101,6 @@ type WorldRegistryAction =
       mergeable: string | null
     }
   | {
-      type: 'restore-since-patch'
-      worldId: string
-      patchPages: readonly string[]
-      files: Extract<RepositoryReview, { kind: 'github' }>['files']
-      omittedFiles: Extract<RepositoryReview, { kind: 'github' }>['omittedFiles']
-    }
-  | {
       type: 'set-patch-status'
       worldId: string
       generation: number
@@ -141,9 +112,9 @@ type WorldRegistryAction =
   | { type: 'close'; worldId: string; nextWorld: ReviewWorld }
 
 let newWorldSequence = 0
-// Three real 141–164-file PR tabs plus a 143-file Since tab used 24.3 MB
-// more working set than one active PR. Keep a 64 MB inactive-text ceiling so
-// unusually large reviews cannot grow without bound while normal tabs stay hot.
+// Four real 141–164-file PR tabs used 24.3 MB more working set than one active
+// PR. Keep a 64 MB inactive-text ceiling so unusually large reviews cannot grow
+// without bound while normal tabs stay hot.
 export const MAX_INACTIVE_PATCH_BYTES = 64 * 1024 * 1024
 
 export function createNewWorld(): NewWorld {
@@ -182,9 +153,12 @@ function workingTreeWorld(snapshot: RepositorySnapshot, previous?: DeskWorld): D
   }
 }
 
+// A tab names the repository, not its owner: `owner/repo` pushed the part that
+// tells two tabs apart — the number and the repo — behind the ellipsis. The
+// owner is still in the tab's tooltip through the pull request URL and title.
 function repositoryLabel(review: RepositoryReview, fallback: string): string {
   if (review.kind !== 'github') return fallback
-  const match = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/\d+/i.exec(review.pullRequest.url)
+  const match = /^https:\/\/github\.com\/[^/]+\/([^/]+)\/pull\/\d+/i.exec(review.pullRequest.url)
   return match?.[1] ?? fallback
 }
 
@@ -227,35 +201,6 @@ export function createPatchWorld(
     review,
     patchPages,
     patchLength: review.patch.length
-  }
-}
-
-export function createSinceWorld(
-  snapshot: RepositorySnapshot,
-  parentWorldId: string,
-  since: SinceReview,
-  checkpoint: ReviewCheckpoint
-): SinceWorld {
-  const review = since.review
-  const patchPages = since.patchPages ?? (review.patch === '' ? [] : [review.patch])
-  return {
-    source: 'since',
-    worldId: `since:${review.pullRequest.url}:${checkpoint.headOid}:${review.headOid}`,
-    label: `#${review.pullRequest.number} since · ${repositoryLabel(review, snapshot.name)}`,
-    root: snapshot.root,
-    snapshot,
-    baseOid: review.baseOid,
-    headOid: review.headOid,
-    parentWorldId,
-    checkpointHeadOid: checkpoint.headOid,
-    checkpointCreatedAt: checkpoint.createdAt,
-    changedPaths: review.files.map((file) => file.path),
-    removedPaths: since.removedPaths,
-    uncertainPaths: since.uncertainPaths,
-    loadStatus: 'ready',
-    review,
-    patchPages,
-    patchLength: patchPages.reduce((length, page) => length + page.length, 0)
   }
 }
 
@@ -302,7 +247,7 @@ function updatePatchWorld(
 }
 
 export function reviewPayloadBytes(
-  world: PatchWorld | SinceWorld,
+  world: PatchWorld,
   cachedGraphBytes = 0
 ): number {
   // Git patches are overwhelmingly ASCII, which V8 stores as one-byte strings.
@@ -319,23 +264,15 @@ export function reviewPayloadBytes(
  * kept. Both the byte evictor and hibernation produce exactly this, so a world
  * released either way restores through the same path.
  */
-function releasedWorld(world: PatchWorld | SinceWorld): PatchWorld | SinceWorld {
-  return world.source === 'patch'
-    ? {
-        ...world,
-        loadStatus: 'released',
-        requestId: null,
-        patchPages: [],
-        patchLength: 0,
-        review: { ...world.review, files: [], patch: '', omittedFiles: [] }
-      }
-    : {
-        ...world,
-        loadStatus: 'released',
-        patchPages: [],
-        patchLength: 0,
-        review: { ...world.review, files: [], patch: '', omittedFiles: [] }
-      }
+function releasedWorld(world: PatchWorld): PatchWorld {
+  return {
+    ...world,
+    loadStatus: 'released',
+    requestId: null,
+    patchPages: [],
+    patchLength: 0,
+    review: { ...world.review, files: [], patch: '', omittedFiles: [] }
+  }
 }
 
 /**
@@ -351,8 +288,7 @@ function releasedWorld(world: PatchWorld | SinceWorld): PatchWorld | SinceWorld 
 export function hibernateWorldPayloads(state: WorldRegistryState): WorldRegistryState {
   let changed = false
   const worlds = state.worlds.map((world) => {
-    if (world.source !== 'patch' && world.source !== 'since') return world
-    if (world.loadStatus !== 'ready') return world
+    if (world.source !== 'patch' || world.loadStatus !== 'ready') return world
     changed = true
     return releasedWorld(world)
   })
@@ -369,7 +305,7 @@ export function boundInactivePatchPayloads(
   const worlds = [...state.worlds]
   for (let index = worlds.length - 1; index >= 0; index -= 1) {
     const world = worlds[index]
-    if (world == null || (world.source !== 'patch' && world.source !== 'since')
+    if (world == null || world.source !== 'patch'
       || world.worldId === state.activeWorldId
       // Loading worlds are skipped: they have no restore path yet, and
       // charging them would evict a stream that cannot be rebuilt mid-flight.
@@ -391,11 +327,9 @@ const PAYLOAD_AFFECTING_ACTIONS: ReadonlySet<WorldRegistryAction['type']> = new 
   'new-tab',
   'open-desk',
   'open-patch',
-  'open-since',
   'append-patch-page',
   'replace-patch',
   'replace-patch-head',
-  'restore-since-patch',
   'set-patch-status',
   'focus',
   'close'
@@ -469,9 +403,6 @@ export function reduceWorldRegistry(
   if (action.type === 'open-patch') {
     return insertContentWorld(state, action.world, action.originWorldId, action.supersedesWorldId ?? null)
   }
-  if (action.type === 'open-since') {
-    return insertContentWorld(state, action.world)
-  }
   if (action.type === 'append-patch-page') {
     return updatePatchWorld(state, action.worldId, action.generation, (world) => {
       const selector = world.review.kind === 'github' ? world.review.selector : world.review.id
@@ -534,20 +465,6 @@ export function reduceWorldRegistry(
             }
           }
         : world)
-  }
-  if (action.type === 'restore-since-patch') {
-    const index = state.worlds.findIndex((world) => world.worldId === action.worldId)
-    const world = state.worlds[index]
-    if (index < 0 || world?.source !== 'since' || world.loadStatus !== 'released') return state
-    const worlds = [...state.worlds]
-    worlds[index] = {
-      ...world,
-      loadStatus: 'ready',
-      patchPages: action.patchPages,
-      patchLength: action.patchPages.reduce((length, page) => length + page.length, 0),
-      review: { ...world.review, files: action.files, omittedFiles: action.omittedFiles }
-    }
-    return { ...state, worlds }
   }
   if (action.type === 'set-patch-status') {
     return updatePatchWorld(state, action.worldId, action.generation, (world) => {
@@ -743,7 +660,7 @@ export function useReviewWorlds({
   const setNewWorldPending = useCallback((pending: boolean, pullRequestUrl = '', worldId?: string) => {
     const targetWorldId = worldId ?? stateRef.current.activeWorldId
     if (targetWorldId == null) return
-    const match = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)/i.exec(pullRequestUrl.trim())
+    const match = /^https:\/\/github\.com\/[^/]+\/([^/]+)\/pull\/(\d+)/i.exec(pullRequestUrl.trim())
     const label = pending && match != null ? `#${match[2]} · ${match[1]}` : 'New tab'
     dispatch({ type: 'set-new-pending', worldId: targetWorldId, pending, label })
   }, [dispatch])
@@ -781,7 +698,7 @@ export function useReviewWorlds({
   // this only reports whether there was anything left to release.
   const hibernateWorlds = useCallback((): boolean => {
     const releasable = stateRef.current.worlds.some((world) =>
-      (world.source === 'patch' || world.source === 'since') && world.loadStatus === 'ready')
+      world.source === 'patch' && world.loadStatus === 'ready')
     if (!releasable) return false
     saveActiveNavigation()
     dispatch({ type: 'hibernate' })
@@ -842,27 +759,6 @@ export function useReviewWorlds({
     }
     return world.worldId
   }, [dispatch, onActivateSnapshot, restoreNavigation, saveActiveNavigation])
-
-  const openSinceWorld = useCallback((
-    parentWorldId: string,
-    since: SinceReview,
-    checkpoint: ReviewCheckpoint
-  ) => {
-    const parent = stateRef.current.worlds.find((world) => world.worldId === parentWorldId)
-    if (parent == null || parent.source === 'new') return null
-    saveActiveNavigation()
-    const world = createSinceWorld(parent.snapshot, parentWorldId, since, checkpoint)
-    if (!navigationRef.current.has(world.worldId)) {
-      navigationRef.current.set(world.worldId, {
-        selectedPath: world.review.files[0]?.path ?? null,
-        workspaceView: 'multi',
-        reviewScrollTop: 0
-      })
-    }
-    dispatch({ type: 'open-since', world })
-    restoreNavigation(world.worldId)
-    return world.worldId
-  }, [dispatch, restoreNavigation, saveActiveNavigation])
 
   const closeWorld = useCallback(async (worldId = stateRef.current.activeWorldId) => {
     if (worldId == null) return false
@@ -956,13 +852,6 @@ export function useReviewWorlds({
     mergeable: string | null
   ) => dispatch({ type: 'set-patch-checks', worldId, generation, checks, mergeable }), [dispatch])
 
-  const restoreSincePatch = useCallback((
-    worldId: string,
-    patchPages: readonly string[],
-    files: Extract<RepositoryReview, { kind: 'github' }>['files'],
-    omittedFiles: Extract<RepositoryReview, { kind: 'github' }>['omittedFiles']
-  ) => dispatch({ type: 'restore-since-patch', worldId, patchPages, files, omittedFiles }), [dispatch])
-
   const syncRepositorySnapshot = useCallback((nextSnapshot: RepositorySnapshot) => {
     dispatch({ type: 'sync-repository', snapshot: nextSnapshot })
   }, [dispatch])
@@ -1004,11 +893,9 @@ export function useReviewWorlds({
     hasRepositoryRoot,
     openDeskWorld,
     openPatchWorld,
-    openSinceWorld,
     appendPatchPage,
     replacePatchHead,
     replacePatchReview,
-    restoreSincePatch,
     setPatchChecks,
     setPatchExpectedFileCount,
     setPatchLoadStatus,
@@ -1020,10 +907,8 @@ export function useReviewWorlds({
     reset
   }), [activeNavigation?.reviewScrollTop, activeReview, activeWorld, appendPatchPage, closeWorld,
     cycleWorld, focusDesk, focusWorld, hibernateWorlds, openDeskWorld, openNewWorld, openPatchWorld,
-    openSinceWorld,
     hasRepositoryRoot, hasWorld, isWorldActive, rememberReviewScroll, replacePatchHead,
     replacePatchReview, reset,
-    restoreSincePatch,
     selectInitialPath, setPatchChecks, setPatchExpectedFileCount, setPatchLoadStatus,
     setNewWorldPending, state.worlds, syncRepositorySnapshot, updateNewWorldLocator,
     updateNewWorldRepositoryRoot])

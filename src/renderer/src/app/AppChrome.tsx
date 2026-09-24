@@ -7,8 +7,6 @@ import { WorldStrip } from './WorldStrip'
 
 export interface AppChromeProps {
   view: WorkspaceLayoutProps
-  /** The tab strip badge: files touched by both the working tree and the review. */
-  collisionCount: number
   /** Non-null on a blank tab, where the titlebar becomes a pull request locator. */
   activeNewWorld: NewWorld | null
   agentOpen: boolean
@@ -18,7 +16,6 @@ export interface AppChromeProps {
 /** The window chrome: the world tabs and the titlebar under them. */
 export function AppChrome({
   view,
-  collisionCount,
   activeNewWorld,
   agentOpen,
   onAgentToggle
@@ -29,7 +26,6 @@ export function AppChrome({
     <WorldStrip
       worlds={gitWorkflow.worlds}
       activeWorldId={gitWorkflow.activeWorld?.worldId ?? null}
-      collisionCount={collisionCount}
       leadingAction={(
         <FolderChromeButton
           opening={view.opening}
@@ -68,7 +64,7 @@ export function AppChrome({
         if (locator === '') return
         void gitWorkflow.openPullRequestFromLocator(locator)
       }}
-      onSettingsOpen={view.openSettings} onGitOpen={gitWorkflow.openPanel}
+      onSettingsOpen={view.openSettings}
       agentOpen={agentOpen} onAgentToggle={onAgentToggle}
       terminalOpen={view.terminalOpen} onTerminalToggle={view.toggleTerminal} />
     </header>

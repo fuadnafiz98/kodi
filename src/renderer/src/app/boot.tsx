@@ -5,6 +5,7 @@ import type { RepositorySnapshot } from '../../../shared/contracts'
 import { initialWorkspacePaint } from '../../../shared/workspaceCache'
 import { App } from './App'
 import { AppErrorBoundary } from './AppErrorBoundary'
+import { installPressFeedback } from './pressFeedback'
 import { loadCommandPalette } from '../palette/commandPaletteModule'
 import { warmFileSearchIndex } from '../palette/fileSearch'
 import { getEditorThemeType, loadPreferences } from '../settings/preferences'
@@ -25,6 +26,8 @@ export function mountApp(sessionSnapshot: Promise<RepositorySnapshot | null>): v
       </AppErrorBoundary>
     </StrictMode>
   )
+
+  installPressFeedback()
 
   // Cmd+P is the first thing many readers press. The chunk is small and the
   // download overlaps the first paint, so the palette is resident before the

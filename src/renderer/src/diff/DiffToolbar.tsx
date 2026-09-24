@@ -1,4 +1,4 @@
-import { IconArrowLeftBar, IconSidebarLeftOpen } from '@pierre/icons'
+import { IconSidebarLeft } from '@pierre/icons'
 
 import type { FileComparison } from '../../../shared/contracts'
 import type { DiffStyle, FileEditControls, WorkspaceView } from '../app/AppView'
@@ -20,13 +20,18 @@ interface DiffToolbarProps {
   wordWrap: boolean
   foldUnchanged: boolean
   fileEdit: FileEditControls
-  onCloseExternalReview?(): void
   onDiffStyleChange(style: DiffStyle): void
   onWordWrapToggle(): void
   onFoldUnchangedToggle(): void
   sidebarVisible?: boolean
   onSidebarToggle?(): void
   sidebarShortcut?: string
+  /** Beside the comparison: why a review is read-only, when it is. */
+  reviewBadge?: React.ReactNode
+  /** The open review's page on the web, linked beside its title. */
+  reviewLink?: { href: string; label: string }
+  /** Before the display controls: the review session's status and actions. */
+  reviewActions?: React.ReactNode
 }
 
 export function DiffToolbar({
@@ -42,13 +47,15 @@ export function DiffToolbar({
   wordWrap,
   foldUnchanged,
   fileEdit,
-  onCloseExternalReview,
   onDiffStyleChange,
   onWordWrapToggle,
   onFoldUnchangedToggle,
   sidebarVisible = true,
   onSidebarToggle,
-  sidebarShortcut
+  sidebarShortcut,
+  reviewBadge,
+  reviewLink,
+  reviewActions
 }: DiffToolbarProps): React.JSX.Element {
   const subject = {
     selectedPath,
@@ -63,26 +70,23 @@ export function DiffToolbar({
 
   return (
     <div className="diff-toolbar">
+      {/* The same button the sidebar heading carries, so closing the panel moves
+          the control rather than replacing it with a different one. */}
       {onSidebarToggle != null && !sidebarVisible ? (
         <button
-          className="icon-button"
+          className="sidebar-toggle"
           type="button"
-          aria-label="Show explorer"
+          aria-label="Toggle explorer"
+          aria-expanded={false}
+          aria-controls="repository-explorer"
           title={sidebarShortcut == null ? 'Show Explorer' : `Show Explorer (${sidebarShortcut})`}
           onClick={onSidebarToggle}
         >
-          <IconSidebarLeftOpen />
+          <IconSidebarLeft />
         </button>
       ) : null}
-      {/* Leaving a pull request belongs beside its title, not in the group of view
-          toggles on the right where it read as another display mode. */}
-      {onCloseExternalReview != null ? (
-        <button className="review-exit-button" type="button" onClick={onCloseExternalReview}
-          title="Close this review and go back to the working tree">
-          <IconArrowLeftBar />Working tree
-        </button>
-      ) : null}
-      <DiffToolbarSubject subject={subject} comparison={comparison} />
+      <DiffToolbarSubject subject={subject} comparison={comparison} externalLink={reviewLink}>{reviewBadge}</DiffToolbarSubject>
+      {reviewActions == null ? null : <div className="diff-review-actions">{reviewActions}</div>}
       <div className="diff-controls">
         <FileEditActions fileEdit={fileEdit} selectedPath={selectedPath} />
         <DiffDisplayControls

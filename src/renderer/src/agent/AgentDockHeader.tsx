@@ -1,4 +1,6 @@
-import { IconCommentAdd, IconSparkles, IconX } from '@pierre/icons'
+import { IconCommentAdd, IconX } from '@pierre/icons'
+
+import { IconSparklesOutline } from '../app/IconSparklesOutline'
 
 export interface AgentDockHeaderProps {
   streaming: boolean
@@ -20,7 +22,7 @@ export function AgentDockHeader({
   return (
     <header className="agent-dock-header">
       <div className="agent-dock-title">
-        <IconSparkles aria-hidden="true" />
+        <IconSparklesOutline aria-hidden="true" />
         <span>Agent</span>
       </div>
       <div className={`agent-header-state ${streaming ? 'running' : ready ? 'connected' : 'disconnected'}`}

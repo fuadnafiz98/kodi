@@ -19,8 +19,10 @@ import {
 } from '../editor/selectionAction'
 import { useViewerContext, type EditorAnnotations } from '../editor/ViewerProviders'
 import { createDiffAnnotation, createFileAnnotation, selectedRangeLastLine } from '../review/reviewAnnotations'
+import { copyCodeReference, copyReviewComment } from '../review/codeReferenceClipboard'
 import type { AppPreferences } from '../settings/preferences'
 import {
+  AnnotationFrame,
   DraftComment,
   ReviewThreadCard,
   type ReviewAnnotationMetadata,
@@ -59,7 +61,7 @@ type DiffContentsProps = Omit<DiffSurfaceProps, 'threadsByPath'> & { threads: Re
  * draft card, and the annotation collection handed to the viewer.
  */
 function useReviewComments(
-  path: string | undefined,
+  comparison: FileComparison | null,
   threads: ReviewThread[],
   setThreadsByPath: Dispatch<SetStateAction<Record<string, ReviewThread[]>>>
 ) {
@@ -69,7 +71,7 @@ function useReviewComments(
     draftRange: SelectedLineRange | null
   }>({ path: undefined, selectedLines: null, draftRange: null })
 
-  const comparisonPath = path
+  const comparisonPath = comparison?.path
   const selectedLines = reviewCursor.path === comparisonPath ? reviewCursor.selectedLines : null
   const draftRange = reviewCursor.path === comparisonPath ? reviewCursor.draftRange : null
   const beginComment = useCallback((range: SelectedLineRange) => {
@@ -109,11 +111,13 @@ function useReviewComments(
   const renderReviewAnnotation = useCallback((metadata: ReviewAnnotationMetadata): React.JSX.Element => {
     if (metadata.kind === 'draft') {
       return (
-        <DraftComment
-          range={metadata.range}
-          onCancel={() => setReviewCursor({ path: comparisonPath, selectedLines: null, draftRange: null })}
-          onSave={saveComment}
-        />
+        <AnnotationFrame>
+          <DraftComment
+            range={metadata.range}
+            onCancel={() => setReviewCursor({ path: comparisonPath, selectedLines: null, draftRange: null })}
+            onSave={saveComment}
+          />
+        </AnnotationFrame>
       )
     }
     // The single-file view keeps its direct comment flow, so no selection action
@@ -125,18 +129,29 @@ function useReviewComments(
     }
     const { thread } = metadata
     return (
-      <ReviewThreadCard
-        thread={thread}
-        onDelete={() => updateThread(thread.id, () => null)}
-        onEdit={(body) => updateThread(thread.id, (current) => ({ ...current, body }))}
-        onReply={(body) => updateThread(thread.id, (current) => ({
-          ...current,
-          replies: [...current.replies, { id: crypto.randomUUID(), body }]
-        }))}
-        onToggleResolved={() => updateThread(thread.id, (current) => ({ ...current, resolved: !current.resolved }))}
-      />
+      <AnnotationFrame>
+        <ReviewThreadCard
+          thread={thread}
+          onCopy={() => {
+            if (comparisonPath == null) return
+            // Threads saved here carry no anchor text, so the comment's code comes
+            // from the comparison it is being read against.
+            void copyReviewComment(comparisonPath, thread, {
+              additions: comparison?.newFile?.contents,
+              deletions: comparison?.oldFile?.contents
+            })
+          }}
+          onDelete={() => updateThread(thread.id, () => null)}
+          onEdit={(body) => updateThread(thread.id, (current) => ({ ...current, body }))}
+          onReply={(body) => updateThread(thread.id, (current) => ({
+            ...current,
+            replies: [...current.replies, { id: crypto.randomUUID(), body }]
+          }))}
+          onToggleResolved={() => updateThread(thread.id, (current) => ({ ...current, resolved: !current.resolved }))}
+        />
+      </AnnotationFrame>
     )
-  }, [comparisonPath, saveComment, updateThread])
+  }, [comparison, comparisonPath, saveComment, updateThread])
 
   const reviewMetadata = useMemo<ReviewAnnotationMetadata[]>(() => [
     ...threads.map((thread) => ({ kind: 'thread' as const, thread })),
@@ -187,7 +202,7 @@ function DiffContents({
     renderReviewAnnotation,
     fileAnnotations,
     diffAnnotations
-  } = useReviewComments(comparisonPath, threads, setThreadsByPath)
+  } = useReviewComments(comparison, threads, setThreadsByPath)
 
   // The editor remaps annotation coordinates as the document changes and hands
   // back the whole authoritative collection. Ignoring it left comment cards on
@@ -251,13 +266,22 @@ function DiffContents({
     beginComment({ start: startLine, end: endLine, side: 'additions' })
   }, [beginComment])
 
+  const copySelection = useCallback((context: SelectionActionContext) => {
+    if (comparisonPath == null) return
+    const { startLine, endLine } = selectionLineRange(context.selection)
+    void copyCodeReference(
+      { path: comparisonPath, first: startLine, last: endLine, side: 'additions' },
+      context.getSelectionText()
+    )
+  }, [comparisonPath])
+
   const renderSelectionAction = useCallback((context: SelectionActionContext) => (
     createSelectionActionElement([
       { label: 'Comment', run: commentOnSelection },
       { label: 'Add to chat', run: askAgentAboutSelection },
-      { label: 'Copy', run: (selection) => void navigator.clipboard.writeText(selection.getSelectionText()) }
+      { label: 'Copy', run: copySelection }
     ], context)
-  ), [askAgentAboutSelection, commentOnSelection])
+  ), [askAgentAboutSelection, commentOnSelection, copySelection])
 
   const setEditorHandlers = viewer?.setEditorHandlers
   useEffect(() => {

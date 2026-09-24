@@ -4,6 +4,7 @@ import type { PullRequestConversation, RemoteReviewThread } from '../../../share
 import {
   groupRemoteThreadsByPath,
   nextConversationPollDelay,
+  outdatedRemoteThreads,
   sameConversation
 } from './usePullRequestConversation'
 
@@ -26,6 +27,9 @@ const thread = (overrides: Partial<RemoteReviewThread> = {}): RemoteReviewThread
   path: 'src/a.ts',
   line: 4,
   startLine: null,
+  originalLine: 4,
+  originalStartLine: null,
+  diffHunk: '@@ -1,2 +1,3 @@',
   side: 'RIGHT',
   resolved: false,
   outdated: false,
@@ -37,6 +41,7 @@ const conversation = (overrides: Partial<PullRequestConversation> = {}): PullReq
   available: true,
   message: null,
   body: 'Adds the inbox.',
+  headOid: 'a'.repeat(40),
   threads: [thread()],
   reviews: [],
   ...overrides
@@ -55,6 +60,24 @@ describe('groupRemoteThreadsByPath', () => {
 
   it('returns an empty map for no threads', () => {
     expect(groupRemoteThreadsByPath([]).size).toBe(0)
+  })
+
+  // GitHub nulls `line` once a push moves the code. Falling back to line 1 put
+  // every stranded comment at the top of the file, on unrelated code.
+  it('leaves stranded threads out of the diff instead of anchoring them at line 1', () => {
+    const grouped = groupRemoteThreadsByPath([
+      thread(),
+      thread({ id: 'thread-2', outdated: true, line: null, startLine: null }),
+      thread({ id: 'thread-3', line: null, startLine: null })
+    ])
+    expect(grouped.get('src/a.ts')?.map((entry) => entry.id)).toEqual(['thread-1'])
+  })
+
+  it('collects the stranded threads for the pull request context', () => {
+    const outdated = thread({ id: 'thread-2', outdated: true, line: null, startLine: null })
+    expect(outdatedRemoteThreads(conversation({ threads: [thread(), outdated] })).map((entry) => entry.id))
+      .toEqual(['thread-2'])
+    expect(outdatedRemoteThreads(null)).toEqual([])
   })
 })
 

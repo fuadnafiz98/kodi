@@ -104,6 +104,8 @@ const repositoryApi: RepositoryApi = {
   revealPath: (path) => ipcRenderer.invoke(IPC_CHANNELS.revealPath, path),
   refresh: () => ipcRenderer.invoke(IPC_CHANNELS.refresh),
   getComparison: (path) => ipcRenderer.invoke(IPC_CHANNELS.getComparison, path),
+  getRevisionFile: (revision, path) => ipcRenderer.invoke(IPC_CHANNELS.getRevisionFile, revision, path),
+  hasRevision: (revision) => ipcRenderer.invoke(IPC_CHANNELS.hasRevision, revision),
   saveWorkingFile: (request) => ipcRenderer.invoke(IPC_CHANNELS.saveWorkingFile, request),
   getWorkingTreePatch: (paths, requestId) =>
     ipcRenderer.invoke(IPC_CHANNELS.getWorkingTreePatch, paths, requestId ?? null),
@@ -115,8 +117,8 @@ const repositoryApi: RepositoryApi = {
   getPullRequestInbox: () => ipcRenderer.invoke(IPC_CHANNELS.getPullRequestInbox),
   getGlobalPullRequestInbox: (repos) => ipcRenderer.invoke(IPC_CHANNELS.getGlobalPullRequestInbox, repos),
   getClosedPullRequests: () => ipcRenderer.invoke(IPC_CHANNELS.getClosedPullRequests),
-  getPullRequestConversation: (root: string, selector: number | string) =>
-    ipcRenderer.invoke(IPC_CHANNELS.getPullRequestConversation, root, selector),
+  getPullRequestConversation: (root: string, selector: number | string, force?: boolean) =>
+    ipcRenderer.invoke(IPC_CHANNELS.getPullRequestConversation, root, selector, force === true),
   replyToPullRequestThread: (root: string, threadId: string, body: string) =>
     ipcRenderer.invoke(IPC_CHANNELS.replyToPullRequestThread, root, threadId, body),
   setPullRequestThreadResolved: (root: string, threadId: string, resolved: boolean) =>
@@ -133,8 +135,8 @@ const repositoryApi: RepositoryApi = {
   fetchRemote: () => ipcRenderer.invoke(IPC_CHANNELS.fetchRemote),
   pullCurrentBranch: () => ipcRenderer.invoke(IPC_CHANNELS.pullCurrentBranch),
   pushCurrentBranch: () => ipcRenderer.invoke(IPC_CHANNELS.pushCurrentBranch),
-  getPullRequestReview: (root, selector, requestId) =>
-    ipcRenderer.invoke(IPC_CHANNELS.getPullRequestReview, root, selector, requestId),
+  getPullRequestReview: (root, selector, requestId, refresh) =>
+    ipcRenderer.invoke(IPC_CHANNELS.getPullRequestReview, root, selector, requestId, refresh === true),
   cancelPullRequestReview: (root, requestId) =>
     ipcRenderer.send(IPC_CHANNELS.cancelPullRequestReview, root, requestId),
   checkoutPullRequest: (number) => ipcRenderer.invoke(IPC_CHANNELS.checkoutPullRequest, number),

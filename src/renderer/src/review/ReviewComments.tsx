@@ -7,7 +7,9 @@ import type { ReviewCommentAnchor } from './reviewThreadAnchors'
 import {
   IconApproved,
   IconArrow,
+  IconCheck,
   IconCommentAdd,
+  IconCopy,
   IconPencil,
   IconReply,
   IconSparkles,
@@ -44,6 +46,7 @@ interface SelectionActionsProps {
   commentLabel?: string
   onComment(): void
   onAskAgent(): void
+  onCopy(): void
 }
 
 export type SelectionGesture = 'start' | 'change' | 'end'
@@ -79,14 +82,37 @@ export function consumeSelectionChromeKey(
   return false
 }
 
-// Selecting lines offers both destinations rather than assuming a comment, so the
-// same selection can go to a teammate or to the agent.
+/** Insets an annotation card that takes up a row of its own in the diff. */
+export function AnnotationFrame({ children }: { children: React.ReactNode }): React.JSX.Element {
+  return <div className="review-annotation">{children}</div>
+}
+
+/**
+ * Selecting lines offers all three destinations rather than assuming a comment,
+ * so the same selection can go to the clipboard, to the agent, or to a teammate.
+ *
+ * Ordered by how much each one commits the reader: Copy takes the lines and
+ * leaves, Chat hands them to the agent, Comment puts them in front of another
+ * person. Three words beside three glyphs is more chrome than the selection they
+ * describe, so the name lives in the tooltip — which opens on focus as well as
+ * hover, so the keyboard path keeps it.
+ */
 export function SelectionActions({
   range,
   commentLabel = 'Comment',
   onComment,
-  onAskAgent
+  onAskAgent,
+  onCopy
 }: SelectionActionsProps): React.JSX.Element {
+  // An icon-only Copy that says nothing reads as a dead button, so the glyph
+  // itself answers.
+  const [copied, setCopied] = useState(false)
+  useEffect(() => {
+    if (!copied) return
+    const timer = window.setTimeout(() => setCopied(false), 1_200)
+    return () => window.clearTimeout(timer)
+  }, [copied])
+
   return (
     <div
       className="selection-actions"
@@ -95,16 +121,31 @@ export function SelectionActions({
       aria-keyshortcuts="Escape"
     >
       <button
+        type="button"
+        onClick={() => { onCopy(); setCopied(true) }}
+        aria-label="Copy selection with file path"
+        data-tooltip={copied ? 'Copied' : 'Copy with path'}
+        data-copied={copied ? '' : undefined}
+      >
+        {copied ? <IconCheck aria-hidden="true" /> : <IconCopy aria-hidden="true" />}
+      </button>
+      <button
+        type="button"
+        onClick={onAskAgent}
+        aria-label="Add selection to Chat"
+        aria-keyshortcuts="Meta+I"
+        data-tooltip="Add to Chat ⌘I"
+      >
+        <IconSparkles aria-hidden="true" />
+      </button>
+      <button
         className="selection-actions-comment"
         type="button"
         onClick={onComment}
         aria-label={commentLabel}
-        title={commentLabel}
+        data-tooltip={commentLabel}
       >
-        <IconCommentAdd />{commentLabel}
-      </button>
-      <button type="button" onClick={onAskAgent} aria-label="Add selection to Chat" title="Add selection to Chat (⌘I)">
-        <IconSparkles />Chat
+        <IconCommentAdd aria-hidden="true" />
       </button>
     </div>
   )
@@ -270,6 +311,7 @@ export function DraftComment({ range, onCancel, onSave }: DraftCommentProps): Re
 
 interface ReviewThreadCardProps {
   thread: ReviewThread
+  onCopy(): void
   onDelete(): void
   onEdit(body: string): void
   onReply(body: string): void
@@ -278,6 +320,7 @@ interface ReviewThreadCardProps {
 
 export function ReviewThreadCard({
   thread,
+  onCopy,
   onDelete,
   onEdit,
   onReply,
@@ -350,6 +393,8 @@ export function ReviewThreadCard({
       {editing || replying ? null : (
         <footer className="review-thread-actions">
           <button type="button" onClick={() => setReplying(true)}><IconReply />Reply</button>
+          <button type="button" onClick={onCopy}
+            title="Copy the code and this comment as Markdown"><IconCopy />Copy</button>
           <button type="button" onClick={() => setEditing(true)}><IconPencil />Edit</button>
           <button type="button" onClick={onToggleResolved}><IconApproved />{thread.resolved ? 'Reopen' : 'Resolve'}</button>
           <button className="danger" type="button" onClick={onDelete}><IconTrash />Delete</button>

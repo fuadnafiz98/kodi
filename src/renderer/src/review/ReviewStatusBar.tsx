@@ -1,6 +1,6 @@
 import type { PullRequestReviewEvent, RepositoryReview } from '../../../shared/contracts'
 import { PullRequestReviewBar } from '../github/PullRequestReviewBar'
-import type { ReviewCheckpointBarProps } from './ReviewCheckpointStatus'
+import { PullRequestReviewSummaryBar, type NewRevisionNotice } from '../github/PullRequestReviewSummaryBar'
 import { reviewBarMode, type ReviewWorldSource } from './reviewHeaderModel'
 
 export interface ReviewStatusBarProps {
@@ -10,7 +10,6 @@ export interface ReviewStatusBarProps {
   message: string | null
   inlineCommentCount: number
   orphanedCommentCount: number
-  checkpointBar?: ReviewCheckpointBarProps
   expanded: boolean
   body: string
   onExpandedChange(expanded: boolean): void
@@ -20,8 +19,9 @@ export interface ReviewStatusBarProps {
 }
 
 /**
- * The composer, or the one-line reason this review cannot be submitted from
- * where the reader is standing.
+ * The composer, and only while it is open. Everything the collapsed bar used to
+ * say now lives on the toolbar row — see `ReviewToolbarActions` and
+ * `ReviewToolbarBadge` — so a review costs one header row, not two.
  */
 export function ReviewStatusBar({
   review,
@@ -30,7 +30,6 @@ export function ReviewStatusBar({
   message,
   inlineCommentCount,
   orphanedCommentCount,
-  checkpointBar,
   expanded,
   body,
   onExpandedChange,
@@ -38,42 +37,91 @@ export function ReviewStatusBar({
   onOpen,
   onSubmit
 }: ReviewStatusBarProps): React.JSX.Element | null {
+  if (!expanded || review?.kind !== 'github' || reviewBarMode(review, reviewWorldSource) !== 'submit') return null
+  return (
+    <PullRequestReviewBar
+      submitting={submitting}
+      message={message}
+      inlineCommentCount={inlineCommentCount}
+      orphanedCommentCount={orphanedCommentCount}
+      viewerCanSubmitDecision={review.viewerCanSubmitDecision}
+      expanded
+      body={body}
+      onExpandedChange={onExpandedChange}
+      onBodyChange={onBodyChange}
+      onOpen={onOpen}
+      onSubmit={onSubmit}
+    />
+  )
+}
+
+export interface ReviewToolbarActionsProps {
+  review: RepositoryReview | null
+  reviewWorldSource: ReviewWorldSource
+  message: string | null
+  inlineCommentCount: number
+  orphanedCommentCount: number
+  newRevision: NewRevisionNotice | null
+  expanded: boolean
+  onExpandedChange(expanded: boolean): void
+  onOpen(): void
+}
+
+/** The review session's status and its composer toggle, on the toolbar row. */
+export function ReviewToolbarActions({
+  review,
+  reviewWorldSource,
+  message,
+  inlineCommentCount,
+  orphanedCommentCount,
+  newRevision,
+  expanded,
+  onExpandedChange,
+  onOpen
+}: ReviewToolbarActionsProps): React.JSX.Element | null {
+  if (reviewBarMode(review, reviewWorldSource) !== 'submit') return null
+  return (
+    <PullRequestReviewSummaryBar
+      message={message}
+      inlineCommentCount={inlineCommentCount}
+      orphanedCommentCount={orphanedCommentCount}
+      newRevision={newRevision}
+      expanded={expanded}
+      onSubmitReview={() => {
+        if (!expanded) onOpen()
+        onExpandedChange(!expanded)
+      }}
+    />
+  )
+}
+
+/**
+ * Why this review cannot be submitted, as a quiet pill beside the comparison.
+ * The full sentence moved into its tooltip.
+ */
+export function ReviewToolbarBadge({
+  review,
+  reviewWorldSource
+}: {
+  review: RepositoryReview | null
+  reviewWorldSource: ReviewWorldSource
+}): React.JSX.Element | null {
   const mode = reviewBarMode(review, reviewWorldSource)
-  if (mode === 'submit' && review?.kind === 'github') {
-    return (
-      <PullRequestReviewBar
-        submitting={submitting}
-        message={message}
-        inlineCommentCount={inlineCommentCount}
-        orphanedCommentCount={orphanedCommentCount}
-        viewerCanSubmitDecision={review.viewerCanSubmitDecision}
-        checkpointBar={checkpointBar}
-        expanded={expanded}
-        body={body}
-        onExpandedChange={onExpandedChange}
-        onBodyChange={onBodyChange}
-        onOpen={onOpen}
-        onSubmit={onSubmit}
-      />
-    )
-  }
-  if (mode === 'since') {
-    return (
-      <div className="review-bar pr-review-readonly" role="status">
-        File-level changes since the checkpoint. Return to the Patch world to submit a review.
-      </div>
-    )
-  }
   if (mode === 'closed' && review?.kind === 'github') {
+    const state = review.pullRequest.state.toLowerCase()
     return (
-      <div className="review-bar pr-review-readonly" role="status">
-        This pull request is {review.pullRequest.state.toLowerCase()}. Review submission is disabled.
-      </div>
+      <span className={`review-state-pill state-${state}`}
+        title={`This pull request is ${state}. Review submission is disabled.`}>
+        {state}
+      </span>
     )
   }
   if (mode === 'local') {
     return (
-      <div className="review-bar pr-review-readonly" role="status">Local branch review. Comments stay local and can be copied from the review summary.</div>
+      <span className="review-state-pill"
+        title="Local branch review. Comments stay local and can be copied from the review summary.">
+        local
+      </span>
     )
   }
   return null

@@ -72,16 +72,34 @@ export function sameConversation(
   return true
 }
 
+/**
+ * Threads grouped by the file they annotate, outdated ones left out.
+ *
+ * GitHub nulls a thread's `line` the moment a push moves the code it was written
+ * against: it has no position on the current diff, and the app used to fall back
+ * to line 1, stacking every stale comment at the top of the file on code that had
+ * nothing to do with it. They are not lost — the pull request context lists them
+ * with the hunk they were written on, which is the only place they are still
+ * true.
+ */
 export function groupRemoteThreadsByPath(
   threads: readonly RemoteReviewThread[]
 ): Map<string, RemoteReviewThread[]> {
   const byPath = new Map<string, RemoteReviewThread[]>()
   for (const thread of threads) {
+    if (thread.outdated || (thread.line == null && thread.startLine == null)) continue
     const existing = byPath.get(thread.path)
     if (existing == null) byPath.set(thread.path, [thread])
     else existing.push(thread)
   }
   return byPath
+}
+
+/** The threads a push stranded, newest first. */
+export function outdatedRemoteThreads(
+  conversation: PullRequestConversation | null
+): RemoteReviewThread[] {
+  return (conversation?.threads ?? []).filter((thread) => thread.outdated)
 }
 
 // GitHub is the source of truth for other people's comments, so an open review
@@ -128,12 +146,17 @@ export function usePullRequestConversation(
       if (timer != null) window.clearTimeout(timer)
       timer = window.setTimeout(tick, delay)
     }
-    const load = async (): Promise<void> => {
+    // `force` skips the main process's de-duplication window. A poll can take a
+    // few-seconds-old answer; a reader who pressed refresh, or a resolve we just
+    // wrote, cannot.
+    let lastLoadAt = 0
+    const load = async (force = false): Promise<void> => {
       const repository = window.repository
       if (repository == null || loading) return
       loading = true
+      lastLoadAt = performance.now()
       try {
-        const next = await repository.getPullRequestConversation(root, selector)
+        const next = await repository.getPullRequestConversation(root, selector, force)
         if (cancelled) return
         // An unchanged conversation must keep its identity, or every poll would
         // rebuild every annotated review item.
@@ -177,14 +200,20 @@ export function usePullRequestConversation(
     const cached = worldId == null ? null : worldViewCache.get(worldId)?.conversation ?? null
     const forced = refreshRevision !== refreshGenerationRef.current
     refreshGenerationRef.current = refreshRevision
-    if (cached == null || forced) void load().finally(schedule)
+    if (cached == null || forced) void load(forced).finally(schedule)
     else schedule()
     // Returning focus catches up immediately instead of waiting out a backed-off
     // interval, and resets the back-off because the user is watching again.
     const handleVisibility = (): void => {
       if (document.hidden) return
       delay = CONVERSATION_POLL_INTERVAL_MS
-      void load().finally(schedule)
+      // Forcing skips the main process's de-duplication window, which is the only
+      // thing standing between a reader who alt-tabs ten times a minute and ten
+      // `gh` subprocesses per open review. A poll's worth of staleness is the
+      // price of coming back to a window, so the force is spent at most once per
+      // interval and every other return takes whatever the cache holds.
+      const stale = performance.now() - lastLoadAt >= CONVERSATION_POLL_INTERVAL_MS
+      void load(stale).finally(schedule)
     }
     document.addEventListener('visibilitychange', handleVisibility)
     document.addEventListener('scroll', noteScroll, { capture: true, passive: true })

@@ -4,8 +4,15 @@ export const DEFAULT_STORAGE_BUDGET = 3 * 1024 * 1024
 const MANAGED_PREFIXES = [
   'kodi:viewed-files:',
   'kodi:review-threads:',
-  'kodi:review-checkpoint:',
   'kodi:drafts:v1:'
+] as const
+
+// Keys a removed feature left behind. Nothing rewrites them, so they would sit
+// in the same 3 MB every live key shares — counted by an index that was written
+// before the feature went away, uncounted after the next rebuild, wrong either
+// way. They are swept instead.
+const RETIRED_PREFIXES = [
+  'kodi:review-checkpoint:'
 ] as const
 
 export interface StorageIndexEntry {
@@ -135,6 +142,36 @@ export function enforceStorageBudget(
   return evicted
 }
 
+/**
+ * Drop every key a retired feature owned, and its index entry. Runs on the
+ * writes that already touch this storage rather than on a startup path, so a
+ * session that never saves anything also never pays for the scan.
+ */
+export function purgeRetiredStorage(storage: BudgetStorage): string[] {
+  const retired: string[] = []
+  for (let offset = 0; offset < storage.length; offset += 1) {
+    const key = storage.key(offset)
+    if (key != null && RETIRED_PREFIXES.some((prefix) => key.startsWith(prefix))) retired.push(key)
+  }
+  if (retired.length === 0) return []
+  const index = loadStorageIndex(storage)
+  const removed: string[] = []
+  let changed = false
+  for (const key of retired) {
+    try {
+      storage.removeItem(key)
+    } catch {
+      continue
+    }
+    removed.push(key)
+    if (index[key] == null) continue
+    delete index[key]
+    changed = true
+  }
+  if (changed) persistIndex(storage, index)
+  return removed
+}
+
 export function isQuotaExceeded(error: unknown): boolean {
   return error instanceof DOMException
     && (error.name === 'QuotaExceededError' || error.code === 22)
@@ -147,6 +184,7 @@ export function persistManagedValue(
   totalBudget = DEFAULT_STORAGE_BUDGET
 ): boolean {
   const write = (): void => {
+    purgeRetiredStorage(storage)
     enforceStorageBudget(storage, totalBudget, key)
     storage.setItem(key, serialized)
     touchStorageKey(storage, key, serializedSize(serialized))
@@ -169,7 +207,7 @@ export function persistManagedValue(
 const shownStorageToasts = new Set<string>()
 
 export function notifyStorageWriteFailed(
-  kind: 'comments' | 'viewed' | 'drafts' | 'checkpoint',
+  kind: 'comments' | 'viewed' | 'drafts',
   show: (message: string) => void
 ): void {
   if (shownStorageToasts.has(kind)) return
@@ -177,8 +215,7 @@ export function notifyStorageWriteFailed(
   const messages = {
     comments: 'Review comments could not be saved locally (storage full).',
     viewed: 'Viewed-file marks could not be saved locally (storage full).',
-    drafts: 'Unsaved drafts could not be saved locally (storage full).',
-    checkpoint: 'The review checkpoint could not be saved locally (storage full).'
+    drafts: 'Unsaved drafts could not be saved locally (storage full).'
   } as const
   show(messages[kind])
 }

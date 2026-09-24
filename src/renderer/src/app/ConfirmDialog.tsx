@@ -9,6 +9,11 @@ export interface ConfirmRequest {
   cancelLabel?: string
   /** Paints the confirm button as destructive rather than primary. */
   destructive?: boolean
+  /** A glyph naming the decision, in a tile tinted by `tone`. */
+  icon?: React.ReactNode
+  tone?: 'success' | 'warning' | 'neutral'
+  /** What the decision is about, set apart from the sentence describing it. */
+  context?: { title: string; meta?: string }
 }
 
 interface ConfirmDialogProps extends ConfirmRequest {
@@ -28,6 +33,9 @@ export function ConfirmDialog({
   confirmLabel = 'Continue',
   cancelLabel = 'Cancel',
   destructive = false,
+  icon,
+  tone = 'neutral',
+  context,
   onResolve
 }: ConfirmDialogProps): React.JSX.Element {
   const dialogRef = useRef<HTMLDialogElement>(null)
@@ -61,14 +69,21 @@ export function ConfirmDialog({
         onResolve(false)
       }}
     >
-      <section className="confirm-dialog">
+      <section className="confirm-dialog" data-tone={tone}>
         <div className="confirm-dialog-body">
-          {destructive ? <IconWarningOctogonFill aria-hidden="true" /> : null}
+          {destructive ? <IconWarningOctogonFill aria-hidden="true" />
+            : icon == null ? null : <span className="confirm-dialog-icon" aria-hidden="true">{icon}</span>}
           <div>
             <strong id="confirm-dialog-title">{title}</strong>
             {detail == null ? null : <p id="confirm-dialog-detail">{detail}</p>}
           </div>
         </div>
+        {context == null ? null : (
+          <div className="confirm-dialog-context">
+            <span>{context.title}</span>
+            {context.meta == null ? null : <small>{context.meta}</small>}
+          </div>
+        )}
         <div className="confirm-dialog-actions">
           <button type="button" onClick={() => onResolve(false)}>{cancelLabel}</button>
           <button

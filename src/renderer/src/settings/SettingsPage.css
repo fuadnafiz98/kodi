@@ -146,7 +146,7 @@
 .inbox-repo { display: flex; align-items: center; gap: 9px; min-height: 34px; border: 1px solid var(--border); border-radius: var(--corner-control); padding: 0 6px 0 11px; background: var(--surface-input); color: var(--text-secondary); font-size: var(--text-sm); }
 .inbox-repo > svg { width: var(--icon-md); height: var(--icon-md); flex: none; color: var(--faint); }
 .inbox-repo > span { min-width: 0; flex: 1; overflow: hidden; font-family: var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
-.inbox-repo > button { width: 24px; height: 24px; flex: none; display: grid; place-items: center; border: 0; border-radius: var(--corner-inset); padding: 0; background: transparent; color: var(--faint); cursor: pointer; }
+.inbox-repo > button { width: 24px; height: 24px; flex: none; display: grid; place-items: center; border: 0; border-radius: calc(var(--corner-control) - 5px); padding: 0; background: transparent; color: var(--faint); cursor: pointer; }
 .inbox-repo > button:hover { background: var(--control-fill-hover); color: var(--text); }
 .inbox-repo > button svg { width: var(--icon-sm); height: var(--icon-sm); }
 .inbox-repo-add { display: flex; gap: 8px; }

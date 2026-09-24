@@ -64,11 +64,15 @@ describe('squircle coverage', () => {
   })
 
   test('the diff shadow root shapes the corners the library rounds', () => {
-    // The document rule stops at the shadow boundary. These four are every
-    // selector @pierre/diffs gives a radius that the app does not re-declare.
+    // The document rule stops at the shadow boundary. These are every selector
+    // @pierre/diffs gives a radius that the app does not re-declare — the viewer's
+    // own, plus the editor stylesheet it appends into the same root.
     expect(VIEWER_BASE_CSS).toContain('[data-diff-span]')
     expect(VIEWER_BASE_CSS).toContain('[data-separator-content]')
     expect(VIEWER_BASE_CSS).toContain('[data-code]::-webkit-scrollbar-thumb')
+    expect(VIEWER_BASE_CSS).toContain('[data-editor-widget]')
+    expect(VIEWER_BASE_CSS).toContain('[data-input-box] input')
+    expect(VIEWER_BASE_CSS).toContain('[data-rtl]')
     expect(VIEWER_BASE_CSS).not.toMatch(/corner-shape:\s*round/)
   })
 

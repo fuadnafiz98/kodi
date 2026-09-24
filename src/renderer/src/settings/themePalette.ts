@@ -1,4 +1,3 @@
-import type { TreeThemeStyles } from '@pierre/trees'
 import type { ITheme } from '@xterm/xterm'
 
 import {
@@ -10,7 +9,6 @@ import {
   type EditorThemeType,
   type ThemePaletteSeed
 } from './preferences'
-import { DARK_TREE_STYLES, LIGHT_TREE_STYLES } from '../explorer/treeThemeStyles'
 
 // The app palettes that themes without a `palette` seed keep. Values mirror the
 // :root and [data-theme-type="light"] blocks in styles.css.
@@ -207,59 +205,6 @@ export function themeCardVars(theme: EditorTheme): Record<string, string> | null
     '--theme-card-line': palette.faint,
     '--theme-card-accent': palette.accent
   }
-}
-
-const TREE_GIT_COLORS: Record<EditorThemeType, { added: string; modified: string; deleted: string }> = {
-  dark: { added: '#07c480', modified: '#009fff', deleted: '#ff2e3f' },
-  light: { added: '#18a46c', modified: '#009fff', deleted: '#d52c36' }
-}
-
-const treeStylesCache = new Map<EditorTheme, TreeThemeStyles>()
-
-/**
- * Explorer chrome follows the theme like everything else. Palette-less themes
- * keep the baked pierre-derived constants; seeded themes derive the same
- * seventeen values from the palette so the sidebar belongs to the theme too.
- */
-export function treeStylesFor(theme: EditorTheme): TreeThemeStyles {
-  const cached = treeStylesCache.get(theme)
-  if (cached != null) return cached
-  const info = EDITOR_THEMES[theme]
-  if (info.palette == null) {
-    const baked = info.type === 'light' ? LIGHT_TREE_STYLES : DARK_TREE_STYLES
-    treeStylesCache.set(theme, baked)
-    return baked
-  }
-  const palette = derivePalette(info.palette, info.type)
-  const git = TREE_GIT_COLORS[info.type]
-  const styles: TreeThemeStyles = {
-    colorScheme: info.type,
-    // The tree sits inside --panel-subtle chrome, so its pane takes that tone —
-    // not `surface`, which light seeds push 85% toward white and read as a
-    // white island on tinted canvases (solarized, latte).
-    backgroundColor: palette.panelSubtle,
-    color: palette.muted,
-    borderColor: 'var(--trees-theme-sidebar-border, light-dark(oklch(0% 0 0 / 0.15), oklch(100% 0 0 / 0.15)))',
-    '--trees-theme-sidebar-bg': palette.panelSubtle,
-    '--trees-theme-sidebar-fg': palette.muted,
-    '--trees-theme-sidebar-header-fg': palette.muted,
-    '--trees-theme-list-active-selection-fg': palette.text,
-    '--trees-theme-list-hover-bg': hexAlpha(palette.accent, 0.14),
-    '--trees-theme-list-active-selection-bg': hexAlpha(palette.accent, 0.26),
-    '--trees-theme-focus-ring': palette.accent,
-    '--trees-theme-input-bg': palette.surfaceInput,
-    '--trees-theme-sidebar-border': info.type === 'dark'
-      ? mixHex(palette.canvas, '#000000', 0.4)
-      : hexAlpha(palette.text, 0.12),
-    '--trees-theme-input-border': info.type === 'dark'
-      ? mixHex(palette.canvas, palette.text, 0.18)
-      : hexAlpha(palette.text, 0.16),
-    '--trees-theme-git-added-fg': git.added,
-    '--trees-theme-git-modified-fg': git.modified,
-    '--trees-theme-git-deleted-fg': git.deleted
-  }
-  treeStylesCache.set(theme, styles)
-  return styles
 }
 
 const ANSI_COLORS: Record<EditorThemeType, Pick<ITheme,

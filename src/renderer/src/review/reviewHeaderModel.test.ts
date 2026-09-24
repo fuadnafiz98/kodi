@@ -43,10 +43,6 @@ describe('reviewBarMode', () => {
     expect(reviewBarMode(githubReview('OPEN'), 'patch')).toBe('submit')
   })
 
-  test('the since world is read only even for an open pull request', () => {
-    expect(reviewBarMode(githubReview('OPEN'), 'since')).toBe('since')
-  })
-
   test('a merged pull request, or one seen from the desk, explains itself', () => {
     expect(reviewBarMode(githubReview('MERGED'), 'patch')).toBe('closed')
     expect(reviewBarMode(githubReview('OPEN'), 'desk')).toBe('closed')
@@ -54,7 +50,7 @@ describe('reviewBarMode', () => {
 
   test('local reviews and no review at all', () => {
     expect(reviewBarMode(localReview, 'patch')).toBe('local')
-    expect(reviewBarMode(localReview, 'since')).toBe('local')
+    expect(reviewBarMode(localReview, 'desk')).toBe('local')
     expect(reviewBarMode(null, 'patch')).toBe('none')
   })
 })

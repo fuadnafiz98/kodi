@@ -84,13 +84,19 @@ export const WELCOME_INBOX_TAG: Record<PullRequestInboxSectionKey, string> = {
 }
 
 const CACHE_KEY = 'kodi:welcome-inbox:v1'
-const MEMORY_TTL_MS = 60_000
+
+/** How old the inbox may get while the Welcome screen is showing it. */
+export const WELCOME_INBOX_POLL_MS = 30_000
+/** Coming back to the window refetches anything older than this. */
+export const WELCOME_INBOX_WAKE_MS = 10_000
 
 interface WelcomeInboxCacheEntry {
   rows: WelcomeInboxRow[]
   /** All repos in the last snapshot, not just the painted rows. */
   repos: string[]
   fetchedAt: number
+  /** The last fetch that succeeded; a failed one moves fetchedAt but not this. */
+  syncedAt: number | null
   /** The repo allow-list the rows were fetched under; a changed scope is stale. */
   scope: string
   /**
@@ -119,14 +125,14 @@ export function readWelcomeInboxCache(scope = ''): WelcomeInboxRow[] {
 }
 
 /** True when a mount should hit GitHub again rather than reusing the memory entry. */
-export function welcomeInboxIsStale(scope = '', now = Date.now()): boolean {
+export function welcomeInboxIsStale(scope = '', now = Date.now(), maxAgeMs = WELCOME_INBOX_POLL_MS): boolean {
   const cached = memoryCache ?? readStoredCache()
-  return cached?.scope !== scope || now - cached.fetchedAt > MEMORY_TTL_MS
+  return cached?.scope !== scope || now - cached.fetchedAt >= maxAgeMs
 }
 
 export function writeWelcomeInboxCache(rows: readonly WelcomeInboxRow[], repos: readonly string[] = [], scope = '', fetchedAt = Date.now()): void {
   const kept = rows.slice(0, WELCOME_INBOX_LIMIT)
-  const entry = { rows: kept, repos: [...repos], fetchedAt, scope, count: kept.length }
+  const entry = { rows: kept, repos: [...repos], fetchedAt, syncedAt: fetchedAt, scope, count: kept.length }
   memoryCache = entry
   try {
     localStorage.setItem(CACHE_KEY, JSON.stringify(entry))
@@ -143,9 +149,16 @@ export function touchWelcomeInboxCache(scope = '', fetchedAt = Date.now()): void
     rows: sameScope ? cached.rows : [],
     repos: cached?.repos ?? [],
     fetchedAt,
+    syncedAt: sameScope ? cached.syncedAt : null,
     scope,
     count: cached?.count ?? WELCOME_INBOX_ASSUMED_ROWS
   }
+}
+
+/** When this scope's rows last came back from GitHub, or null if they never have. */
+export function readWelcomeInboxSyncedAt(scope = ''): number | null {
+  const cached = memoryCache ?? readStoredCache()
+  return cached?.scope === scope ? cached.syncedAt : null
 }
 
 /** Repositories the last snapshot named — what Settings offers as suggestions. */
@@ -170,8 +183,8 @@ function readStoredCache(): WelcomeInboxCacheEntry | null {
     if (stored == null) return null
     const parsed = JSON.parse(stored) as unknown
     if (typeof parsed !== 'object' || parsed == null) return null
-    const { rows, repos, fetchedAt, scope, count } = parsed as
-      { rows?: unknown; repos?: unknown; fetchedAt?: unknown; scope?: unknown; count?: unknown }
+    const { rows, repos, fetchedAt, syncedAt, scope, count } = parsed as
+      { rows?: unknown; repos?: unknown; fetchedAt?: unknown; syncedAt?: unknown; scope?: unknown; count?: unknown }
     if (!Array.isArray(rows) || typeof fetchedAt !== 'number') return null
     const cleanRows = rows.filter(isWelcomeInboxRow)
     const entry: WelcomeInboxCacheEntry = {
@@ -181,6 +194,8 @@ function readStoredCache(): WelcomeInboxCacheEntry | null {
         ? [...new Set(repos.filter((repo): repo is string => typeof repo === 'string'))].sort()
         : [...new Set(cleanRows.map((row) => row.repo).filter((repo) => repo !== ''))].sort(),
       fetchedAt,
+      // Only successful fetches were ever stored before syncedAt existed.
+      syncedAt: typeof syncedAt === 'number' ? syncedAt : fetchedAt,
       scope: typeof scope === 'string' ? scope : '',
       count: typeof count === 'number' && Number.isFinite(count) ? count : cleanRows.length
     }

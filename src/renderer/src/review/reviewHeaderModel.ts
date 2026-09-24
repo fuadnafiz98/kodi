@@ -16,13 +16,13 @@ export function reviewToolbarComparison(review: RepositoryReview | null): string
   return `${review.baseRefName} → ${review.headRefName}`
 }
 
-export type ReviewWorldSource = 'desk' | 'patch' | 'since'
+export type ReviewWorldSource = 'desk' | 'patch'
 
 /**
  * Which bar sits under the toolbar: the composer, or one of the read-only
  * explanations for why a review cannot be submitted here.
  */
-export type ReviewBarMode = 'none' | 'submit' | 'since' | 'closed' | 'local'
+export type ReviewBarMode = 'none' | 'submit' | 'closed' | 'local'
 
 export function reviewBarMode(
   review: RepositoryReview | null,
@@ -30,7 +30,6 @@ export function reviewBarMode(
 ): ReviewBarMode {
   if (review == null) return 'none'
   if (review.kind === 'local') return 'local'
-  if (reviewWorldSource === 'since') return 'since'
   if (reviewWorldSource === 'patch' && review.pullRequest.state === 'OPEN') return 'submit'
   return 'closed'
 }

@@ -30,42 +30,12 @@ export const DRAG_SELECTION_CSS = `
     pointer-events: none;
   }
 
-  [data-gutter-utility-slot] {
-    align-items: center;
-    justify-content: center;
-  }
-
-  /* Pierre’s default is width 1lh with margin-right: calc(-1lh + 1ch), which
-     parks a shrunk 18px control on the number/code seam and covers tokens.
-     Keep the button in the gutter and sit it on the strip between rows. */
-  [data-gutter] [data-utility-button] {
-    width: 18px !important;
-    height: 18px !important;
-    min-width: 18px;
-    margin-right: 0 !important;
-    padding: 0;
-    border: 0;
-    border-radius: 6px !important;
-    corner-shape: squircle !important;
-    background: var(--accent);
-    color: var(--accent-contrast);
-    transform: translateY(50%);
-    box-shadow:
-      0 0 0 2px var(--diffs-bg, var(--canvas)),
-      0 1px 2px color-mix(in srgb, var(--accent) 30%, transparent),
-      0 4px 10px color-mix(in srgb, var(--accent) 22%, transparent);
-  }
-
-  [data-utility-button] svg,
-  [data-utility-button] [data-icon] {
-    width: 10px;
-    height: 10px;
-  }
 `
 
 interface DragLine {
   index: number
   lineNumber: number
+  lineSide: 'additions' | 'deletions'
 }
 
 export interface DragLineGeometry extends DragLine {
@@ -78,8 +48,7 @@ interface MeasuredDragLine extends DragLineGeometry {
 }
 
 interface DragGuideState {
-  side: HTMLElement
-  sideName: 'additions' | 'deletions'
+  code: HTMLElement
   start: DragLine
   current: DragLine
   lines: MeasuredDragLine[]
@@ -99,22 +68,32 @@ interface DragGuideBinding {
 
 const dragGuideBindings = new WeakMap<HTMLElement, DragGuideBinding>()
 
-function measureDragLines(side: HTMLElement): {
+/** Pierre's own rule: the pane's side wins, and without a pane (unified, file
+   view) the line's own type speaks — context reads as additions there. */
+function lineSideFor(element: HTMLElement, paneSide: 'additions' | 'deletions' | null): 'additions' | 'deletions' {
+  if (paneSide != null) return paneSide
+  return element.getAttribute('data-line-type') === 'change-deletion' ? 'deletions' : 'additions'
+}
+
+export function measureDragLines(code: HTMLElement): {
   lines: MeasuredDragLine[]
   elementsByIndex: Map<number, HTMLElement[]>
 } {
+  const paneSide = code.hasAttribute('data-deletions')
+    ? 'deletions' as const
+    : code.hasAttribute('data-additions') ? 'additions' as const : null
   const lines: MeasuredDragLine[] = []
-  for (const element of side.querySelectorAll<HTMLElement>('[data-gutter] [data-column-number]')) {
+  for (const element of code.querySelectorAll<HTMLElement>('[data-gutter] [data-column-number]')) {
     const index = Number(element.dataset.lineIndex?.split(',')[0])
     const lineNumber = Number(element.dataset.columnNumber)
     if (!Number.isFinite(index) || !Number.isFinite(lineNumber)) continue
     const bounds = element.getBoundingClientRect()
-    lines.push({ index, lineNumber, top: bounds.top, bottom: bounds.bottom, element })
+    lines.push({ index, lineNumber, lineSide: lineSideFor(element, paneSide), top: bounds.top, bottom: bounds.bottom, element })
   }
   lines.sort((left, right) => left.top - right.top)
 
   const elementsByIndex = new Map<number, HTMLElement[]>()
-  for (const element of side.querySelectorAll<HTMLElement>('[data-line-index]')) {
+  for (const element of code.querySelectorAll<HTMLElement>('[data-line-index]')) {
     const index = Number(element.dataset.lineIndex?.split(',')[0])
     if (!Number.isFinite(index)) continue
     const elements = elementsByIndex.get(index)
@@ -124,10 +103,20 @@ function measureDragLines(side: HTMLElement): {
   return { lines, elementsByIndex }
 }
 
-export function findClosestDragLine(
-  lines: readonly DragLineGeometry[],
+/** The code column a utility-button press began in — a side pane in a split
+   diff, the single column in a unified diff or file view. Slotted buttons live
+   in the light DOM, where closest() stops at the shadow boundary; the event's
+   composed path still carries the shadow-side ancestors. */
+export function codeFromEventPath(path: readonly (EventTarget | null | undefined)[]): HTMLElement | null {
+  return path.find((target): target is HTMLElement =>
+    target instanceof HTMLElement && target.hasAttribute('data-code')
+  ) ?? null
+}
+
+export function findClosestDragLine<T extends DragLineGeometry>(
+  lines: readonly T[],
   pointerY: number
-): DragLine | null {
+): T | null {
   if (lines.length === 0) return null
   let low = 0
   let high = lines.length
@@ -213,7 +202,7 @@ export function syncDragGuideLifecycle(
   }
 
   const refreshGeometry = (current: DragGuideState): boolean => {
-    const measured = measureDragLines(current.side)
+    const measured = measureDragLines(current.code)
     if (measured.lines.length === 0) return false
     current.lines = measured.lines
     current.elementsByIndex = measured.elementsByIndex
@@ -223,20 +212,20 @@ export function syncDragGuideLifecycle(
 
   const onPointerDown = (event: Event): void => {
     const pointerEvent = event as PointerEvent
-    const utilityButton = pointerEvent.composedPath().find(
+    const path = pointerEvent.composedPath()
+    const utilityButton = path.find(
       (target): target is HTMLElement => target instanceof HTMLElement && target.hasAttribute('data-utility-button')
     )
     if (utilityButton == null) return
 
-    const side = utilityButton.closest<HTMLElement>('[data-additions], [data-deletions]')
-    if (side == null) return
-    const measured = measureDragLines(side)
+    const code = codeFromEventPath(path)
+    if (code == null) return
+    const measured = measureDragLines(code)
     const start = findClosestDragLine(measured.lines, pointerEvent.clientY)
     if (start == null) return
 
     drag = {
-      side,
-      sideName: side.hasAttribute('data-deletions') ? 'deletions' : 'additions',
+      code,
       start,
       current: start,
       lines: measured.lines,
@@ -277,10 +266,14 @@ export function syncDragGuideLifecycle(
       suppressClick = true
       event.preventDefault()
       event.stopImmediatePropagation()
+      const [start, end] = completedDrag.start.lineNumber <= completedDrag.current.lineNumber
+        ? [completedDrag.start, completedDrag.current]
+        : [completedDrag.current, completedDrag.start]
       binding.onRangeSelected({
-        start: Math.min(completedDrag.start.lineNumber, completedDrag.current.lineNumber),
-        end: Math.max(completedDrag.start.lineNumber, completedDrag.current.lineNumber),
-        side: completedDrag.sideName
+        start: start.lineNumber,
+        end: end.lineNumber,
+        side: start.lineSide,
+        endSide: end.lineSide
       })
       window.setTimeout(() => { suppressClick = false }, 0)
     }

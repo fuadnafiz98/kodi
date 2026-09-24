@@ -15,7 +15,7 @@ import {
   imageReviewFile,
   createPatchReviewItems,
   createReviewItem,
-  findCollapseFollowItemId,
+  shouldPinCollapsedHeader,
   findActiveReviewItemId,
   findNextUnreadReviewItemId,
   markdownItemSource,
@@ -420,6 +420,9 @@ describe('annotated review item versions', () => {
       path: 'file.ts',
       line: 4,
       startLine: null,
+      originalLine: 4,
+      originalStartLine: null,
+      diffHunk: '',
       side: 'RIGHT',
       resolved: false,
       outdated: false,
@@ -597,14 +600,11 @@ describe('multi-file explorer synchronization', () => {
     expect(findActiveReviewItemId(1_080, positions)).toBe('review:third.ts')
   })
 
-  test('aligns the next file only when the active file is collapsed', () => {
-    const items = positions.map(({ id }) => ({ id }))
-    expect(findCollapseFollowItemId('review:first.ts', 'review:first.ts', items))
-      .toBe('review:second.ts')
-    expect(findCollapseFollowItemId('review:first.ts', 'review:second.ts', items))
-      .toBeNull()
-    expect(findCollapseFollowItemId('review:third.ts', 'review:third.ts', items))
-      .toBeNull()
+  test('pins a collapsed header only when it was stuck above its own file', () => {
+    expect(shouldPinCollapsedHeader(640, 900)).toBe(true)
+    expect(shouldPinCollapsedHeader(640, 640)).toBe(false)
+    expect(shouldPinCollapsedHeader(1_120, 900)).toBe(false)
+    expect(shouldPinCollapsedHeader(undefined, 900)).toBe(false)
   })
 
   test('advances from a viewed file to the next unread file', () => {

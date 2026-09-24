@@ -7,14 +7,32 @@ afterEach(cleanup)
 
 const range = { start: 12, end: 12, side: 'additions' as const }
 
-test('selection actions are only Comment and Chat', () => {
-  render(<SelectionActions range={range} onComment={() => {}} onAskAgent={() => {}} />)
+test('selection actions are Copy, Chat, and Comment, as glyphs in that order', () => {
+  const onCopy = mock(() => {})
+  render(<SelectionActions range={range} onComment={() => {}} onAskAgent={() => {}} onCopy={onCopy} />)
 
   const toolbar = screen.getByRole('toolbar', { name: /Actions for Line 12/ })
-  expect(screen.getByRole('button', { name: 'Comment' })).toBeTruthy()
-  expect(screen.getByRole('button', { name: 'Add selection to Chat' })).toBeTruthy()
-  expect(toolbar.querySelectorAll('button')).toHaveLength(2)
-  expect(toolbar.textContent).not.toContain('12 · new')
+  const buttons = [...toolbar.querySelectorAll('button')]
+  expect(buttons.map((button) => button.getAttribute('aria-label'))).toEqual([
+    'Copy selection with file path',
+    'Add selection to Chat',
+    'Comment'
+  ])
+  // Icon-only: the names live on aria-label and the tooltip, not in the strip.
+  expect(toolbar.textContent).toBe('')
+
+  fireEvent.click(screen.getByRole('button', { name: 'Copy selection with file path' }))
+  expect(onCopy).toHaveBeenCalledTimes(1)
+})
+
+test('copying answers in the glyph, since an icon-only button has no label to change', () => {
+  render(<SelectionActions range={range} onComment={() => {}} onAskAgent={() => {}} onCopy={() => {}} />)
+
+  const copy = screen.getByRole('button', { name: 'Copy selection with file path' })
+  expect(copy.getAttribute('data-tooltip')).toBe('Copy with path')
+  fireEvent.click(copy)
+  expect(copy.getAttribute('data-copied')).toBe('')
+  expect(copy.getAttribute('data-tooltip')).toBe('Copied')
 })
 
 test('Escape on a comment draft is consumed so the git panel stays open', () => {
@@ -64,14 +82,15 @@ test('Enter sends the comment and Shift+Enter stays in the field', () => {
   expect(onSave).toHaveBeenCalledWith('Please rename this.')
 })
 
+const thread = {
+  id: 'thread-1', body: 'Keep this check.', lineNumber: 8,
+  range, replies: [], resolved: false
+}
+
 test('edits a local thread through the same composer as a new comment', () => {
   const onEdit = mock(() => {})
-  render(<ReviewThreadCard
-    thread={{
-      id: 'thread-1', body: 'Keep this check.', lineNumber: 8,
-      range, replies: [], resolved: false
-    }}
-    onDelete={() => {}} onEdit={onEdit} onReply={() => {}} onToggleResolved={() => {}}
+  render(<ReviewThreadCard thread={thread}
+    onCopy={() => {}} onDelete={() => {}} onEdit={onEdit} onReply={() => {}} onToggleResolved={() => {}}
   />)
 
   fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
@@ -79,4 +98,17 @@ test('edits a local thread through the same composer as a new comment', () => {
   fireEvent.change(field, { target: { value: 'Rename this.' } })
   fireEvent.keyDown(field, { key: 'Enter' })
   expect(onEdit).toHaveBeenCalledWith('Rename this.')
+})
+
+test('offers Copy alongside the thread actions, and not while composing', () => {
+  const onCopy = mock(() => {})
+  render(<ReviewThreadCard thread={thread}
+    onCopy={onCopy} onDelete={() => {}} onEdit={() => {}} onReply={() => {}} onToggleResolved={() => {}}
+  />)
+
+  fireEvent.click(screen.getByRole('button', { name: 'Copy' }))
+  expect(onCopy).toHaveBeenCalledTimes(1)
+
+  fireEvent.click(screen.getByRole('button', { name: 'Reply' }))
+  expect(screen.queryByRole('button', { name: 'Copy' })).toBeNull()
 })

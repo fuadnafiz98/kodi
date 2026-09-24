@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { IconApproved, IconCheck, IconRefresh, IconReply } from '@pierre/icons'
+import { IconApproved, IconCheck, IconChevronSm, IconRefresh, IconReply } from '@pierre/icons'
 
 import type { RemoteReviewThread } from '../../../shared/contracts'
 import { GitHubMarkdownContent } from './GitHubMarkdownContent'
@@ -39,10 +39,28 @@ export function RemoteReviewThreadCard({
 }: RemoteReviewThreadCardProps): React.JSX.Element {
   const [replyBody, setReplyBody] = useState('')
   const [composing, setComposing] = useState(false)
+  // A resolved thread is settled business. It stays on its line — that is where
+  // it means something — but as one row until asked for, the way GitHub folds it
+  // away, so resolving on GitHub visibly clears the review here too.
+  const [showResolved, setShowResolved] = useState(false)
   const now = useReviewClock()
 
   const author = thread.comments[0]?.authorLogin ?? 'GitHub'
   const resolveLabel = thread.resolved ? 'Reopen thread on GitHub' : 'Resolve thread on GitHub'
+  const collapsed = thread.resolved && !showResolved
+  const commentCount = thread.comments.length
+
+  if (collapsed) {
+    return (
+      <article className="review-card review-thread review-remote-thread resolved collapsed">
+        <button type="button" className="review-remote-collapsed" onClick={() => setShowResolved(true)}>
+          <IconCheck aria-hidden="true" />
+          <strong>{author}</strong>
+          <span>resolved · {commentCount} {commentCount === 1 ? 'comment' : 'comments'}</span>
+        </button>
+      </article>
+    )
+  }
 
   return (
     <article className={`review-card review-thread review-remote-thread ${thread.resolved ? 'resolved' : ''}`}>
@@ -52,6 +70,11 @@ export function RemoteReviewThreadCard({
         <span className="review-remote-age">{formatCommentAge(thread.comments[0]?.createdAt ?? '', now)}</span>
         {thread.outdated ? <em data-tone="outdated">Outdated</em> : null}
         {thread.resolved ? <em data-tone="resolved">Resolved</em> : null}
+        {thread.resolved ? (
+          <button className="review-remote-resolve" type="button"
+            title="Hide this resolved thread" aria-label="Hide this resolved thread"
+            onClick={() => setShowResolved(false)}><IconChevronSm /></button>
+        ) : null}
         <button className="review-remote-resolve" type="button" disabled={pending}
           title={resolveLabel} aria-label={resolveLabel}
           onClick={() => onToggleResolved(thread.id, !thread.resolved)}>

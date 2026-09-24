@@ -247,6 +247,7 @@ const PULL_REQUEST_REVIEW_FIELDS = `${PULL_REQUEST_LIST_FIELDS},baseRefOid,headR
 // single file can be shown, while the files API streams a page at a time.
 const PULL_REQUEST_FILES_API_THRESHOLD = 300
 const EMPTY_TREE_OID = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'
+const GIT_REVISION_PATTERN = /^[0-9a-f]{7,64}$/i
 // Requested separately because older `gh` builds reject the whole command when a field name is unknown.
 const PULL_REQUEST_CHECK_FIELDS = 'statusCheckRollup,mergeable'
 const PASSING_CHECK_RESULTS = new Set(['SUCCESS', 'NEUTRAL', 'SKIPPED'])
@@ -321,6 +322,7 @@ const PULL_REQUEST_THREADS_QUERY = `
     repository(owner: $owner, name: $name) {
       pullRequest(number: $number) {
         body
+        headRefOid
         reviewThreads(first: 100, after: $threadCursor) {
           pageInfo { hasNextPage endCursor }
           nodes {
@@ -330,10 +332,12 @@ const PULL_REQUEST_THREADS_QUERY = `
             path
             line
             startLine
+            originalLine
+            originalStartLine
             diffSide
             comments(first: 100) {
               pageInfo { hasNextPage endCursor }
-              nodes { id body author { login avatarUrl } createdAt }
+              nodes { id body diffHunk author { login avatarUrl } createdAt }
             }
           }
         }
@@ -359,7 +363,7 @@ const PULL_REQUEST_THREAD_COMMENTS_QUERY = `
 `
 const MAX_CONVERSATION_PAGES = 20
 const MAX_CONVERSATION_BYTES = 8 * 1024 * 1024
-const CONVERSATION_CACHE_TTL_MS = 60_000
+const CONVERSATION_CACHE_TTL_MS = 10_000
 const conversationCache = new Map<string, { value: PullRequestConversation; fetchedAt: number }>()
 const conversationFlights = new Map<string, Promise<PullRequestConversation>>()
 
@@ -1089,14 +1093,22 @@ function parseRemoteReviewComments(value: unknown): RemoteReviewComment[] {
   return comments
 }
 
+/** GitHub hangs `diffHunk` off each comment; the thread's hunk is the first one's. */
+function firstComment(value: unknown): Record<string, unknown> | null {
+  const nodes = (value as { nodes?: unknown })?.nodes
+  if (!Array.isArray(nodes)) return null
+  const first = nodes.find((node) => typeof node === 'object' && node != null)
+  return (first as Record<string, unknown> | undefined) ?? null
+}
+
 // GitHub reports a thread's position on the diff side it was left on; anything
 // unexpected is treated as a right-side (addition) comment.
 export function parsePullRequestConversation(value: unknown): Omit<PullRequestConversation, 'available' | 'message'> {
   const pullRequest = (value as { data?: { repository?: { pullRequest?: unknown } } })?.data?.repository?.pullRequest
   if (typeof pullRequest !== 'object' || pullRequest == null) {
-    return { body: '', threads: [], reviews: [] }
+    return { body: '', headOid: '', threads: [], reviews: [] }
   }
-  const { body, reviewThreads, reviews } = pullRequest as Record<string, unknown>
+  const { body, headRefOid, reviewThreads, reviews } = pullRequest as Record<string, unknown>
   const threadNodes = (reviewThreads as { nodes?: unknown })?.nodes
   const threads: RemoteReviewThread[] = []
   if (Array.isArray(threadNodes)) {
@@ -1110,6 +1122,10 @@ export function parsePullRequestConversation(value: unknown): Omit<PullRequestCo
         path,
         line: typeof thread.line === 'number' ? thread.line : null,
         startLine: typeof thread.startLine === 'number' ? thread.startLine : null,
+        originalLine: typeof thread.originalLine === 'number' ? thread.originalLine : null,
+        originalStartLine: typeof thread.originalStartLine === 'number' ? thread.originalStartLine : null,
+        // Only the first comment carries the hunk the thread was opened on.
+        diffHunk: readString(firstComment(thread.comments)?.diffHunk, 8192),
         side: thread.diffSide === 'LEFT' ? 'LEFT' : 'RIGHT',
         resolved: thread.isResolved === true,
         outdated: thread.isOutdated === true,
@@ -1134,7 +1150,7 @@ export function parsePullRequestConversation(value: unknown): Omit<PullRequestCo
       })
     }
   }
-  return { body: readString(body), threads, reviews: summaries }
+  return { body: readString(body), headOid: readString(headRefOid, 64), threads, reviews: summaries }
 }
 
 export function pullRequestTargetsRemotes(remotes: readonly GitRemote[], pullRequestUrl: string): boolean {
@@ -1928,6 +1944,29 @@ export class RepositoryService {
     return comparison
   }
 
+  /**
+   * One side of a reviewed file at a commit. A patch only carries its hunks, so
+   * the review asks for this to tokenize the whole file: a block comment or
+   * docstring that closes between two hunks otherwise leaks into the next one.
+   */
+  async getRevisionFile(revision: unknown, path: unknown): Promise<DiffFileContents | null> {
+    this.#requireGitRepository()
+    if (typeof revision !== 'string' || !GIT_REVISION_PATTERN.test(revision)) {
+      throw new Error('The revision is invalid.')
+    }
+    if (typeof path !== 'string' || path === '' || /[\n\0]/.test(path) || isAbsolute(path)) {
+      throw new Error('The revision path is invalid.')
+    }
+    return (await this.#readHeadFile(path, revision))?.file ?? null
+  }
+
+  async hasRevision(revision: unknown): Promise<boolean> {
+    this.#requireGitRepository()
+    if (typeof revision !== 'string' || !GIT_REVISION_PATTERN.test(revision)) return false
+    const read = await this.#readObject(`${revision}^{commit}`).catch(() => null)
+    return read != null && !read.missing
+  }
+
   async #loadComparison(path: string): Promise<FileComparison> {
     const root = this.#requireRoot()
     const snapshot = this.#requireSnapshot()
@@ -2375,7 +2414,10 @@ export class RepositoryService {
     })
   }
 
-  async getPullRequestConversation(selector: number | string): Promise<PullRequestConversation> {
+  async getPullRequestConversation(
+    selector: number | string,
+    options: { force?: boolean } = {}
+  ): Promise<PullRequestConversation> {
     this.#requireGitRepository()
     const normalizedSelector = normalizePullRequestSelector(selector)
     const ghExecutable = await getGhExecutable()
@@ -2392,7 +2434,10 @@ export class RepositoryService {
         cached = await this.#readConversationCache(cacheKey)
         if (cached != null) conversationCache.set(cacheKey, cached)
       }
-      if (cached != null && attemptedAt - cached.fetchedAt < CONVERSATION_CACHE_TTL_MS) {
+      // `force` is the reader asking, or a write of our own that has to be read
+      // back. Either way a cached answer is the wrong answer.
+      if (options.force !== true && cached != null
+        && attemptedAt - cached.fetchedAt < CONVERSATION_CACHE_TTL_MS) {
         return { ...cached.value, stale: false, attemptedAt }
       }
       const pending = conversationFlights.get(cacheKey)
@@ -2427,6 +2472,7 @@ export class RepositoryService {
         available: false,
         message: gitHubIntegrationErrorMessage(error),
         body: '',
+        headOid: '',
         threads: [],
         reviews: [],
         complete: false,
@@ -2480,6 +2526,7 @@ export class RepositoryService {
     const threads = new Map<string, RemoteReviewThread>()
     const reviews = new Map<string, RemoteReviewSummary>()
     let body = ''
+    let headOid = ''
     let threadCursor: string | null = null
     let reviewCursor: string | null = null
     let pages = 0
@@ -2504,6 +2551,7 @@ export class RepositoryService {
       const raw = JSON.parse(result.stdout.toString('utf8')) as unknown
       const parsed = parsePullRequestConversation(raw)
       body = parsed.body || body
+      headOid = parsed.headOid || headOid
       for (const thread of parsed.threads) threads.set(thread.id, thread)
       for (const review of parsed.reviews) reviews.set(review.id, review)
       const pullRequest = (raw as { data?: { repository?: { pullRequest?: Record<string, unknown> } } })
@@ -2537,6 +2585,7 @@ export class RepositoryService {
       available: true,
       message: null,
       body,
+      headOid,
       threads: [...threads.values()],
       reviews: [...reviews.values()],
       complete,
@@ -3179,12 +3228,16 @@ export class RepositoryService {
     selector: number | string,
     onProgress?: PullRequestProgressListener,
     requestId: string = randomUUID(),
-    intent: PullRequestReviewIntent = 'foreground'
+    intent: PullRequestReviewIntent = 'foreground',
+    refresh = false
   ): Promise<PullRequestReview> {
     this.#requireGitRepository()
     const normalized = normalizePullRequestSelector(selector)
     const existing = this.#reviewFlights.get(normalized)
-    if (existing != null) {
+    // A refresh joins only a flight that is itself going to GitHub. Joining one
+    // that is replaying the disk cache would hand back the head the caller asked
+    // to leave behind, which is exactly the bug this parameter exists to close.
+    if (existing != null && !(refresh && !existing.refresh)) {
       // Whoever asked first is fetching it. Joining replays the metadata and every
       // page already emitted, so a second reader is exactly as far along as the first.
       if (intent === 'foreground') {
@@ -3201,7 +3254,13 @@ export class RepositoryService {
       }
     }
 
+    // Superseding a cache replay that nobody is left watching: its revalidation
+    // would otherwise land after this fetch and flag the selector stale again,
+    // costing a third fetch on the next open.
+    if (existing != null && !existing.foregroundAttached) existing.abort.abort()
+
     const flight = new PullRequestReviewFlight()
+    flight.refresh = refresh
     if (intent === 'foreground') {
       flight.attach(requestId)
       this.#reviewRequests.set(requestId, flight)
@@ -3217,7 +3276,8 @@ export class RepositoryService {
           emit,
           // A warmup that gains a foreground reader mid-flight stops queueing
           // behind speculative work — the semaphore re-reads this at every hop.
-          () => (flight.foregroundAttached ? 'interactive' : flightLane)
+          () => (flight.foregroundAttached ? 'interactive' : flightLane),
+          refresh
         ))
       return pullRequestReviewReply(review, onProgress != null && flight.streamed)
     } finally {
@@ -3232,9 +3292,13 @@ export class RepositoryService {
     normalizedSelector: string,
     signal: AbortSignal,
     emit: PullRequestProgressListener,
-    lane: CommandLaneSource
+    lane: CommandLaneSource,
+    refresh = false
   ): Promise<PullRequestReview> {
-    if (this.#reviewsRequiringRefresh.delete(normalizedSelector)) {
+    // `#reviewsRequiringRefresh` only knows about drift a *previous* cached open
+    // happened to notice. A reader adopting a pushed head knows it first hand, so
+    // they say so and the cache is skipped outright.
+    if (refresh || this.#reviewsRequiringRefresh.delete(normalizedSelector)) {
       return this.#fetchPullRequestReview(await getGhExecutable(), normalizedSelector, signal, emit, lane)
     }
     const cached = await this.#openCachedPullRequestReview(normalizedSelector, emit)

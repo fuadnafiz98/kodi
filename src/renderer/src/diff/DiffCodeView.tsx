@@ -1,4 +1,4 @@
-import { useMemo, type CSSProperties } from 'react'
+import { useCallback, useMemo, type CSSProperties } from 'react'
 import type { DiffLineAnnotation, LineAnnotation, SelectedLineRange } from '@pierre/diffs'
 import { File, MultiFileDiff, Virtualizer } from '@pierre/diffs/react'
 
@@ -6,6 +6,7 @@ import type { FileComparison } from '../../../shared/contracts'
 import type { DiffStyle } from '../app/AppView'
 import { LIVE_CODE_FONT_SIZE_PROPERTY, LIVE_CODE_LINE_HEIGHT_PROPERTY } from './codeZoom'
 import { reportCopiedPath, syncCopyFilePathLifecycle } from './copyFilePath'
+import { GutterActions } from './GutterActions'
 import { syncDragGuideLifecycle } from './dragSelection'
 import { syncSplitDiffResizeLifecycle } from './splitDiffResize'
 import { syncReviewCaretLifecycle } from '../review/reviewCaret'
@@ -69,6 +70,8 @@ export interface DiffCodeViewProps {
   setReviewCursor(cursor: ReviewCursor): void
 }
 
+type HoveredLine = { lineNumber: number; side?: 'additions' | 'deletions' }
+
 /** The code itself: one file while editing, a diff otherwise. */
 export function DiffCodeView({
   comparison,
@@ -93,6 +96,31 @@ export function DiffCodeView({
     '--diffs-font-features': '"calt" 1, "liga" 1'
   }) as CSSProperties, [preferences])
 
+  // The custom gutter utility means the viewer's own utility click is gone —
+  // renderGutterUtility and onGutterUtilityClick are mutually exclusive — so the
+  // `+` answers for itself with the single-line range the library used to build.
+  const commentOnHoveredLine = useCallback((hovered: HoveredLine | undefined) => {
+    if (hovered == null) return
+    // A press inside the lines already selected keeps that range — collapsing
+    // the draft to the pressed line would throw the selection away.
+    if (selectedLines != null) {
+      const first = Math.min(selectedLines.start, selectedLines.end)
+      const last = Math.max(selectedLines.start, selectedLines.end)
+      const sideMatches = selectedLines.side == null
+        || hovered.side == null
+        || selectedLines.side === hovered.side
+      if (hovered.lineNumber >= first && hovered.lineNumber <= last && sideMatches) {
+        beginComment(selectedLines)
+        return
+      }
+    }
+    beginComment({
+      start: hovered.lineNumber,
+      end: hovered.lineNumber,
+      ...(hovered.side != null ? { side: hovered.side } : {})
+    })
+  }, [beginComment, selectedLines])
+
   const interactionOptions = useMemo(() => ({
     enableLineSelection: DIFF_OPTIONS.enableLineSelection,
     enableGutterUtility: DIFF_OPTIONS.enableGutterUtility,
@@ -104,7 +132,6 @@ export function DiffCodeView({
       }
       beginComment(range)
     },
-    onGutterUtilityClick: beginComment,
     onPostRender: (node: HTMLElement, _instance: unknown, phase: string) => {
       syncDragGuideLifecycle(node, phase, beginComment)
       syncSplitDiffResizeLifecycle(node, phase)
@@ -155,6 +182,9 @@ export function DiffCodeView({
           selectedLines={selectedLines}
           lineAnnotations={fileAnnotations}
           renderAnnotation={renderFileAnnotation}
+          renderGutterUtility={(getHoveredLine) => (
+            <GutterActions onComment={() => commentOnHoveredLine(getHoveredLine())} />
+          )}
           className="pierre-diff editor-file"
           style={codeStyle}
         />
@@ -170,6 +200,9 @@ export function DiffCodeView({
     selectedLines,
     lineAnnotations: diffAnnotations,
     renderAnnotation: renderDiffAnnotation,
+    renderGutterUtility: (getHoveredLine: () => HoveredLine | undefined) => (
+      <GutterActions onComment={() => commentOnHoveredLine(getHoveredLine())} />
+    ),
     className: 'pierre-diff',
     style: codeStyle
   }

@@ -59,6 +59,10 @@ export interface ReviewCodeViewSlots {
     item: CodeViewItem<ReviewAnnotationMetadata>
   ): React.JSX.Element
   footer?(): React.ReactNode
+  gutterUtility(
+    getHoveredLine: () => { lineNumber: number; side?: 'additions' | 'deletions' } | undefined,
+    item: CodeViewItem<ReviewAnnotationMetadata>
+  ): React.ReactNode
 }
 
 function codeViewSlotProps(slots: ReviewCodeViewSlots) {
@@ -67,6 +71,7 @@ function codeViewSlotProps(slots: ReviewCodeViewSlots) {
     renderHeaderPrefix: slots.headerPrefix,
     renderHeaderMetadata: slots.headerMetadata,
     renderAnnotation: slots.annotation,
+    renderGutterUtility: slots.gutterUtility,
     renderCodeViewFooter: slots.footer
   }
 }

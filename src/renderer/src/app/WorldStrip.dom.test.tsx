@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from 'bun:test'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { useState } from 'react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 
 import type { PullRequestReview, RepositorySnapshot } from '../../../shared/contracts'
 import { WorldStrip } from './WorldStrip'
@@ -63,7 +64,7 @@ test('renders browser-style tab controls and routes focus, close, and new action
   const closed: string[] = []
   let created = 0
 
-  render(<WorldStrip worlds={[desk, patch]} activeWorldId={patch.worldId} collisionCount={2}
+  render(<WorldStrip worlds={[desk, patch]} activeWorldId={patch.worldId}
     onFocus={(worldId) => { focused.push(worldId) }}
     onClose={(worldId) => { closed.push(worldId) }}
     onNew={() => { created += 1 }} />)
@@ -72,7 +73,7 @@ test('renders browser-style tab controls and routes focus, close, and new action
   expect(screen.queryByText('Review')).toBeNull()
   expect(screen.queryByText('⌘⇧[ ]')).toBeNull()
   expect(screen.getByRole('tab', { name: 'alpha' }).getAttribute('aria-selected')).toBe('false')
-  expect(screen.getByRole('tab', { name: /#221 · acme\/alpha/ }).getAttribute('aria-selected')).toBe('true')
+  expect(screen.getByRole('tab', { name: /#221 · alpha/ }).getAttribute('aria-selected')).toBe('true')
 
   fireEvent.click(screen.getByRole('tab', { name: 'alpha' }))
   fireEvent.click(screen.getByRole('button', { name: 'Close alpha tab' }))
@@ -91,14 +92,14 @@ test('keeps an active overflow tab visible and makes the remaining tabs searchab
   const active = worlds.at(-1)
   if (active == null) throw new Error('Expected an active tab fixture.')
 
-  render(<WorldStrip worlds={worlds} activeWorldId={active.worldId} collisionCount={0}
+  render(<WorldStrip worlds={worlds} activeWorldId={active.worldId}
     onFocus={() => {}} onClose={() => {}} onNew={() => {}} />)
 
-  expect(screen.getByRole('tab', { name: /#8 · acme\/repo-8/ })).toBeTruthy()
+  expect(screen.getByRole('tab', { name: /#8 · repo-8/ })).toBeTruthy()
   fireEvent.click(screen.getByLabelText(/more tabs/))
   fireEvent.change(screen.getByPlaceholderText('Search tabs'), { target: { value: 'repo-7' } })
-  expect(screen.getByRole('menuitem', { name: /#7 · acme\/repo-7/ })).toBeTruthy()
-  expect(screen.queryByRole('menuitem', { name: /#6 · acme\/repo-6/ })).toBeNull()
+  expect(screen.getByRole('menuitem', { name: /#7 · repo-7/ })).toBeTruthy()
+  expect(screen.queryByRole('menuitem', { name: /#6 · repo-6/ })).toBeNull()
 })
 
 test('closes the overflow menu after choosing a tab', () => {
@@ -107,14 +108,14 @@ test('closes the overflow menu after choosing a tab', () => {
     worlds.push(createPatchWorld(snapshot, review(number, `acme/repo-${number}`), number, 'ready'))
   }
   const focused: string[] = []
-  render(<WorldStrip worlds={worlds} activeWorldId={desk.worldId} collisionCount={0}
+  render(<WorldStrip worlds={worlds} activeWorldId={desk.worldId}
     onFocus={(worldId) => { focused.push(worldId) }} onClose={() => {}} onNew={() => {}} />)
 
   const details = screen.getByLabelText(/more tabs/).closest('details')
   expect(details).toBeTruthy()
   fireEvent.click(screen.getByLabelText(/more tabs/))
   expect(details?.open).toBe(true)
-  fireEvent.click(screen.getByRole('menuitem', { name: /#7 · acme\/repo-7/ }))
+  fireEvent.click(screen.getByRole('menuitem', { name: /#7 · repo-7/ }))
   expect(focused.at(-1)).toContain('repo-7')
   expect(details?.open).toBe(false)
 })
@@ -122,9 +123,34 @@ test('closes the overflow menu after choosing a tab', () => {
 test('arrow keys move focus along the tablist', () => {
   const focused: string[] = []
   const patch = createPatchWorld(snapshot, review(221), 1, 'ready')
-  render(<WorldStrip worlds={[desk, patch]} activeWorldId={desk.worldId} collisionCount={0}
+  render(<WorldStrip worlds={[desk, patch]} activeWorldId={desk.worldId}
     onFocus={(worldId) => { focused.push(worldId) }} onClose={() => {}} onNew={() => {}} />)
 
   fireEvent.keyDown(screen.getByRole('tablist'), { key: 'ArrowRight' })
   expect(focused).toEqual([patch.worldId])
+})
+
+test('closing a tab leaves focus on the tab that takes over, not the new-tab button', async () => {
+  const patch = createPatchWorld(snapshot, review(221), 1, 'ready')
+
+  function Strip(): React.JSX.Element {
+    const [worlds, setWorlds] = useState<ReviewWorld[]>([desk, patch])
+    const [activeWorldId, setActiveWorldId] = useState(patch.worldId)
+    return <WorldStrip worlds={worlds} activeWorldId={activeWorldId}
+      onFocus={(worldId) => { setActiveWorldId(worldId) }}
+      onClose={(worldId) => {
+        setWorlds((current) => current.filter((world) => world.worldId !== worldId))
+        if (worldId === activeWorldId) setActiveWorldId(desk.worldId)
+      }}
+      onNew={() => {}} />
+  }
+
+  render(<Strip />)
+  fireEvent.click(screen.getByRole('button', { name: /Close .*#221/ }))
+  // Compared as a boolean: waitFor's first pass runs before the focus frame,
+  // and a failed `toBe` between two happy-dom elements spends seconds printing
+  // their object graphs — enough to push this test past its timeout.
+  await waitFor(() => {
+    expect(document.activeElement === screen.getByRole('tab', { name: 'alpha' })).toBe(true)
+  })
 })

@@ -30,9 +30,14 @@ export interface AppPreferences {
   // Bumped when a default shortcut is retired, so the migration that drops the
   // old default from storage runs once instead of on every load.
   keybindingsVersion: number
+  // Bumped when a default setting changes, so a profile saved under the old
+  // default adopts the new one once and keeps any choice made after that.
+  defaultsVersion: number
 }
 
 export const KEYBINDINGS_VERSION = 2
+/** 1: word wrap became the default. */
+export const DEFAULTS_VERSION = 1
 
 export const CODE_FONTS: Record<CodeFont, { label: string; fontFamily: string }> = {
   'fira-code': {
@@ -83,14 +88,15 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   interfaceFont: 'inter',
   interfaceFontScale: 100,
   showLineNumbers: true,
-  wordWrap: false,
+  wordWrap: true,
   foldUnchanged: true,
   autosaveOnBlur: false,
   terminalScrollback: 5_000,
   restoreLastFolder: true,
   inboxRepos: [],
   keybindings: DEFAULT_KEYBINDINGS,
-  keybindingsVersion: KEYBINDINGS_VERSION
+  keybindingsVersion: KEYBINDINGS_VERSION,
+  defaultsVersion: DEFAULTS_VERSION
 }
 
 const STORAGE_KEY = 'kodi:preferences:v1'
@@ -100,6 +106,7 @@ export function loadPreferences(): AppPreferences {
     const stored = localStorage.getItem(STORAGE_KEY)
     if (stored == null) return DEFAULT_PREFERENCES
     const parsed = JSON.parse(stored) as Partial<AppPreferences>
+    const savedUnderOldDefaults = (parsed.defaultsVersion ?? 0) < DEFAULTS_VERSION
     return {
       codeFont: parsed.codeFont != null && Object.hasOwn(CODE_FONTS, parsed.codeFont)
         ? parsed.codeFont
@@ -119,7 +126,7 @@ export function loadPreferences(): AppPreferences {
       showLineNumbers: typeof parsed.showLineNumbers === 'boolean'
         ? parsed.showLineNumbers
         : DEFAULT_PREFERENCES.showLineNumbers,
-      wordWrap: typeof parsed.wordWrap === 'boolean' ? parsed.wordWrap : DEFAULT_PREFERENCES.wordWrap,
+      wordWrap: typeof parsed.wordWrap === 'boolean' && !savedUnderOldDefaults ? parsed.wordWrap : DEFAULT_PREFERENCES.wordWrap,
       foldUnchanged: typeof parsed.foldUnchanged === 'boolean' ? parsed.foldUnchanged : DEFAULT_PREFERENCES.foldUnchanged,
       autosaveOnBlur: typeof parsed.autosaveOnBlur === 'boolean'
         ? parsed.autosaveOnBlur
@@ -135,7 +142,8 @@ export function loadPreferences(): AppPreferences {
         : DEFAULT_PREFERENCES.restoreLastFolder,
       inboxRepos: normalizeInboxRepos(parsed.inboxRepos),
       keybindings: loadKeybindings(parsed.keybindings, parsed.keybindingsVersion),
-      keybindingsVersion: KEYBINDINGS_VERSION
+      keybindingsVersion: KEYBINDINGS_VERSION,
+      defaultsVersion: DEFAULTS_VERSION
     }
   } catch {
     return DEFAULT_PREFERENCES

@@ -151,7 +151,6 @@ const AgentSessionLayout = memo(function AgentSessionLayout(view: WorkspaceLayou
   return <>
     <AppChrome
       view={view}
-      collisionCount={collisionPaths.size}
       activeNewWorld={activeNewWorld}
       agentOpen={agent.open}
       onAgentToggle={agent.toggle}
@@ -285,7 +284,7 @@ export function App({
   )
   const [error, setError] = useState<string | null>(null)
   const [sidebarVisible, setSidebarVisible] = useState(true)
-  const [diffStyle, setDiffStyle] = useState<DiffStyle>('split')
+  const [diffStyle, setDiffStyle] = useState<DiffStyle>('unified')
   const [workspaceView, setWorkspaceView] = useState<WorkspaceView>(cachedPaint.workspaceView)
   const [preferences, setPreferences] = useState<AppPreferences>(initialPreferences)
   const [settingsOpen, setSettingsOpen] = useState(false)

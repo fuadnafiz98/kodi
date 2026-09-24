@@ -95,8 +95,8 @@ test('simultaneous pull-request requests keep independent tabs', async () => {
   } as unknown as RepositoryApi
   const { result } = renderHook(() => useGitWorkflow(workflowOptions()))
 
-  let firstRequest!: Promise<void>
-  let secondRequest!: Promise<void>
+  let firstRequest!: Promise<boolean>
+  let secondRequest!: Promise<boolean>
   act(() => {
     firstRequest = result.current.openPullRequestReview(1)
     secondRequest = result.current.openPullRequestReview(2)
@@ -143,7 +143,7 @@ test('a rejected load for a background world does not raise the global error', a
   const { result } = renderHook(() => useGitWorkflow({ ...workflowOptions(), onError }))
   const metadataReview = { ...review(9), files: [], patch: '' }
 
-  let request!: Promise<void>
+  let request!: Promise<boolean>
   act(() => { request = result.current.openPullRequestReview(9) })
   act(() => progressListener?.({
     kind: 'metadata', selector: '9', review: metadataReview, root: '/repo', requestId
@@ -182,7 +182,7 @@ test('a PR stream keeps updating its world after the user returns to Desk', asyn
   const finalReview = review(3)
   const metadataReview = { ...finalReview, files: [], patch: '' }
 
-  let request!: Promise<void>
+  let request!: Promise<boolean>
   act(() => { request = result.current.openPullRequestReview(3) })
   act(() => progressListener?.({
     kind: 'metadata', selector: '3', review: metadataReview, root: '/repo', requestId
@@ -415,7 +415,7 @@ test('a deep-linked pull request pops a New tab before the repository resolve re
   expect(result.current.worlds.some((world) => world.source === 'patch')).toBe(true)
 })
 
-test('opening and navigating a patch does not advance the checkpoint', async () => {
+test('navigating between the desk and a patch keeps the patch tab loaded', async () => {
   window.repository = {
     getPullRequestReview: async () => review(4),
     activateRepository: async () => repositorySnapshot,
@@ -425,20 +425,20 @@ test('opening and navigating a patch does not advance the checkpoint', async () 
   const { result } = renderHook(() => useGitWorkflow(workflowOptions()))
 
   await act(() => result.current.openPullRequestReview(4))
-  expect(result.current.reviewCheckpoint).toBeNull()
-
   const deskWorldId = result.current.worlds.find((world) => world.source === 'desk')?.worldId
   const patchWorldId = result.current.worlds.find((world) => world.source === 'patch')?.worldId
   act(() => result.current.rememberReviewScroll(640))
   await act(() => result.current.focusWorld(deskWorldId!))
   await act(() => result.current.focusWorld(patchWorldId!))
-  expect(result.current.reviewCheckpoint).toBeNull()
 
-  act(() => result.current.setReviewCheckpoint())
-  expect(result.current.reviewCheckpoint?.headOid).toBe('4'.repeat(40))
+  expect(result.current.activeWorld?.worldId).toBe(patchWorldId)
+  expect(result.current.activeWorld?.source === 'patch'
+    ? result.current.activeWorld.loadStatus
+    : null).toBe('ready')
+  expect(result.current.initialReviewScrollTop).toBe(640)
 })
 
-test('a successful submitted review advances the checkpoint', async () => {
+test('a successful submitted review reports back from GitHub', async () => {
   const submitPullRequestReview = mock(async () => {})
   window.repository = {
     getPullRequestReview: async () => review(5),
@@ -465,8 +465,7 @@ test('a successful submitted review advances the checkpoint', async () => {
     'Looks good.',
     []
   )
-  expect(result.current.reviewCheckpoint?.headOid).toBe('5'.repeat(40))
-  expect(result.current.submissionMessage).toBe('Review submitted to GitHub. Checkpoint advanced.')
+  expect(result.current.submissionMessage).toBe('Review submitted to GitHub.')
 })
 
 test('a superseded local review does not raise a cancelled error banner', async () => {

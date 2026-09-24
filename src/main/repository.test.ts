@@ -1884,6 +1884,34 @@ describe('RepositoryService', () => {
     }
   })
 
+  it('reads a text file at a commit for review hydration', async () => {
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'kodi-revision-file-'))
+    const repository = new RepositoryService()
+    try {
+      await initRepository(repositoryPath)
+      await writeFile(join(repositoryPath, 'value.ts'), 'export const value = 1\n', 'utf8')
+      await writeFile(join(repositoryPath, 'icon.bin'), Buffer.from([0, 1, 2, 3]))
+      await commitAll(repositoryPath, 'Initial commit')
+      const head = (await runGitAllowingDifferences(repositoryPath, 'rev-parse', 'HEAD')).trim()
+      await writeFile(join(repositoryPath, 'value.ts'), 'export const value = 2\n', 'utf8')
+
+      await repository.open(repositoryPath)
+      await repository.refresh()
+
+      expect((await repository.getRevisionFile(head, 'value.ts'))?.contents).toBe('export const value = 1\n')
+      expect(await repository.getRevisionFile(head, 'missing.ts')).toBeNull()
+      expect(await repository.getRevisionFile(head, 'icon.bin')).toBeNull()
+      await expect(repository.getRevisionFile('HEAD', 'value.ts')).rejects.toThrow('revision')
+      await expect(repository.getRevisionFile(head, '/etc/passwd')).rejects.toThrow('path')
+      expect(await repository.hasRevision(head)).toBe(true)
+      expect(await repository.hasRevision('0'.repeat(40))).toBe(false)
+      expect(await repository.hasRevision('HEAD')).toBe(false)
+    } finally {
+      repository.dispose()
+      await rm(repositoryPath, { recursive: true, force: true })
+    }
+  })
+
   it('updates the status in place when a clean file becomes modified', async () => {
     const repositoryPath = await mkdtemp(join(tmpdir(), 'kodi-save-status-'))
     const repository = new RepositoryService()
@@ -2529,6 +2557,7 @@ describe('parsePullRequestConversation', () => {
       repository: {
         pullRequest: {
           body: 'Adds the review inbox.',
+          headRefOid: 'f'.repeat(40),
           reviewThreads: {
             nodes: [
               {
@@ -2538,10 +2567,12 @@ describe('parsePullRequestConversation', () => {
                 path: 'src/app.ts',
                 line: 12,
                 startLine: 10,
+                originalLine: 12,
+                originalStartLine: 10,
                 diffSide: 'RIGHT',
                 comments: {
                   nodes: [
-                    { id: 'comment-1', body: 'Rename this.', author: { login: 'Reviewer', avatarUrl: 'https://avatars.example/r.png' }, createdAt: '2026-08-17T10:00:00Z' }
+                    { id: 'comment-1', body: 'Rename this.', diffHunk: '@@ -9,4 +9,5 @@\n const a = 1', author: { login: 'Reviewer', avatarUrl: 'https://avatars.example/r.png' }, createdAt: '2026-08-17T10:00:00Z' }
                   ]
                 }
               },
@@ -2552,6 +2583,8 @@ describe('parsePullRequestConversation', () => {
                 path: 'src/old.ts',
                 line: null,
                 startLine: null,
+                originalLine: 40,
+                originalStartLine: null,
                 diffSide: 'LEFT',
                 comments: { nodes: [] }
               }
@@ -2570,12 +2603,16 @@ describe('parsePullRequestConversation', () => {
   it('reads the description, threads, and submitted reviews', () => {
     const conversation = parsePullRequestConversation(payload)
     expect(conversation.body).toBe('Adds the review inbox.')
+    expect(conversation.headOid).toBe('f'.repeat(40))
     expect(conversation.threads).toEqual([
       {
         id: 'thread-1',
         path: 'src/app.ts',
         line: 12,
         startLine: 10,
+        originalLine: 12,
+        originalStartLine: 10,
+        diffHunk: '@@ -9,4 +9,5 @@\n const a = 1',
         side: 'RIGHT',
         resolved: false,
         outdated: false,
@@ -2584,10 +2621,15 @@ describe('parsePullRequestConversation', () => {
         ]
       },
       {
+        // An outdated thread has no position on the current diff; where it was
+        // written is the only address it still has.
         id: 'thread-2',
         path: 'src/old.ts',
         line: null,
         startLine: null,
+        originalLine: 40,
+        originalStartLine: null,
+        diffHunk: '',
         side: 'LEFT',
         resolved: true,
         outdated: true,
@@ -2600,10 +2642,10 @@ describe('parsePullRequestConversation', () => {
   })
 
   it('returns empty results for absent or malformed payloads', () => {
-    expect(parsePullRequestConversation(null)).toEqual({ body: '', threads: [], reviews: [] })
-    expect(parsePullRequestConversation({ data: {} })).toEqual({ body: '', threads: [], reviews: [] })
+    expect(parsePullRequestConversation(null)).toEqual({ body: '', headOid: '', threads: [], reviews: [] })
+    expect(parsePullRequestConversation({ data: {} })).toEqual({ body: '', headOid: '', threads: [], reviews: [] })
     expect(parsePullRequestConversation({ data: { repository: { pullRequest: {} } } }))
-      .toEqual({ body: '', threads: [], reviews: [] })
+      .toEqual({ body: '', headOid: '', threads: [], reviews: [] })
   })
 
   it('drops threads and comments that cannot be addressed', () => {

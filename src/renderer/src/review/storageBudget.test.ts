@@ -7,6 +7,7 @@ import {
   forgetStorageKey,
   loadStorageIndex,
   persistManagedValue,
+  purgeRetiredStorage,
   rebuildStorageIndex,
   touchStorageKey,
   type BudgetStorage
@@ -69,5 +70,30 @@ describe('storageBudget', () => {
     expect(storage.getItem('kodi:drafts:v1:/repo')).toBe('hello')
     forgetStorageKey(storage, 'kodi:drafts:v1:/repo')
     expect(loadStorageIndex(storage)['kodi:drafts:v1:/repo']).toBeUndefined()
+  })
+
+  // Review checkpoints are gone. Their keys are not, on any machine that ever
+  // set one, and they charge against the same budget the live keys share.
+  it('sweeps keys left behind by a removed feature, and their index entries', () => {
+    const storage = createStorage({
+      'kodi:review-checkpoint:/repo:https://github.com/acme/repo/pull/7': 'stale',
+      'kodi:viewed-files:/repo': 'keep'
+    })
+    touchStorageKey(storage, 'kodi:review-checkpoint:/repo:https://github.com/acme/repo/pull/7', 5, 1)
+
+    expect(purgeRetiredStorage(storage))
+      .toEqual(['kodi:review-checkpoint:/repo:https://github.com/acme/repo/pull/7'])
+    expect(storage.getItem('kodi:review-checkpoint:/repo:https://github.com/acme/repo/pull/7')).toBeNull()
+    expect(loadStorageIndex(storage)['kodi:review-checkpoint:/repo:https://github.com/acme/repo/pull/7'])
+      .toBeUndefined()
+    expect(storage.getItem('kodi:viewed-files:/repo')).toBe('keep')
+    expect(purgeRetiredStorage(storage)).toEqual([])
+  })
+
+  it('sweeps retired keys on the next managed write', () => {
+    const storage = createStorage({ 'kodi:review-checkpoint:/repo:pr': 'stale' })
+    persistManagedValue(storage, 'kodi:review-threads:/repo:pr', 'threads')
+    expect(storage.getItem('kodi:review-checkpoint:/repo:pr')).toBeNull()
+    expect(storage.getItem('kodi:review-threads:/repo:pr')).toBe('threads')
   })
 })

@@ -5,8 +5,6 @@ import {
   type GitIntegrationSnapshot,
   type LocalBranchReview,
   type LocalReviewProgress,
-  type OmittedDiffFile,
-  type PullRequestFile,
   type PullRequestFolderPreview,
   type PullRequestInboxSnapshot,
   type PullRequestMergeStrategy,
@@ -19,17 +17,11 @@ import { extractGitHubPullRequestUrl } from '../../../shared/pullRequestUrl'
 import type { WorkspaceView } from '../app/AppView'
 import type { ConfirmRequest } from '../app/ConfirmDialog'
 import { reviewFolderChip } from '../github/pullRequestOpen'
+import { reviewSubmissionRequest, reviewSubmittedMessage } from '../github/reviewSubmission'
+import { showToast } from '../app/toast'
 import { getErrorMessage, requireRepositoryApi } from '../explorer/repositoryApi'
 import { automaticWorkspaceView, firstOpenPathForSnapshot } from '../explorer/workspaceMode'
 import { useReviewWorlds, type ReviewWorld } from '../review/useReviewWorlds'
-import {
-  compareReviewCheckpoint,
-  createReviewCheckpoint,
-  createSinceReviewFromPages,
-  filterReviewPatchPages,
-  loadReviewCheckpoint,
-  saveReviewCheckpoint
-} from '../review/reviewCheckpoints'
 
 interface UseGitWorkflowOptions {
   snapshot: RepositorySnapshot | null
@@ -79,46 +71,6 @@ export function isPanelDataStale(
   return now - entry.fetchedAt >= ttlMs
 }
 
-interface PullRequestPatchContent {
-  pages: readonly string[]
-  files: PullRequestFile[]
-  omittedFiles: OmittedDiffFile[]
-}
-
-/**
- * A review that streamed its pages replies without them — the patch would
- * otherwise cross IPC twice — so a caller who wants the whole thing, such as a
- * released `since` world being restored, has to read the stream as well.
- */
-async function fetchPullRequestPatch(root: string, url: string): Promise<PullRequestPatchContent> {
-  const requestId = crypto.randomUUID()
-  let pages: string[] = []
-  let files: PullRequestFile[] = []
-  let omittedFiles: OmittedDiffFile[] = []
-  const stopListening = requireRepositoryApi().onPullRequestReviewProgress((progress) => {
-    if (progress.requestId !== requestId || progress.root !== root) return
-    if (progress.kind === 'files') {
-      pages.push(progress.patch)
-      files.push(...progress.files)
-      omittedFiles.push(...progress.omittedFiles)
-      return
-    }
-  })
-  try {
-    const review = await requireRepositoryApi().getPullRequestReview(root, url, requestId)
-    if (review.patch !== '' || review.files.length > 0) {
-      return {
-        pages: review.patch === '' ? [] : [review.patch],
-        files: review.files,
-        omittedFiles: review.omittedFiles
-      }
-    }
-    return { pages, files, omittedFiles }
-  } finally {
-    stopListening()
-  }
-}
-
 export function useGitWorkflow({
   snapshot,
   selectedPath,
@@ -139,7 +91,6 @@ export function useGitWorkflow({
   const [actionKey, setActionKey] = useState<string | null>(null)
   const [submittingReview, setSubmittingReview] = useState(false)
   const [submissionMessage, setSubmissionMessage] = useState<string | null>(null)
-  const [checkpointRevision, setCheckpointRevision] = useState(0)
   const activateRepository = useCallback(
     (root: string) => requireRepositoryApi().activateRepository(root),
     []
@@ -178,11 +129,9 @@ export function useGitWorkflow({
     openDeskWorld,
     openNewWorld,
     openPatchWorld,
-    openSinceWorld,
     rememberReviewScroll,
     replacePatchReview,
     reset: resetReviewWorlds,
-    restoreSincePatch,
     selectInitialPath,
     setNewWorldPending,
     setPatchChecks,
@@ -235,24 +184,7 @@ export function useGitWorkflow({
   useEffect(() => {
     activeWorldIdRef.current = activeReviewWorld?.worldId ?? null
   })
-  const activePatchReview = activeReviewWorld?.source === 'patch'
-    && activeReviewWorld.review.kind === 'github'
-    ? activeReviewWorld.review
-    : null
-  const activePullRequestUrl = activePatchReview?.pullRequest.url ?? null
   const root = snapshot?.root ?? null
-  const reviewCheckpoint = useMemo(() => {
-    // This value deliberately invalidates the external-storage read after a checkpoint write.
-    void checkpointRevision
-    return root == null || activePullRequestUrl == null
-      ? null
-      : loadReviewCheckpoint(root, activePullRequestUrl)
-  }, [activePullRequestUrl, checkpointRevision, root])
-  const checkpointComparison = useMemo(() => reviewCheckpoint == null || activePatchReview == null
-    ? null
-    : compareReviewCheckpoint(reviewCheckpoint, activePatchReview.files), [activePatchReview, reviewCheckpoint])
-  const reviewReady = activeReviewWorld?.source === 'patch'
-    && activeReviewWorld.loadStatus === 'ready'
 
   const head = snapshot?.head ?? null
   const branch = snapshot?.branch ?? null
@@ -416,11 +348,12 @@ export function useGitWorkflow({
   const openPullRequestReview = useCallback(async (
     selector: number | string,
     repositorySnapshot: RepositorySnapshot | null = snapshot,
-    originWorldId = activeReviewWorld?.worldId ?? null
-  ) => {
+    originWorldId = activeReviewWorld?.worldId ?? null,
+    options: { refresh?: boolean } = {}
+  ): Promise<boolean> => {
     if (repositorySnapshot == null || repositorySnapshot.kind !== 'git') {
       onError('Open a Git repository before opening a pull request.')
-      return
+      return false
     }
     const generation = ++reviewGenerationRef.current
     const requestId = crypto.randomUUID()
@@ -467,7 +400,9 @@ export function useGitWorkflow({
         return
       }
       if (progress.kind === 'revisionAvailable') {
-        setSubmissionMessage('A newer pull request revision is available. Reopen the review to load it.')
+        // The revision watch owns the notice: it raises the banner and adopts the
+        // head itself once nobody is reading. A submission message here would be
+        // a second, contradictory answer to the same fact.
         return
       }
       appendPatchPage(worldId, generation, progress)
@@ -478,9 +413,10 @@ export function useGitWorkflow({
       const review = await requireRepositoryApi().getPullRequestReview(
         repositorySnapshot.root,
         selector,
-        requestId
+        requestId,
+        options.refresh === true
       )
-      if (!reviewRequestsRef.current.has(requestId)) return
+      if (!reviewRequestsRef.current.has(requestId)) return false
       if (streamed) {
         // The resolved review is authoritative: progress events and the reply to
         // this call are separate IPC messages, so a late page can land after the
@@ -505,7 +441,7 @@ export function useGitWorkflow({
           }
           setPatchLoadStatus(worldId, generation, 'ready')
         }
-        return
+        return true
       }
       worldId = openPatchWorld(
         repositorySnapshot,
@@ -517,8 +453,9 @@ export function useGitWorkflow({
       )
       setSubmissionMessage(null)
       setPanelOpen(false)
+      return true
     } catch (error) {
-      if (!reviewRequestsRef.current.has(requestId)) return
+      if (!reviewRequestsRef.current.has(requestId)) return false
       const message = getErrorMessage(error)
       // Compare the world being loaded (not the origin tab) with the active
       // world so a failure on tab A cannot paint the banner over tab B.
@@ -537,6 +474,7 @@ export function useGitWorkflow({
       if (streamed && worldId != null) {
         setPatchLoadStatus(worldId, generation, 'error', message)
       }
+      return false
     } finally {
       stopListening()
       reviewRequestsRef.current.delete(requestId)
@@ -602,66 +540,29 @@ export function useGitWorkflow({
     openNewWorld, openPullRequestReview, setNewWorldPending, updateNewWorldLocator])
 
   const restoreReleasedWorld = useCallback((world: ReviewWorld | null | undefined): void => {
-    if (world == null || world.source === 'new' || world.source === 'desk'
+    if (world == null || world.source !== 'patch'
       || world.loadStatus !== 'released' || restoringWorldsRef.current.has(world.worldId)) return
-    if (world.source === 'patch') {
-      restoringWorldsRef.current.add(world.worldId)
-      if (world.review.kind === 'local') {
-        const saved = world.review
-        const load = saved.id.startsWith('commit:')
-          ? requireRepositoryApi().getCommitReview(saved.headOid)
-          : requireRepositoryApi().getLocalSnapshotReview(
-              saved.baseOid,
-              saved.headOid,
-              saved.baseRefName,
-              saved.headRefName
-            )
-        void load.then((review) => {
-          replacePatchReview(world.worldId, world.generation, review)
-          setPatchLoadStatus(world.worldId, world.generation, 'ready')
-        }).catch((error: unknown) => onError(getErrorMessage(error)))
-          .finally(() => restoringWorldsRef.current.delete(world.worldId))
-        return
-      }
-      void openPullRequestReview(world.review.pullRequest.url, world.snapshot, world.worldId)
+    restoringWorldsRef.current.add(world.worldId)
+    if (world.review.kind === 'local') {
+      const saved = world.review
+      const load = saved.id.startsWith('commit:')
+        ? requireRepositoryApi().getCommitReview(saved.headOid)
+        : requireRepositoryApi().getLocalSnapshotReview(
+            saved.baseOid,
+            saved.headOid,
+            saved.baseRefName,
+            saved.headRefName
+          )
+      void load.then((review) => {
+        replacePatchReview(world.worldId, world.generation, review)
+        setPatchLoadStatus(world.worldId, world.generation, 'ready')
+      }).catch((error: unknown) => onError(getErrorMessage(error)))
         .finally(() => restoringWorldsRef.current.delete(world.worldId))
       return
     }
-
-    const parent = reviewWorldList.find((candidate) => candidate.worldId === world.parentWorldId)
-    if (parent?.source !== 'patch' || parent.review.kind !== 'github') return
-    const parentReview = parent.review
-    restoringWorldsRef.current.add(world.worldId)
-    void (async () => {
-      try {
-        let pages = parent.patchPages
-        let files = parentReview.files
-        let omittedFiles = parentReview.omittedFiles
-        if (pages.length === 0) {
-          let fetched = await fetchPullRequestPatch(parent.root, parentReview.pullRequest.url)
-          if (fetched.files.length === 0) {
-            await openPullRequestReview(parentReview.pullRequest.url, parent.snapshot, parent.worldId)
-            fetched = await fetchPullRequestPatch(parent.root, parentReview.pullRequest.url)
-          }
-          pages = fetched.pages
-          files = fetched.files
-          omittedFiles = fetched.omittedFiles
-        }
-        const changedPaths = new Set(world.changedPaths)
-        restoreSincePatch(
-          world.worldId,
-          filterReviewPatchPages(pages, changedPaths),
-          files.filter((file) => changedPaths.has(file.path)),
-          omittedFiles.filter((file) => changedPaths.has(file.path))
-        )
-      } catch (error) {
-        onError(getErrorMessage(error))
-      } finally {
-        restoringWorldsRef.current.delete(world.worldId)
-      }
-    })()
-  }, [onError, openPullRequestReview, replacePatchReview, restoreSincePatch, reviewWorldList,
-    setPatchLoadStatus])
+    void openPullRequestReview(world.review.pullRequest.url, world.snapshot, world.worldId)
+      .finally(() => restoringWorldsRef.current.delete(world.worldId))
+  }, [onError, openPullRequestReview, replacePatchReview, setPatchLoadStatus])
 
   const focusWorld = useCallback(async (worldId: string): Promise<boolean> => {
     const world = reviewWorldList.find((candidate) => candidate.worldId === worldId)
@@ -825,43 +726,6 @@ export function useGitWorkflow({
     }
   }, [branch, head, onError, root, writeIntegrationEntry])
 
-  const persistCheckpoint = useCallback((review: typeof activePatchReview): boolean => {
-    if (root == null || review == null) return false
-    const saved = saveReviewCheckpoint(root, createReviewCheckpoint(review))
-    if (saved) setCheckpointRevision((revision) => revision + 1)
-    return saved
-  }, [root])
-
-  const setReviewCheckpoint = useCallback(() => {
-    if (activePatchReview == null) return
-    if (!reviewReady) {
-      setSubmissionMessage('Wait for the complete patch before setting a checkpoint.')
-      return
-    }
-    setSubmissionMessage(persistCheckpoint(activePatchReview)
-      ? `Checkpoint set at ${activePatchReview.headOid.slice(0, 8)}.`
-      : 'The checkpoint could not be saved locally.')
-  }, [activePatchReview, persistCheckpoint, reviewReady])
-
-  const openSinceReview = useCallback(() => {
-    const activeWorld = activeReviewWorld
-    if (activeWorld?.source !== 'patch' || activeWorld.review.kind !== 'github') return
-    if (reviewCheckpoint == null) {
-      setSubmissionMessage('Set a checkpoint before opening Since.')
-      return
-    }
-    const since = createSinceReviewFromPages(
-      activeWorld.review,
-      activeWorld.patchPages,
-      reviewCheckpoint
-    )
-    if (since.review.files.length === 0 && since.removedPaths.length === 0) {
-      setSubmissionMessage('No files changed since this checkpoint.')
-      return
-    }
-    openSinceWorld(activeWorld.worldId, since, reviewCheckpoint)
-  }, [activeReviewWorld, openSinceWorld, reviewCheckpoint])
-
   const submitReview = useCallback(async (
     reviewEvent: PullRequestReviewEvent,
     body: string,
@@ -874,17 +738,7 @@ export function useGitWorkflow({
     }
     const pullRequest = repositoryReview.pullRequest
     const selector = repositoryReview.selector
-    const actionLabel = reviewEvent === 'approve'
-      ? 'approve'
-      : reviewEvent === 'request-changes' ? 'request changes on' : 'comment on'
-    const commentSummary = comments.length === 0
-      ? ''
-      : ` with ${comments.length} inline ${comments.length === 1 ? 'comment' : 'comments'}`
-    if (!(await confirm({
-      title: `Submit review for #${pullRequest.number}?`,
-      detail: `This will submit the review${commentSummary} to GitHub and ${actionLabel} #${pullRequest.number}.`,
-      confirmLabel: 'Submit review'
-    }))) return false
+    if (!(await confirm(reviewSubmissionRequest(reviewEvent, pullRequest, comments.length)))) return false
 
     setSubmittingReview(true)
     setSubmissionMessage(null)
@@ -902,9 +756,11 @@ export function useGitWorkflow({
       // on its blocking spinner the next time it opened.
       writeIntegrationEntry({ ...integrationEntryRef.current, fetchedAt: 0 })
       writeInboxEntry({ ...inboxEntryRef.current, fetchedAt: 0 })
-      setSubmissionMessage(persistCheckpoint(repositoryReview)
-        ? 'Review submitted to GitHub. Checkpoint advanced.'
-        : 'Review submitted to GitHub, but the local checkpoint could not be saved.')
+      setSubmissionMessage('Review submitted to GitHub.')
+      showToast(reviewSubmittedMessage(reviewEvent, pullRequest.number), {
+        label: 'View on GitHub',
+        run: () => { window.open(pullRequest.url, '_blank', 'noopener') }
+      }, { tone: 'success' })
       return true
     } catch (error) {
       onError(getErrorMessage(error))
@@ -912,7 +768,7 @@ export function useGitWorkflow({
     } finally {
       setSubmittingReview(false)
     }
-  }, [activeReviewWorld, confirm, onError, persistCheckpoint, repositoryReview,
+  }, [activeReviewWorld, confirm, onError, repositoryReview,
     writeInboxEntry, writeIntegrationEntry])
 
   const closeReview = useCallback((worldId?: string) => {
@@ -986,12 +842,6 @@ export function useGitWorkflow({
     activeWorld: activeReviewWorld,
     initialReviewScrollTop,
     repositoryReview,
-    reviewCheckpoint,
-    checkpointChangedFileCount: checkpointComparison == null
-      ? 0
-      : checkpointComparison.changedFiles.length + checkpointComparison.removedPaths.length,
-    checkpointRemovedFileCount: checkpointComparison?.removedPaths.length ?? 0,
-    reviewReady,
     submittingReview,
     submissionMessage,
     reset,
@@ -1018,8 +868,6 @@ export function useGitWorkflow({
     pullCurrentBranch,
     pushCurrentBranch,
     submitReview,
-    setReviewCheckpoint,
-    openSinceReview,
     closeReview,
     focusWorld,
     cycleWorld,
@@ -1064,17 +912,12 @@ export function useGitWorkflow({
     panelTab,
     pullCurrentBranch,
     pushCurrentBranch,
-    checkpointComparison,
     repositoryReview,
-    reviewCheckpoint,
-    reviewReady,
     reset,
     reviewCommit,
     reviewLocalBranch,
     reviewPullRequest,
     submissionMessage,
-    setReviewCheckpoint,
-    openSinceReview,
     submitReview,
     submittingReview,
     switchBranch

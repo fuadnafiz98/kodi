@@ -61,6 +61,12 @@ export class ReviewFlight<Progress, Result> {
 export class PullRequestReviewFlight {
   /** Aborted once every caller that asked for this review has cancelled. */
   readonly abort = new AbortController()
+  /**
+   * Whether this flight goes to GitHub rather than to the cache on disk. A
+   * reader who asked for the new head must not be handed the reply of a flight
+   * that is replaying the old one.
+   */
+  refresh = false
   #requests = new Set<string>()
   #listeners = new Set<PullRequestProgressListener>()
   #metadata: PullRequestReviewProgress | null = null

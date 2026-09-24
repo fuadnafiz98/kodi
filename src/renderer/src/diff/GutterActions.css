@@ -1,0 +1,45 @@
+/* The gutter `+` is slotted content — it lives in the light DOM, which the
+   viewer's shadow stylesheet cannot reach, so it is styled here rather than in
+   unsafeCSS. The viewer CSS makes the slot a dedicated lane on the number
+   cell's left edge and parks the button at the lane's right end, beside the
+   digits — which stay uncovered and selectable. */
+[slot="gutter-utility-slot"] {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  white-space: nowrap;
+  z-index: 1;
+}
+
+[data-gutter-actions] {
+  display: flex;
+  align-items: center;
+}
+
+/* The accent squircle that used to be the built-in utility button, re-styled
+   here because that stylesheet cannot cross the shadow boundary. The canvas
+   ring keeps it legible over hover and selection tints. */
+[data-gutter-actions] [data-utility-button] {
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 6px;
+  corner-shape: squircle;
+  padding: 0;
+  cursor: pointer;
+  background: var(--accent);
+  color: var(--accent-contrast);
+  box-shadow:
+    0 0 0 2px var(--diffs-bg, var(--canvas)),
+    0 1px 2px color-mix(in srgb, var(--accent) 30%, transparent),
+    0 4px 10px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+[data-gutter-actions] [data-utility-button] svg {
+  width: 10px;
+  height: 10px;
+}

@@ -1,5 +1,7 @@
 import { lazy, Suspense } from 'react'
-import { IconSparkles, IconX } from '@pierre/icons'
+import { IconX } from '@pierre/icons'
+
+import { IconSparklesOutline } from '../app/IconSparklesOutline'
 
 import type { useAgentSession } from './useAgentSession'
 import type { ConfirmRequest } from '../app/ConfirmDialog'
@@ -19,7 +21,7 @@ function AgentDockShell({ onClose }: { onClose(): void }): React.JSX.Element {
     <aside className="agent-dock pending" aria-label="Agent">
       <header className="agent-dock-header">
         <div className="agent-dock-title">
-          <IconSparkles aria-hidden="true" />
+          <IconSparklesOutline aria-hidden="true" />
           <span>Agent</span>
         </div>
         <div className="agent-dock-header-actions">

@@ -26,3 +26,24 @@ export function isGutterDoubleClick(
   const elapsed = timestamp - previous.timestamp
   return elapsed >= 0 && elapsed <= GUTTER_DOUBLE_CLICK_INTERVAL_MS
 }
+
+/**
+ * Whether the line a `+` press landed on is already inside the selection the
+ * reader made. When it is, the press acts on that selection — collapsing the
+ * range to the pressed line would throw away exactly what they are about to
+ * comment on or copy.
+ */
+export function selectionCoversGutterLine(
+  selection: CodeViewLineSelection,
+  itemId: string,
+  lineNumber: number,
+  side: 'additions' | 'deletions' | undefined
+): boolean {
+  if (selection.id !== itemId) return false
+  const first = Math.min(selection.range.start, selection.range.end)
+  const last = Math.max(selection.range.start, selection.range.end)
+  if (lineNumber < first || lineNumber > last) return false
+  const selectionSide = selection.range.endSide ?? selection.range.side
+  const pressedSide = side ?? selection.range.endSide ?? selection.range.side
+  return selectionSide == null || pressedSide == null || selectionSide === pressedSide
+}

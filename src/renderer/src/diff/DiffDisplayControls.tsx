@@ -1,5 +1,4 @@
 import type { DiffStyle, FileEditControls, WorkspaceView } from '../app/AppView'
-import { DiffLayoutToggle } from './DiffLayoutToggle'
 import { EditorOptionControls } from '../settings/EditorOptionControls'
 import { FileEditStartButton } from './FileEditStartButton'
 
@@ -42,17 +41,18 @@ export function DiffDisplayControls({
       {showOptions ? (
         <EditorOptionControls
           documentView={fileEdit.documentView}
+          diffStyle={diffStyle}
           wordWrap={wordWrap}
           foldUnchanged={foldUnchanged}
           showMarkdownViewToggle={showMarkdownViewToggle}
           markdownPreviewOnly={markdownPreviewOnly}
           showDiffLayout={showDiffLayout}
           onDocumentViewChange={fileEdit.onDocumentViewChange}
+          onDiffStyleChange={onDiffStyleChange}
           onWordWrapToggle={onWordWrapToggle}
           onFoldUnchangedToggle={onFoldUnchangedToggle}
         />
       ) : null}
-      {showDiffLayout ? <DiffLayoutToggle diffStyle={diffStyle} onDiffStyleChange={onDiffStyleChange} /> : null}
     </div>
   )
 }

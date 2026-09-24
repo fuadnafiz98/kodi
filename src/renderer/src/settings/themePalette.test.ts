@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'bun:test'
 
-import { DARK_TREE_STYLES, LIGHT_TREE_STYLES } from '../explorer/treeThemeStyles'
 import {
   accentVars,
   effectiveAccent,
@@ -9,7 +8,6 @@ import {
   themeCanvas,
   themeCardVars,
   themePaletteVars,
-  treeStylesFor
 } from './themePalette'
 
 describe('mixHex', () => {
@@ -74,30 +72,6 @@ describe('effectiveAccent', () => {
   it('reads the theme signature for the theme choice', () => {
     expect(effectiveAccent('theme', 'nord')).toBe('#88c0d0')
     expect(effectiveAccent('theme', 'pierre-dark')).toBe('#78a9ff')
-  })
-})
-
-describe('treeStylesFor', () => {
-  it('keeps the baked pierre-derived constants for palette-less themes', () => {
-    expect(treeStylesFor('pierre-dark')).toBe(DARK_TREE_STYLES)
-    expect(treeStylesFor('pierre-light')).toBe(LIGHT_TREE_STYLES)
-  })
-
-  it('derives the explorer chrome from the seed for themed palettes', () => {
-    const styles = treeStylesFor('github-dark-dimmed')
-    expect(styles['--trees-theme-sidebar-bg']).toMatch(/^#[0-9a-f]{6}$/)
-    expect(styles['colorScheme']).toBe('dark')
-    expect(styles['--trees-theme-git-added-fg']).toBeDefined()
-  })
-
-  it('paints the tree pane with the sidebar chrome, not the raised surface', () => {
-    // Light seeds raise `surface` 85% toward white, which painted a white island
-    // on tinted canvases — the tree sits in --panel-subtle chrome instead.
-    const vars = themePaletteVars('solarized-light')
-    const styles = treeStylesFor('solarized-light')
-    expect(vars?.['--panel-subtle']).toBe('#f6f0df')
-    expect(styles['--trees-theme-sidebar-bg']).toBe(vars?.['--panel-subtle'])
-    expect(styles.backgroundColor).toBe(vars?.['--panel-subtle'])
   })
 })
 

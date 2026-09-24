@@ -1,6 +1,6 @@
 import type { CodeViewItem } from '@pierre/diffs'
 
-import { pathFromReviewItemId as pathFromItemId } from './reviewItems'
+import { patchContentSignature, pathFromReviewItemId as pathFromItemId } from './reviewItems'
 import {
   browserBudgetStorage,
   forgetStorageKey,
@@ -73,23 +73,6 @@ export function dropChangedViewedFiles(
     next[path] = signature
   }
   return changed ? next : signatures
-}
-
-function hashPatchLines(lines: readonly string[], seed: number): number {
-  let hash = seed
-  for (const line of lines) {
-    for (let index = 0; index < line.length; index += 1) {
-      hash = Math.imul(hash ^ line.charCodeAt(index), 16_777_619)
-    }
-    hash = Math.imul(hash ^ 0, 16_777_619)
-  }
-  return hash >>> 0
-}
-
-function patchContentSignature(type: string, additions: readonly string[], deletions: readonly string[]): string {
-  const first = hashPatchLines([type, ...additions, '\u0001', ...deletions], 2_166_136_261)
-  const second = hashPatchLines([type, ...deletions, '\u0002', ...additions], 2_654_435_761)
-  return `patch:${first.toString(16).padStart(8, '0')}${second.toString(16).padStart(8, '0')}`
 }
 
 // Git object IDs identify content exactly. Patches without object IDs use a

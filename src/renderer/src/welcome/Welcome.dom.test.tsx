@@ -4,7 +4,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import type { PullRequestInboxSnapshot, RepositoryApi } from '../../../shared/contracts'
 import { DEFAULT_KEYBINDINGS } from '../settings/keybindings'
 import type { RecentFolder } from '../explorer/recentFolders'
-import { Welcome } from './Welcome'
+import { formatInboxFreshness, Welcome } from './Welcome'
 import { resetWelcomeInboxCacheForTests, writeWelcomeInboxCache } from './welcomeInbox'
 
 const recentFolders: readonly RecentFolder[] = [
@@ -211,4 +211,92 @@ test('stays away entirely when the last fetch found no pull requests', async () 
   expect(document.querySelector('.welcome-inbox')).toBeNull()
   await waitFor(() => expect(screen.getByText('Recent folders')).toBeTruthy())
   expect(document.querySelector('.welcome-inbox')).toBeNull()
+})
+
+function cachedRow(url: string, number: number): Parameters<typeof writeWelcomeInboxCache>[0][number] {
+  return {
+    key: 'authored',
+    url,
+    number,
+    title: `cached ${number}`,
+    repo: 'acme/core',
+    isDraft: false,
+    authorLogin: 'octocat',
+    authorAvatarUrl: '',
+    updatedAt: new Date().toISOString()
+  }
+}
+
+test('the refresh button refetches a fresh inbox and highlights rows it brings in', async () => {
+  writeWelcomeInboxCache([cachedRow('https://github.com/acme/core/pull/88', 88)])
+  const getGlobalPullRequestInbox = stubInbox(inbox)
+  renderWelcome()
+  expect(getGlobalPullRequestInbox).not.toHaveBeenCalled()
+
+  await act(async () => { fireEvent.click(screen.getByLabelText('Refresh pull requests')) })
+
+  expect(getGlobalPullRequestInbox).toHaveBeenCalledTimes(1)
+  const arrived = await screen.findByTitle('https://github.com/acme/core/pull/759')
+  expect(arrived.getAttribute('data-fresh')).toBe('true')
+})
+
+test('does not highlight the rows of the first fetch', async () => {
+  stubInbox(inbox)
+  renderWelcome()
+
+  const row = await screen.findByTitle('https://github.com/acme/core/pull/759')
+  expect(row.getAttribute('data-fresh')).toBeNull()
+})
+
+test('refetches when the window regains focus after the wake interval', async () => {
+  writeWelcomeInboxCache([cachedRow('https://github.com/acme/core/pull/88', 88)], [], '', Date.now() - 11_000)
+  const getGlobalPullRequestInbox = stubInbox(inbox)
+  renderWelcome()
+  expect(getGlobalPullRequestInbox).not.toHaveBeenCalled()
+
+  await act(async () => { window.dispatchEvent(new Event('focus')) })
+
+  expect(getGlobalPullRequestInbox).toHaveBeenCalledTimes(1)
+})
+
+test('ignores a focus right after a fetch', async () => {
+  writeWelcomeInboxCache([cachedRow('https://github.com/acme/core/pull/88', 88)])
+  const getGlobalPullRequestInbox = stubInbox(inbox)
+  renderWelcome()
+
+  await act(async () => { window.dispatchEvent(new Event('focus')) })
+
+  expect(getGlobalPullRequestInbox).not.toHaveBeenCalled()
+})
+
+test('says when the inbox last updated and switches to updating while it refetches', async () => {
+  writeWelcomeInboxCache([cachedRow('https://github.com/acme/core/pull/88', 88)], [], '', Date.now() - 3 * 60_000 - 11_000)
+  let release = (_snapshot: PullRequestInboxSnapshot) => {}
+  window.repository = {
+    getGlobalPullRequestInbox: () => new Promise<PullRequestInboxSnapshot>((resolve) => { release = resolve })
+  } as unknown as RepositoryApi
+  renderWelcome()
+
+  expect(document.querySelector('.welcome-inbox-freshness')?.textContent).toBe('Updating…')
+  await act(async () => { release(inbox) })
+  expect(document.querySelector('.welcome-inbox-freshness')?.textContent).toBe('Updated just now')
+})
+
+test('a failed refetch keeps the time of the last one that worked', async () => {
+  writeWelcomeInboxCache([cachedRow('https://github.com/acme/core/pull/88', 88)], [], '', Date.now() - 2 * 60_000)
+  window.repository = {
+    getGlobalPullRequestInbox: async () => ({ available: false, message: 'offline', sections: [] })
+  } as unknown as RepositoryApi
+  renderWelcome()
+
+  await waitFor(() => expect(document.querySelector('.welcome-inbox-freshness')?.textContent).toBe('Updated 2m ago'))
+})
+
+test('freshness steps through seconds, minutes, hours and days', () => {
+  const now = 1_000_000_000
+  expect(formatInboxFreshness(now - 4_000, now)).toBe('Updated just now')
+  expect(formatInboxFreshness(now - 27_000, now)).toBe('Updated 20s ago')
+  expect(formatInboxFreshness(now - 5 * 60_000, now)).toBe('Updated 5m ago')
+  expect(formatInboxFreshness(now - 3 * 3_600_000, now)).toBe('Updated 3h ago')
+  expect(formatInboxFreshness(now - 50 * 3_600_000, now)).toBe('Updated 2d ago')
 })

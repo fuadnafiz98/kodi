@@ -6,7 +6,6 @@ import {
   boundInactivePatchPayloads,
   createNewWorld,
   createPatchWorld,
-  createSinceWorld,
   findCollisionPaths,
   hibernateWorldPayloads,
   initialWorldRegistry,
@@ -187,31 +186,6 @@ test('collision radar reports exact dirty-path intersections only', () => {
   expect([...collisions]).toEqual(['src/a.ts'])
 })
 
-test('Since opens as a child tab without replacing its Patch snapshot', () => {
-  const patch = createPatchWorld(snapshot(), review(), 1, 'ready')
-  const checkpoint = {
-    version: 1 as const,
-    pullRequestUrl: review().pullRequest.url,
-    baseOid: '1'.repeat(40),
-    headOid: '2'.repeat(40),
-    createdAt: '2026-08-28T10:00:00Z',
-    manifest: []
-  }
-  const since = createSinceWorld(snapshot(), patch.worldId, {
-    review: { ...review(), files: [{ path: 'src/b.ts', additions: 1, deletions: 0 }] },
-    removedPaths: ['src/old.ts'],
-    uncertainPaths: []
-  }, checkpoint)
-  const state = reduceWorldRegistry(
-    { worlds: [patch], activeWorldId: patch.worldId },
-    { type: 'open-since', world: since }
-  )
-
-  expect(state.worlds).toEqual([patch, since])
-  expect(state.activeWorldId).toBe(since.worldId)
-  expect(since.parentWorldId).toBe(patch.worldId)
-})
-
 test('a background cross-project load replaces its New tab without stealing focus', () => {
   const firstSnapshot = snapshot()
   const secondSnapshot = {
@@ -289,45 +263,6 @@ test('hibernation with nothing releasable returns the same state', () => {
   const released = createPatchWorld(snapshot(), review(1), 1, 'ready')
   const hibernated = hibernateWorldPayloads({ worlds: [released], activeWorldId: released.worldId })
   expect(hibernateWorldPayloads(hibernated)).toBe(hibernated)
-})
-
-test('inactive Since worlds are released and can restore their filtered pages', () => {
-  const parent = createPatchWorld(snapshot(), review(), 1, 'ready')
-  const checkpoint = {
-    version: 1 as const,
-    pullRequestUrl: review().pullRequest.url,
-    baseOid: '1'.repeat(40),
-    headOid: '2'.repeat(40),
-    createdAt: '2026-08-28T10:00:00Z',
-    manifest: []
-  }
-  const since = createSinceWorld(snapshot(), parent.worldId, {
-    review: { ...review(), patch: 'line one\nline two\n' },
-    patchPages: ['line one\n', 'line two\n'],
-    removedPaths: [],
-    uncertainPaths: []
-  }, checkpoint)
-  const released = boundInactivePatchPayloads({
-    worlds: [since, parent],
-    activeWorldId: parent.worldId
-  }, 1)
-  const releasedSince = released.worlds[0]
-
-  expect(releasedSince?.source === 'since' ? releasedSince.loadStatus : null).toBe('released')
-  expect(releasedSince?.source === 'since' ? releasedSince.patchPages : null).toEqual([])
-  expect(releasedSince?.source === 'since' ? releasedSince.review.files : null).toEqual([])
-  expect(releasedSince?.source === 'since' ? releasedSince.changedPaths : null).toEqual(['src/a.ts'])
-
-  const restored = reduceWorldRegistry(released, {
-    type: 'restore-since-patch',
-    worldId: since.worldId,
-    patchPages: ['line two\n'],
-    files: [{ path: 'src/a.ts', additions: 1, deletions: 0 }],
-    omittedFiles: []
-  })
-  expect(restored.worlds[0]?.source === 'since' ? restored.worlds[0].loadStatus : null).toBe('ready')
-  expect(restored.worlds[0]?.source === 'since' ? restored.worlds[0].patchLength : null).toBe(9)
-  expect(restored.worlds[0]?.source === 'since' ? restored.worlds[0].review.files : null).toHaveLength(1)
 })
 
 test('locator typing skips the inactive patch payload scan', () => {

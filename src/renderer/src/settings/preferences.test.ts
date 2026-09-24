@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'bun:test'
 
 import { DEFAULT_KEYBINDINGS } from './keybindings'
 import {
+  DEFAULTS_VERSION,
   EDITOR_THEMES,
   getEditorThemeType,
   KEYBINDINGS_VERSION,
@@ -116,5 +117,21 @@ describe('loadKeybindings', () => {
 
   it('falls back to the defaults when nothing was saved', () => {
     expect(loadKeybindings(undefined, undefined)).toEqual(DEFAULT_KEYBINDINGS)
+  })
+})
+
+describe('word wrap default', () => {
+  it('wraps on a fresh profile', () => {
+    expect(loadPreferences().wordWrap).toBe(true)
+  })
+
+  it('moves a profile saved under the old default onto wrapping once', () => {
+    localStorage.setItem('kodi:preferences:v1', JSON.stringify({ wordWrap: false }))
+    expect(loadPreferences().wordWrap).toBe(true)
+  })
+
+  it('keeps wrap off when it was turned off after the new default', () => {
+    localStorage.setItem('kodi:preferences:v1', JSON.stringify({ wordWrap: false, defaultsVersion: DEFAULTS_VERSION }))
+    expect(loadPreferences().wordWrap).toBe(false)
   })
 })

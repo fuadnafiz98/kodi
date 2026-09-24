@@ -1,16 +1,14 @@
 import { memo, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import {
   IconBrandGithub,
-  IconClockArrow,
   IconCodeFolder,
   IconEllipsis,
-  IconGlobe,
   IconPlus,
-  IconWarningOctogonFill,
   IconX
 } from '@pierre/icons'
 
 import type { ReviewWorld } from '../review/useReviewWorlds'
+import { KodiGlyph } from './KodiGlyph'
 
 const MAX_VISIBLE_WORLDS = 7
 
@@ -29,7 +27,6 @@ export function partitionWorlds(
 interface WorldStripProps {
   worlds: readonly ReviewWorld[]
   activeWorldId: string | null
-  collisionCount: number
   leadingAction?: React.ReactNode
   onFocus(worldId: string): void | Promise<boolean>
   onClose(worldId: string): void
@@ -37,9 +34,8 @@ interface WorldStripProps {
 }
 
 function TabIcon({ world }: { world: ReviewWorld }): React.JSX.Element {
-  if (world.source === 'new') return world.pending ? <IconBrandGithub /> : <IconGlobe />
+  if (world.source === 'new') return world.pending ? <IconBrandGithub /> : <KodiGlyph />
   if (world.source === 'desk') return <IconCodeFolder />
-  if (world.source === 'since') return <IconClockArrow />
   return <IconBrandGithub />
 }
 
@@ -48,22 +44,21 @@ function tabTitle(world: ReviewWorld): string {
     ? `Opening ${world.locator}`
     : 'New tab · open a folder or GitHub pull request'
   if (world.source === 'desk') return `${world.snapshot.name} · live working tree\n${world.root}`
-  if (world.source === 'since') {
-    return `Files changed since ${world.checkpointHeadOid.slice(0, 8)} · ${new Date(world.checkpointCreatedAt).toLocaleString()}`
-  }
-  return `${world.review.kind === 'github' ? world.review.pullRequest.title : world.review.title}\n${world.baseOid.slice(0, 8)} → ${world.headOid.slice(0, 8)}`
+  const commits = `${world.baseOid.slice(0, 8)} → ${world.headOid.slice(0, 8)}`
+  if (world.review.kind !== 'github') return `${world.review.title}\n${commits}`
+  // The tab label drops the owner, so the tooltip carries the full repository.
+  const repository = /github\.com\/([^/]+\/[^/]+)\/pull\//i.exec(world.review.pullRequest.url)?.[1]
+  return `${world.review.pullRequest.title}\n${repository == null ? '' : `${repository} · `}${commits}`
 }
 
 function WorldTab({
   world,
   active,
-  collisionCount,
   onFocus,
   onClose
 }: {
   world: ReviewWorld
   active: boolean
-  collisionCount: number
   onFocus(worldId: string): void | Promise<boolean>
   onClose(worldId: string): void
 }): React.JSX.Element {
@@ -83,12 +78,6 @@ function WorldTab({
         <span className="world-label">{world.label}</span>
         {(world.source === 'patch' && world.loadStatus === 'loading') || (world.source === 'new' && world.pending) ? (
           <span className="world-load-signal" title="Loading patch" aria-label="Loading patch" />
-        ) : null}
-        {active && collisionCount > 0 ? (
-          <span className="world-collision-count" title={`${collisionCount} paths also changed in the matching working tree`}>
-            <IconWarningOctogonFill aria-hidden="true" />
-            {collisionCount}
-          </span>
         ) : null}
       </button>
       <button
@@ -173,7 +162,7 @@ function OverflowMenu({
             <span>{world.label}</span>
             <small>{world.source === 'new' ? 'New' : world.source === 'desk'
               ? 'Working tree'
-              : world.source === 'since' ? 'Since' : world.headOid.slice(0, 8)}</small>
+              : world.headOid.slice(0, 8)}</small>
           </button>
         ))}
         {visibleWorlds.length === 0 ? <p>No matching tabs</p> : null}
@@ -185,13 +174,32 @@ function OverflowMenu({
 export const WorldStrip = memo(function WorldStrip({
   worlds,
   activeWorldId,
-  collisionCount,
   leadingAction,
   onFocus,
   onClose,
   onNew
 }: WorldStripProps): React.JSX.Element {
   const partition = partitionWorlds(worlds, activeWorldId)
+  const tabsRef = useRef<HTMLDivElement>(null)
+
+  const focusActiveTab = (): void => {
+    tabsRef.current?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')?.focus()
+  }
+
+  /**
+   * Closing a tab removes the element focus was standing on, and the browser
+   * then hands focus to whatever comes next in the DOM — which here is the new
+   * tab `+` at the end of the strip. Keyboard users who close #2 of 3 expect to
+   * land on the tab that took its place, not on a button that opens a fourth.
+   * The focus is moved after the close has re-rendered; a pointer-driven close
+   * gets the focus without the ring, since :focus-visible tracks the modality.
+   */
+  const handleClose = (worldId: string): void => {
+    onClose(worldId)
+    // No cancellation needed: the frame only reads `tabsRef`, which is null once
+    // the strip is gone.
+    window.requestAnimationFrame(focusActiveTab)
+  }
 
   const handleTablistKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>): void => {
     if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight' && event.key !== 'Home' && event.key !== 'End') {
@@ -208,38 +216,37 @@ export const WorldStrip = memo(function WorldStrip({
     if (next == null || next.worldId === activeWorldId) return
     event.preventDefault()
     void onFocus(next.worldId)
-    window.requestAnimationFrame(() => {
-      const tab = event.currentTarget.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')
-      tab?.focus()
-    })
+    window.requestAnimationFrame(focusActiveTab)
   }
 
   return (
     <nav className="world-strip" aria-label="Review tabs">
       <span className="world-strip-safe-area" aria-hidden="true" />
       {leadingAction}
-      <div className="world-tabs" role="tablist" aria-label="Review tabs" onKeyDown={handleTablistKeyDown}>
-        {partition.visible.map((world) => (
-          <WorldTab
-            key={world.worldId}
-            world={world}
-            active={world.worldId === activeWorldId}
-            collisionCount={collisionCount}
-            onFocus={onFocus}
-            onClose={onClose}
-          />
-        ))}
+      <div className="world-track">
+        <div className="world-tabs" role="tablist" aria-label="Review tabs" ref={tabsRef}
+          onKeyDown={handleTablistKeyDown}>
+          {partition.visible.map((world) => (
+            <WorldTab
+              key={world.worldId}
+              world={world}
+              active={world.worldId === activeWorldId}
+              onFocus={onFocus}
+              onClose={handleClose}
+            />
+          ))}
+        </div>
+        {partition.overflow.length > 0 ? <OverflowMenu worlds={partition.overflow} onFocus={onFocus} /> : null}
+        <button
+          className="world-new"
+          type="button"
+          aria-label="New tab"
+          title="New Tab (⌘T). Cycle tabs with ⌘⇧[ ]"
+          onClick={onNew}
+        >
+          <IconPlus />
+        </button>
       </div>
-      {partition.overflow.length > 0 ? <OverflowMenu worlds={partition.overflow} onFocus={onFocus} /> : null}
-      <button
-        className="world-new"
-        type="button"
-        aria-label="New tab"
-        title="New Tab (⌘T). Cycle tabs with ⌘⇧[ ]"
-        onClick={onNew}
-      >
-        <IconPlus />
-      </button>
     </nav>
   )
 })

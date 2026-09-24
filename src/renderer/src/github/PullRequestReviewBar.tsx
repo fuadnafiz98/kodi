@@ -3,8 +3,7 @@ import './PullRequestReviewBar.css'
 
 import type { PullRequestReviewEvent } from '../../../shared/contracts'
 import { PullRequestReviewComposer } from './PullRequestReviewComposer'
-import { PullRequestReviewSummaryBar } from './PullRequestReviewSummaryBar'
-import type { ReviewCheckpointBarProps } from '../review/ReviewCheckpointStatus'
+import { PullRequestReviewSummaryBar, type NewRevisionNotice } from './PullRequestReviewSummaryBar'
 import { useOptionalState } from '../app/useOptionalState'
 
 interface PullRequestReviewBarProps {
@@ -13,7 +12,7 @@ interface PullRequestReviewBarProps {
   inlineCommentCount: number
   orphanedCommentCount: number
   viewerCanSubmitDecision: boolean
-  checkpointBar?: ReviewCheckpointBarProps
+  newRevision?: NewRevisionNotice | null
   variant?: 'toolbar' | 'finish'
   expanded?: boolean
   body?: string
@@ -29,7 +28,7 @@ export function PullRequestReviewBar({
   inlineCommentCount,
   orphanedCommentCount,
   viewerCanSubmitDecision,
-  checkpointBar,
+  newRevision = null,
   variant = 'toolbar',
   expanded: expandedProp,
   body: bodyProp,
@@ -59,7 +58,7 @@ export function PullRequestReviewBar({
         message={message}
         inlineCommentCount={inlineCommentCount}
         orphanedCommentCount={orphanedCommentCount}
-        checkpointBar={checkpointBar}
+        newRevision={newRevision}
         onSubmitReview={() => { onOpen(); setExpanded(true) }}
       />
     )

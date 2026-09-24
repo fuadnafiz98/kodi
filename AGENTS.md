@@ -24,6 +24,10 @@ KODI_PROBE_HIDDEN=1 PRS=<url> bun run perf:pr-open-probe <label>
 
 For ad-hoc CDP checks, `scripts/perf/cdp.mjs` exports `launch`/`quit`/`CDP`. The hidden window has a zero-size viewport — use `Emulation.setDeviceMetricsOverride` before relying on virtualized lists.
 
+- `launch(port, ['--kodi-folder', '/path/to/repo'])` opens a fixture repository directly — but it rewrites the user's real session (tabs, `lastRoot`, approved roots). Add `--user-data-dir=/tmp/<scratch>` to any probe that opens folders or clicks UI, so the real profile is untouched. The flag also works with `node_modules/.bin/electron .` against a local `bun run build`, which gives screenshots without reinstalling.
+- Explorer rows and diff lines live in shadow roots; search recursively through `el.shadowRoot` (`[data-item-path="x"][data-item-type="file"]`, `[data-line]`). Clicking a changed file's row enters the multi-file review.
+- In hidden mode the review only renders its first file, so use one changed file per fixture repo.
+
 ## Gates
 
 `bun run lint`, `bun run lint:css`, `bun run typecheck`, `bun test`, `bun run build`, `bun run check:entry`.

@@ -17,7 +17,8 @@ import {
   type CodeViewItem,
   type CodeViewLineSelection,
   type DiffLineAnnotation,
-  type LineAnnotation
+  type LineAnnotation,
+  type SelectedLineRange
 } from '@pierre/diffs'
 import { type CodeViewHandle, type CodeViewReactOptions } from '@pierre/diffs/react'
 import { IconCheck, IconChevronSm, IconCodeSearch, IconEye, IconFileCode, IconRefresh, IconWarningOctogonFill } from '@pierre/icons'
@@ -28,15 +29,17 @@ import { GitHubMarkdownContent } from '../github/GitHubMarkdownContent'
 import { ImageDiffPreview } from '../diff/ImageDiffPreview'
 import type { DiffStyle } from '../app/AppView'
 import { LIVE_CODE_FONT_SIZE_PROPERTY, LIVE_CODE_LINE_HEIGHT_PROPERTY } from '../diff/codeZoom'
-import { markReviewFileHydrated } from './reviewMetrics'
+import { schedulePartialDiffHydration } from './partialDiffHydration'
+import { useReviewDiffLoader } from './useReviewDiffLoader'
 import { markRendererStartup } from '../app/startupMetrics'
 import { reportCopiedPath, syncCopyFilePathLifecycle } from '../diff/copyFilePath'
 import { syncDragGuideLifecycle } from '../diff/dragSelection'
 import { syncSplitDiffResizeLifecycle } from '../diff/splitDiffResize'
-import { isGutterDoubleClick } from '../diff/gutterCommentShortcut'
+import { isGutterDoubleClick, selectionCoversGutterLine } from '../diff/gutterCommentShortcut'
 import { syncReviewCaretLifecycle } from './reviewCaret'
 import { CODE_FONTS, getEditorThemeType, INTERFACE_FONTS, type AppPreferences } from '../settings/preferences'
 import {
+  AnnotationFrame,
   consumeSelectionChromeKey,
   DraftComment,
   nextPendingSelection,
@@ -57,13 +60,14 @@ import {
   applyImagePreviews,
   applyMarkdownPreviews,
   canPreviewMarkdownItem,
-  findCollapseFollowItemId,
   findActiveReviewItemId,
   findNextUnreadReviewItemId,
   pathFromReviewItemId as pathFromItemId,
   reviewItemId as itemId,
+  shouldPinCollapsedHeader,
   type MarkdownHydratedSource
 } from './reviewItems'
+import { animateReviewItemToggle } from './reviewCollapseMotion'
 import type { ReviewLoadState } from './useReviewLoadState'
 import {
   itemsForRetainedWorld,
@@ -96,6 +100,8 @@ import { MARKDOWN_REVIEW_PREVIEW_CSS, VIEWER_BASE_CSS } from '../diff/viewerCss'
 import { buildViewedPathsKey, parseViewedPathsKey } from './viewedPaths'
 import { PullRequestContext } from '../github/PullRequestContext'
 import { createReviewCommentAnchor } from './reviewThreadAnchors'
+import { copyCodeReference, copyReviewComment } from './codeReferenceClipboard'
+import { GutterActions } from '../diff/GutterActions'
 import './MultiFileReview.css'
 
 const CODE_VIEW_CSS = `
@@ -157,8 +163,6 @@ export interface MultiFileReviewProps {
   diffStyle: DiffStyle
   preferences: AppPreferences
   repositoryReview?: RepositoryReview | null
-  sinceRemovedPaths: readonly string[]
-  sinceUncertainPaths: readonly string[]
   pullRequestConversation?: PullRequestConversation | null
   loadState: ReviewLoadState
   loading: boolean
@@ -183,36 +187,6 @@ export interface MultiFileReviewProps {
   worldId: string
 }
 
-function SinceNotice({
-  removedPaths,
-  uncertainPaths
-}: {
-  removedPaths: readonly string[]
-  uncertainPaths: readonly string[]
-}): React.JSX.Element | null {
-  if (removedPaths.length === 0 && uncertainPaths.length === 0) return null
-  return (
-    <aside className="since-notice" aria-label="Since checkpoint details">
-      <IconWarningOctogonFill />
-      <div>
-        {removedPaths.length > 0 ? (
-          <details>
-            <summary>{removedPaths.length} {removedPaths.length === 1 ? 'path is' : 'paths are'} no longer in the pull request</summary>
-            <ul>{removedPaths.map((path) => <li key={path}><code>{path}</code></li>)}</ul>
-          </details>
-        ) : null}
-        {uncertainPaths.length > 0 ? (
-          <details>
-            <summary>{uncertainPaths.length} {uncertainPaths.length === 1 ? 'path uses' : 'paths use'} a conservative fallback signature</summary>
-            <p>Kodi includes these paths because equal line counts cannot prove identical content.</p>
-            <ul>{uncertainPaths.map((path) => <li key={path}><code>{path}</code></li>)}</ul>
-          </details>
-        ) : null}
-      </div>
-    </aside>
-  )
-}
-
 function ReviewEmptyOverlay({
   pathCount,
   itemCount,
@@ -220,8 +194,6 @@ function ReviewEmptyOverlay({
   failedCount,
   omittedCount,
   skippedCount,
-  removedPaths,
-  uncertainPaths
 }: {
   pathCount: number
   itemCount: number
@@ -229,18 +201,13 @@ function ReviewEmptyOverlay({
   failedCount: number
   omittedCount: number
   skippedCount: number
-  removedPaths: readonly string[]
-  uncertainPaths: readonly string[]
 }): React.JSX.Element | null {
   if (pathCount === 0) {
     return (
-      <div className="since-empty-state">
-        <SinceNotice removedPaths={removedPaths} uncertainPaths={uncertainPaths} />
-        <div className="diff-state">
-          <IconCodeSearch />
-          <strong>No current diffs to review</strong>
-          <span>The changed paths are no longer part of this pull request.</span>
-        </div>
+      <div className="diff-state">
+        <IconCodeSearch />
+        <strong>No files to review</strong>
+        <span>This review has no changed files.</span>
       </div>
     )
   }
@@ -593,24 +560,18 @@ function useReviewCodeViewOptions({
   diffStyle,
   preferences,
   repositoryReview,
-  previousGutterActivationRef,
   onSelectLines,
   onHideSelectionActions,
-  onBeginComment,
   onImagePreview
 }: {
   diffStyle: DiffStyle
   preferences: AppPreferences
   repositoryReview: RepositoryReview | null
-  previousGutterActivationRef: RefObject<{
-    selection: CodeViewLineSelection
-    timestamp: number
-  } | null>
   onSelectLines(selection: CodeViewLineSelection | null): void
   onHideSelectionActions(): void
-  onBeginComment(selection: CodeViewLineSelection): void
   onImagePreview(path: string, image: FileImagePreview): void
 }): CodeViewReactOptions<ReviewAnnotationMetadata> {
+  const diffLoader = useReviewDiffLoader(repositoryReview, onImagePreview)
   return useMemo(() => ({
     // No `theme`: the worker pool resolves it and re-renders every instance on a
     // switch, so passing it here only forced a second full rebuild of the DOM.
@@ -619,35 +580,18 @@ function useReviewCodeViewOptions({
     tokenizeMaxLineLength: 2_000, enableLineSelection: true, enableGutterUtility: true,
     onLineSelectionStart: () => onHideSelectionActions(),
     onLineSelectionEnd: (range, context) => onSelectLines(range == null ? null : { id: context.item.id, range }),
-    onGutterUtilityClick: (range, context) => {
-      const selection = { id: context.item.id, range }
-      const timestamp = performance.now()
-      const opensComment = isGutterDoubleClick(previousGutterActivationRef.current, selection, timestamp)
-      previousGutterActivationRef.current = opensComment ? null : { selection, timestamp }
-      onSelectLines(selection)
-      // CodeView reports selection-end after this callback. Starting the draft
-      // on the next microtask lets that report finish before the action bar is cleared.
-      if (opensComment) queueMicrotask(() => onBeginComment(selection))
-    },
-    onPostRender: (node, _instance, phase, context) => {
+    onPostRender: (node, instance, phase, context) => {
       syncDragGuideLifecycle(node, phase, (range) => onSelectLines({ id: context.item.id, range }))
       syncSplitDiffResizeLifecycle(node, phase)
       syncCopyFilePathLifecycle(node, phase, reportCopiedPath)
       syncReviewCaretLifecycle(node, phase)
+      schedulePartialDiffHydration(instance, phase, context.item, diffLoader)
     },
     lineHoverHighlight: 'number', hunkSeparators: 'line-info-basic', expandUnchanged: !preferences.foldUnchanged,
     collapsedContextThreshold: 4, stickyHeaders: true, layout: { paddingTop: 16, paddingBottom: 48, gap: 12 },
     itemMetrics: { lineHeight: preferences.codeLineHeight }, unsafeCSS: CODE_VIEW_CSS,
-    ...(repositoryReview == null && window.repository != null ? { loadDiffFiles: async (fileDiff) => {
-      const comparison = await window.repository!.getComparison(fileDiff.name)
-      markReviewFileHydrated(fileDiff.name)
-      if (comparison.image != null && (comparison.image.old != null || comparison.image.new != null)) {
-        onImagePreview(fileDiff.name, comparison.image)
-      }
-      return { oldFile: comparison.oldFile, newFile: comparison.newFile } as Awaited<ReturnType<NonNullable<CodeViewReactOptions<ReviewAnnotationMetadata>['loadDiffFiles']>>>
-    }} : {})
-  }), [diffStyle, onBeginComment, onHideSelectionActions, onImagePreview, onSelectLines, preferences,
-    previousGutterActivationRef, repositoryReview])
+    ...(diffLoader == null ? {} : { loadDiffFiles: diffLoader.load })
+  }), [diffLoader, diffStyle, onHideSelectionActions, onSelectLines, preferences])
 }
 
 interface MultiFileViewerProps {
@@ -656,8 +600,6 @@ interface MultiFileViewerProps {
   diffStyle: DiffStyle
   preferences: AppPreferences
   repositoryReview: RepositoryReview | null
-  sinceRemovedPaths: readonly string[]
-  sinceUncertainPaths: readonly string[]
   pullRequestConversation: PullRequestConversation | null
   loadState: ReviewLoadState
   loading: boolean
@@ -683,6 +625,7 @@ interface MultiFileViewerProps {
   onCommentOnSelection(): void
   onBeginComment(selection: CodeViewLineSelection): void
   onAskAgentAboutSelection(): void
+  onCopySelection(): void
   onImagePreview(path: string, image: FileImagePreview): void
   scrollContainerRef: RefObject<HTMLDivElement | null>
   viewerRef: React.RefObject<CodeViewHandle<ReviewAnnotationMetadata> | null>
@@ -706,8 +649,6 @@ const MultiFileViewer = memo(function MultiFileViewer({
   diffStyle,
   preferences,
   repositoryReview,
-  sinceRemovedPaths,
-  sinceUncertainPaths,
   pullRequestConversation,
   loadState,
   loading,
@@ -731,6 +672,7 @@ const MultiFileViewer = memo(function MultiFileViewer({
   onCommentOnSelection,
   onBeginComment,
   onAskAgentAboutSelection,
+  onCopySelection,
   onImagePreview,
   scrollContainerRef,
   viewerRef,
@@ -757,6 +699,7 @@ const MultiFileViewer = memo(function MultiFileViewer({
     timestamp: number
   } | null>(null)
   const deferredConversation = useDeferredValue(pullRequestConversation)
+  const isPullRequestReview = repositoryReview?.kind === 'github'
   useBackgroundScrollAnchor(
     worldId,
     deferredConversation,
@@ -787,38 +730,39 @@ const MultiFileViewer = memo(function MultiFileViewer({
   }, [onCancelReattach, reattachingThread, updateThread])
   const renderReviewSummary = useCallback(
     () => <>
-      <SinceNotice removedPaths={sinceRemovedPaths} uncertainPaths={sinceUncertainPaths} />
-      <PullRequestContext conversation={deferredConversation} />
+      <PullRequestContext conversation={deferredConversation} pullRequest={isPullRequestReview} />
       <ReviewSummary entries={summaryEntries}
         reattachingThreadId={reattachingThread?.threadId ?? null}
         onBeginReattach={beginSummaryReattach} onCancelReattach={onCancelReattach}
         onDrop={dropSummaryThread} onDropAll={onDropAll} />
     </>,
-    [beginSummaryReattach, deferredConversation, dropSummaryThread, onCancelReattach,
-      onDropAll, reattachingThread, sinceRemovedPaths, sinceUncertainPaths, summaryEntries]
+    [beginSummaryReattach, deferredConversation, dropSummaryThread, isPullRequestReview, onCancelReattach,
+      onDropAll, reattachingThread, summaryEntries]
   )
   const handleToggleItemCollapsed = useCallback((item: CodeViewItem<ReviewAnnotationMetadata>) => {
     window.cancelAnimationFrame(collapseFollowFrameRef.current)
     collapseFollowFrameRef.current = 0
 
     const viewer = viewerRef.current?.getInstance()
-    const followItemId = collapsedItemIds.has(item.id) || viewer == null
-      ? null
-      : findCollapseFollowItemId(findActiveRenderedItemId(viewer), item.id, annotatedItems)
+    const collapsing = !collapsedItemIds.has(item.id)
+    const pinHeader = collapsing && viewer != null
+      && shouldPinCollapsedHeader(viewer.getTopForItem(item.id), viewer.getScrollTop())
 
     toggleItemCollapsed(item)
-    if (followItemId == null) return
+    if (viewer == null) return
 
+    // The first frame lands the new layout (and holds the header in place); the
+    // second animates the settled DOM.
     collapseFollowFrameRef.current = window.requestAnimationFrame(() => {
-      collapseFollowFrameRef.current = 0
-      viewerRef.current?.scrollTo({
-        type: 'item',
-        id: followItemId,
-        align: 'start',
-        behavior: 'instant'
+      if (pinHeader) {
+        viewerRef.current?.scrollTo({ type: 'item', id: item.id, align: 'start', behavior: 'instant' })
+      }
+      collapseFollowFrameRef.current = window.requestAnimationFrame(() => {
+        collapseFollowFrameRef.current = 0
+        animateReviewItemToggle(viewer, item.id, collapsing)
       })
     })
-  }, [annotatedItems, collapsedItemIds, toggleItemCollapsed, viewerRef])
+  }, [collapsedItemIds, toggleItemCollapsed, viewerRef])
   const renderHeaderPrefix = useCallback((item: CodeViewItem<ReviewAnnotationMetadata>) => (
     <ReviewFileCollapseButton
       item={item}
@@ -850,41 +794,84 @@ const MultiFileViewer = memo(function MultiFileViewer({
   ): React.JSX.Element => {
     const path = pathFromItemId(item.id)
     const metadata = annotation.metadata
-    if (metadata.kind === 'image') return <ImageDiffPreview image={metadata.image} />
-    if (metadata.kind === 'markdown') {
-      return <MarkdownReviewPreview source={metadata.source} partial={metadata.partial} />
-    }
+    // The selection bar floats over the next line, so it gets no frame: an
+    // unpadded row collapses to zero height and the diff does not move.
     if (metadata.kind === 'selection') {
       return <SelectionActions range={metadata.range}
         commentLabel={reattachingThread == null ? 'Comment' : 'Reattach'}
-        onComment={onCommentOnSelection} onAskAgent={onAskAgentAboutSelection} />
+        onComment={onCommentOnSelection} onAskAgent={onAskAgentAboutSelection}
+        onCopy={onCopySelection} />
     }
-    if (metadata.kind === 'draft') return <DraftComment range={metadata.range} onCancel={cancelComment} onSave={saveComment} />
+    if (metadata.kind === 'image') return <AnnotationFrame><ImageDiffPreview image={metadata.image} /></AnnotationFrame>
+    if (metadata.kind === 'markdown') {
+      return <AnnotationFrame><MarkdownReviewPreview source={metadata.source} partial={metadata.partial} /></AnnotationFrame>
+    }
+    if (metadata.kind === 'draft') {
+      return <AnnotationFrame><DraftComment range={metadata.range} onCancel={cancelComment} onSave={saveComment} /></AnnotationFrame>
+    }
     if (metadata.kind === 'remote') {
-      return <RemoteReviewThreadCard thread={metadata.thread}
+      return <AnnotationFrame><RemoteReviewThreadCard thread={metadata.thread}
         pending={pendingRemoteThreadId === metadata.thread.id}
-        onReply={onReplyToRemoteThread} onToggleResolved={onResolveRemoteThread} />
+        onReply={onReplyToRemoteThread} onToggleResolved={onResolveRemoteThread} /></AnnotationFrame>
     }
     const { thread } = metadata
-    return <ReviewThreadCard thread={thread}
+    return <AnnotationFrame><ReviewThreadCard thread={thread}
+      onCopy={() => void copyReviewComment(path, thread)}
       onDelete={() => updateThread(path, thread.id, () => null)}
       onEdit={(body) => updateThread(path, thread.id, (current) => ({ ...current, body }))}
       onReply={(body) => updateThread(path, thread.id, (current) => ({ ...current, replies: [...current.replies, { id: crypto.randomUUID(), body }] }))}
-      onToggleResolved={() => updateThread(path, thread.id, (current) => ({ ...current, resolved: !current.resolved }))} />
-  }, [cancelComment, onAskAgentAboutSelection, onCommentOnSelection, onReplyToRemoteThread,
-    onResolveRemoteThread, pendingRemoteThreadId, reattachingThread,
+      onToggleResolved={() => updateThread(path, thread.id, (current) => ({ ...current, resolved: !current.resolved }))} /></AnnotationFrame>
+  }, [cancelComment, onAskAgentAboutSelection, onCommentOnSelection, onCopySelection,
+    onReplyToRemoteThread, onResolveRemoteThread, pendingRemoteThreadId, reattachingThread,
     saveComment, updateThread])
+  // What the viewer's gutter click used to do: one `+` press selects the line,
+  // two inside the interval open the composer. Custom utility content replaces
+  // the callback, so the button runs it itself.
+  const commentOnGutterLine = useCallback((itemId: string, range: SelectedLineRange) => {
+    const selection = { id: itemId, range }
+    // A press inside the selection the reader already made comments on that
+    // selection — not on the one line the button happened to be parked on.
+    const hovered = range.start
+    if (selectedLines != null
+      && selectionCoversGutterLine(selectedLines, itemId, hovered, range.side ?? range.endSide)) {
+      previousGutterActivationRef.current = null
+      queueMicrotask(() => onBeginComment(selectedLines))
+      return
+    }
+    const timestamp = performance.now()
+    const opensComment = isGutterDoubleClick(previousGutterActivationRef.current, selection, timestamp)
+    previousGutterActivationRef.current = opensComment ? null : { selection, timestamp }
+    onSelectLines(selection)
+    // CodeView reports selection-end after this callback. Starting the draft
+    // on the next microtask lets that report finish before the action bar is cleared.
+    if (opensComment) queueMicrotask(() => onBeginComment(selection))
+  }, [onBeginComment, onSelectLines, selectedLines])
+  const renderGutterUtility = useCallback((
+    getHoveredLine: () => { lineNumber: number; side?: 'additions' | 'deletions' } | undefined,
+    item: CodeViewItem<ReviewAnnotationMetadata>
+  ) => (
+    <GutterActions onComment={() => {
+      const hovered = getHoveredLine()
+      if (hovered == null) return
+      commentOnGutterLine(item.id, {
+        start: hovered.lineNumber,
+        end: hovered.lineNumber,
+        ...(hovered.side != null ? { side: hovered.side } : {})
+      })
+    }} />
+  ), [commentOnGutterLine])
   const remainingPathCount = paths.length - targetPathCount
   const codeViewSlots = useMemo<ReviewCodeViewSlots>(() => ({
     header: renderReviewSummary,
     headerPrefix: renderHeaderPrefix,
     headerMetadata: renderHeaderMetadata,
     annotation: renderReviewAnnotation,
+    gutterUtility: renderGutterUtility,
     footer: remainingPathCount > 0
       ? () => <ReviewLoadMoreSentinel loading={loading} onLoadMore={onLoadMore} />
       : undefined
-  }), [loading, onLoadMore, remainingPathCount, renderHeaderMetadata, renderHeaderPrefix,
-    renderReviewAnnotation, renderReviewSummary])
+  }), [loading, onLoadMore, remainingPathCount, renderGutterUtility, renderHeaderMetadata,
+    renderHeaderPrefix, renderReviewAnnotation, renderReviewSummary])
   const codeStyle = useMemo(() => ({
     '--diffs-font-family': CODE_FONTS[preferences.codeFont].fontFamily,
     '--diffs-header-font-family': INTERFACE_FONTS[preferences.interfaceFont].fontFamily,
@@ -896,10 +883,8 @@ const MultiFileViewer = memo(function MultiFileViewer({
     diffStyle,
     preferences,
     repositoryReview,
-    previousGutterActivationRef,
     onSelectLines,
     onHideSelectionActions,
-    onBeginComment,
     onImagePreview
   })
   const handleScroll = useCallback((scrollTop: number) => {
@@ -947,8 +932,6 @@ const MultiFileViewer = memo(function MultiFileViewer({
       failedCount={loadState.failedCount}
       omittedCount={loadState.omittedFiles.length}
       skippedCount={loadState.skippedCount}
-      removedPaths={sinceRemovedPaths}
-      uncertainPaths={sinceUncertainPaths}
     />
   )
   if (emptyOverlay != null && viewerSlots.length === 0) return emptyOverlay
@@ -1057,6 +1040,24 @@ function useReviewSelectionActions({
     onAttachToAgent(selection)
     handleSelectLines(null)
   }, [handleSelectLines, items, onAttachToAgent, pendingSelection])
+  // Copy leaves the selection up — it is the grab, not the destination, and the
+  // reader may still want the comment or chat action on the same lines.
+  const copySelection = useCallback(() => {
+    if (pendingSelection == null) return
+    const item = items.find((candidate) => candidate.id === pendingSelection.id)
+    const path = pathFromItemId(pendingSelection.id)
+    const selection = item == null
+      ? null
+      : agentSelectionForReviewItem(item, path, pendingSelection.range)
+    if (selection == null) {
+      showToast('Select lines from one side of the diff')
+      return
+    }
+    void copyCodeReference(
+      { path, first: selection.startLine, last: selection.endLine, side: selection.side },
+      selection.selectedText
+    )
+  }, [items, pendingSelection])
 
   // ⌘I and Escape use the same current selection as the visible action bar.
   const askAgentRef = useRef(askAgentAboutSelection)
@@ -1088,7 +1089,8 @@ function useReviewSelectionActions({
     commentOnSelection,
     startReattach,
     stopReattach,
-    askAgentAboutSelection
+    askAgentAboutSelection,
+    copySelection
   }
 }
 
@@ -1097,8 +1099,6 @@ const MultiFileReview = memo(function MultiFileReview({
   diffStyle,
   preferences,
   repositoryReview = null,
-  sinceRemovedPaths,
-  sinceUncertainPaths,
   pullRequestConversation = null,
   loadState,
   loading,
@@ -1164,7 +1164,8 @@ const MultiFileReview = memo(function MultiFileReview({
     commentOnSelection,
     startReattach,
     stopReattach,
-    askAgentAboutSelection
+    askAgentAboutSelection,
+    copySelection
   } = useReviewSelectionActions({
     items: loadState.items,
     worldId,
@@ -1390,7 +1391,6 @@ const MultiFileReview = memo(function MultiFileReview({
       worldId={worldId}
       paths={stablePaths} diffStyle={diffStyle} preferences={preferences}
       repositoryReview={repositoryReview} pullRequestConversation={pullRequestConversation}
-      sinceRemovedPaths={sinceRemovedPaths} sinceUncertainPaths={sinceUncertainPaths}
       loadState={loadState} loading={loading}
       targetPathCount={targetPathCount} onLoadMore={onLoadMore}
       selectedLines={selectedLines} annotatedItems={annotatedItems} threadsByPath={threadsByPath}
@@ -1404,7 +1404,7 @@ const MultiFileReview = memo(function MultiFileReview({
       pendingSelection={pendingSelection} onSelectLines={handleSelectLines}
       onHighlightLines={handleSelectedLinesChange} onHideSelectionActions={hideSelectionActions}
       onCommentOnSelection={commentOnSelection} onBeginComment={beginCommentAtSelection}
-      onAskAgentAboutSelection={askAgentAboutSelection}
+      onAskAgentAboutSelection={askAgentAboutSelection} onCopySelection={copySelection}
       onImagePreview={handleImagePreview}
       onScrollPositionChange={onScrollPositionChange} onVisiblePathChange={onVisiblePathChange} setViewerRef={setViewerRef}
       getInitialScrollTop={getInitialScrollTop}
