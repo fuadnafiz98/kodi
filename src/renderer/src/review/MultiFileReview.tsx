@@ -75,6 +75,7 @@ import {
   worldViewCache
 } from './worldViewCache'
 import {
+  createExactScroller,
   observeScrollTakeover,
   RetainedWorldCodeView,
   SCROLL_RESTORE_SETTLED_FRAMES,
@@ -102,6 +103,7 @@ import { PullRequestContext } from '../github/PullRequestContext'
 import { createReviewCommentAnchor } from './reviewThreadAnchors'
 import { copyCodeReference, copyReviewComment } from './codeReferenceClipboard'
 import { GutterActions } from '../diff/GutterActions'
+import { useStableHandler } from './useStableHandler'
 import './MultiFileReview.css'
 
 const CODE_VIEW_CSS = `
@@ -171,6 +173,8 @@ export interface MultiFileReviewProps {
   scrollToReviewRevision: number
   navigationPath: string | null
   navigationRevision: number
+  /** The last navigation acted on; owned by the workspace, which outlives this review. */
+  handledNavigationRevisionRef: { current: number }
   getInitialScrollTop(): number
   onScrollPositionChange(scrollTop: number): void
   onVisiblePathChange(path: string): void
@@ -407,6 +411,7 @@ function restoreReviewScrollAnchor(
     ? () => {}
     : observeScrollTakeover(scrollContainerRef.current, cancel)
 
+  const scrollExactly = createExactScroller()
   const restore = (): void => {
     if (cancelled || anchor == null) return
     const viewer = viewerRef.current
@@ -420,7 +425,7 @@ function restoreReviewScrollAnchor(
       if (settledFrames >= SCROLL_RESTORE_SETTLED_FRAMES) return
     } else {
       settledFrames = 0
-      viewer.scrollTo({ type: 'position', position: target, behavior: 'instant' })
+      scrollExactly(viewer, target, current)
     }
     if (performance.now() - startedAt < SCROLL_RESTORE_TIMEOUT_MS) {
       frame = window.requestAnimationFrame(restore)
@@ -435,10 +440,23 @@ function restoreReviewScrollAnchor(
   }
 }
 
+/**
+ * What the background anchor re-holds on: the review's identity and how much of
+ * it has arrived. The review object itself is rebuilt by registry updates that
+ * change nothing on screen — a repository sync, a status or checks poll — and
+ * each one restarted the anchor's frame loop.
+ */
+export function reviewScrollAnchorKey(review: RepositoryReview | null): string | null {
+  if (review == null) return null
+  const identity = review.kind === 'github' ? review.pullRequest.url : review.id
+  const patchLength = review.patchLength ?? review.patch.length
+  return `${identity}:${review.baseOid}:${review.headOid}:${review.files.length}:${review.omittedFiles.length}:${review.patchPages?.length ?? 0}:${patchLength}`
+}
+
 function useBackgroundScrollAnchor(
   worldId: string | null | undefined,
   conversation: PullRequestConversation | null,
-  review: RepositoryReview | null,
+  reviewKey: string | null,
   scrollContainerRef: RefObject<HTMLDivElement | null>,
   viewerRef: RefObject<CodeViewHandle<ReviewAnnotationMetadata> | null>
 ): void {
@@ -463,7 +481,7 @@ function useBackgroundScrollAnchor(
       // oxlint-disable-next-line react/exhaustive-deps
       anchorRef.current = captureReviewScrollAnchor(viewerRef.current?.getInstance())
     }
-  }, [conversation, review, scrollContainerRef, viewerRef, worldId])
+  }, [conversation, reviewKey, scrollContainerRef, viewerRef, worldId])
 }
 
 function findActiveRenderedItemId(viewer: CodeViewInstance<ReviewAnnotationMetadata>): string | null {
@@ -556,7 +574,7 @@ function useAnnotatedReviewItems({
   return derivation.items
 }
 
-function useReviewCodeViewOptions({
+export function useReviewCodeViewOptions({
   diffStyle,
   preferences,
   repositoryReview,
@@ -572,11 +590,15 @@ function useReviewCodeViewOptions({
   onImagePreview(path: string, image: FileImagePreview): void
 }): CodeViewReactOptions<ReviewAnnotationMetadata> {
   const diffLoader = useReviewDiffLoader(repositoryReview, onImagePreview)
+  // Only the fields the viewer reads. A new options object reaches every mounted
+  // item, so keying on the whole preferences object rebuilt the review whenever
+  // an unrelated setting — the accent, the terminal scrollback — moved.
+  const { editorTheme, wordWrap, showLineNumbers, foldUnchanged, codeLineHeight } = preferences
   return useMemo(() => ({
     // No `theme`: the worker pool resolves it and re-renders every instance on a
     // switch, so passing it here only forced a second full rebuild of the DOM.
-    themeType: getEditorThemeType(preferences.editorTheme), diffStyle, diffIndicators: 'bars', lineDiffType: 'word-alt',
-    overflow: preferences.wordWrap ? 'wrap' : 'scroll', disableLineNumbers: !preferences.showLineNumbers,
+    themeType: getEditorThemeType(editorTheme), diffStyle, diffIndicators: 'bars', lineDiffType: 'word-alt',
+    overflow: wordWrap ? 'wrap' : 'scroll', disableLineNumbers: !showLineNumbers,
     tokenizeMaxLineLength: 2_000, enableLineSelection: true, enableGutterUtility: true,
     onLineSelectionStart: () => onHideSelectionActions(),
     onLineSelectionEnd: (range, context) => onSelectLines(range == null ? null : { id: context.item.id, range }),
@@ -587,11 +609,23 @@ function useReviewCodeViewOptions({
       syncReviewCaretLifecycle(node, phase)
       schedulePartialDiffHydration(instance, phase, context.item, diffLoader)
     },
-    lineHoverHighlight: 'number', hunkSeparators: 'line-info-basic', expandUnchanged: !preferences.foldUnchanged,
+    lineHoverHighlight: 'number', hunkSeparators: 'line-info-basic', expandUnchanged: !foldUnchanged,
     collapsedContextThreshold: 4, stickyHeaders: true, layout: { paddingTop: 16, paddingBottom: 48, gap: 12 },
-    itemMetrics: { lineHeight: preferences.codeLineHeight }, unsafeCSS: CODE_VIEW_CSS,
+    itemMetrics: { lineHeight: codeLineHeight }, unsafeCSS: CODE_VIEW_CSS,
     ...(diffLoader == null ? {} : { loadDiffFiles: diffLoader.load })
-  }), [diffLoader, diffStyle, onHideSelectionActions, onSelectLines, preferences])
+  }), [codeLineHeight, diffLoader, diffStyle, editorTheme, foldUnchanged, onHideSelectionActions, onSelectLines,
+    showLineNumbers, wordWrap])
+}
+
+export function useReviewCodeStyle(preferences: AppPreferences): CSSProperties {
+  const { codeFont, interfaceFont, codeFontSize, codeLineHeight } = preferences
+  return useMemo(() => ({
+    '--diffs-font-family': CODE_FONTS[codeFont].fontFamily,
+    '--diffs-header-font-family': INTERFACE_FONTS[interfaceFont].fontFamily,
+    '--diffs-font-size': `var(${LIVE_CODE_FONT_SIZE_PROPERTY}, ${codeFontSize}px)`,
+    '--diffs-line-height': `var(${LIVE_CODE_LINE_HEIGHT_PROPERTY}, ${codeLineHeight}px)`,
+    '--diffs-font-features': '"calt" 1, "liga" 1'
+  }) as CSSProperties, [codeFont, codeFontSize, codeLineHeight, interfaceFont])
 }
 
 interface MultiFileViewerProps {
@@ -628,6 +662,8 @@ interface MultiFileViewerProps {
   onCopySelection(): void
   onImagePreview(path: string, image: FileImagePreview): void
   scrollContainerRef: RefObject<HTMLDivElement | null>
+  /** Stops the front viewer from putting back its old scroll (see useRetainedScrollRestore). */
+  cancelScrollRestoreRef: RefObject<(() => void) | null>
   viewerRef: React.RefObject<CodeViewHandle<ReviewAnnotationMetadata> | null>
   onScrollPositionChange(scrollTop: number): void
   onVisiblePathChange(path: string): void
@@ -675,6 +711,7 @@ const MultiFileViewer = memo(function MultiFileViewer({
   onCopySelection,
   onImagePreview,
   scrollContainerRef,
+  cancelScrollRestoreRef,
   viewerRef,
   onScrollPositionChange,
   onVisiblePathChange,
@@ -703,7 +740,7 @@ const MultiFileViewer = memo(function MultiFileViewer({
   useBackgroundScrollAnchor(
     worldId,
     deferredConversation,
-    repositoryReview,
+    reviewScrollAnchorKey(repositoryReview),
     scrollContainerRef,
     viewerRef
   )
@@ -788,6 +825,17 @@ const MultiFileViewer = memo(function MultiFileViewer({
       </>
     )
   }, [markdownPreviewPaths, onToggleMarkdownPreview, onToggleViewed, previewableMarkdownPaths, viewedPaths])
+  // These only read the pending selection, the draft and the loaded items when
+  // they run. Passed through as they are, every selection, draft and streamed
+  // page handed the annotation renderer a new identity, and Pierre rebuilds the
+  // portal of every rendered item on that — thread cards included.
+  const commentOnSelection = useStableHandler(onCommentOnSelection)
+  const askAgentAboutSelection = useStableHandler(onAskAgentAboutSelection)
+  const copySelection = useStableHandler(onCopySelection)
+  const saveDraftComment = useStableHandler(saveComment)
+  const replyToRemoteThread = useStableHandler(onReplyToRemoteThread)
+  const resolveRemoteThread = useStableHandler(onResolveRemoteThread)
+  const reattaching = reattachingThread != null
   const renderReviewAnnotation = useCallback((
     annotation: LineAnnotation<ReviewAnnotationMetadata> | DiffLineAnnotation<ReviewAnnotationMetadata>,
     item: CodeViewItem<ReviewAnnotationMetadata>
@@ -798,21 +846,21 @@ const MultiFileViewer = memo(function MultiFileViewer({
     // unpadded row collapses to zero height and the diff does not move.
     if (metadata.kind === 'selection') {
       return <SelectionActions range={metadata.range}
-        commentLabel={reattachingThread == null ? 'Comment' : 'Reattach'}
-        onComment={onCommentOnSelection} onAskAgent={onAskAgentAboutSelection}
-        onCopy={onCopySelection} />
+        commentLabel={reattaching ? 'Reattach' : 'Comment'}
+        onComment={commentOnSelection} onAskAgent={askAgentAboutSelection}
+        onCopy={copySelection} />
     }
     if (metadata.kind === 'image') return <AnnotationFrame><ImageDiffPreview image={metadata.image} /></AnnotationFrame>
     if (metadata.kind === 'markdown') {
       return <AnnotationFrame><MarkdownReviewPreview source={metadata.source} partial={metadata.partial} /></AnnotationFrame>
     }
     if (metadata.kind === 'draft') {
-      return <AnnotationFrame><DraftComment range={metadata.range} onCancel={cancelComment} onSave={saveComment} /></AnnotationFrame>
+      return <AnnotationFrame><DraftComment range={metadata.range} onCancel={cancelComment} onSave={saveDraftComment} /></AnnotationFrame>
     }
     if (metadata.kind === 'remote') {
       return <AnnotationFrame><RemoteReviewThreadCard thread={metadata.thread}
         pending={pendingRemoteThreadId === metadata.thread.id}
-        onReply={onReplyToRemoteThread} onToggleResolved={onResolveRemoteThread} /></AnnotationFrame>
+        onReply={replyToRemoteThread} onToggleResolved={resolveRemoteThread} /></AnnotationFrame>
     }
     const { thread } = metadata
     return <AnnotationFrame><ReviewThreadCard thread={thread}
@@ -821,13 +869,14 @@ const MultiFileViewer = memo(function MultiFileViewer({
       onEdit={(body) => updateThread(path, thread.id, (current) => ({ ...current, body }))}
       onReply={(body) => updateThread(path, thread.id, (current) => ({ ...current, replies: [...current.replies, { id: crypto.randomUUID(), body }] }))}
       onToggleResolved={() => updateThread(path, thread.id, (current) => ({ ...current, resolved: !current.resolved }))} /></AnnotationFrame>
-  }, [cancelComment, onAskAgentAboutSelection, onCommentOnSelection, onCopySelection,
-    onReplyToRemoteThread, onResolveRemoteThread, pendingRemoteThreadId, reattachingThread,
-    saveComment, updateThread])
+  }, [askAgentAboutSelection, cancelComment, commentOnSelection, copySelection, pendingRemoteThreadId,
+    reattaching, replyToRemoteThread, resolveRemoteThread, saveDraftComment, updateThread])
   // What the viewer's gutter click used to do: one `+` press selects the line,
   // two inside the interval open the composer. Custom utility content replaces
-  // the callback, so the button runs it itself.
-  const commentOnGutterLine = useCallback((itemId: string, range: SelectedLineRange) => {
+  // the callback, so the button runs it itself. It reads the live selection only
+  // when pressed; closing over it changed the gutter renderer on every line of a
+  // drag, and with it the portal of every rendered item.
+  const commentOnGutterLine = useStableHandler((itemId: string, range: SelectedLineRange) => {
     const selection = { id: itemId, range }
     // A press inside the selection the reader already made comments on that
     // selection — not on the one line the button happened to be parked on.
@@ -845,7 +894,7 @@ const MultiFileViewer = memo(function MultiFileViewer({
     // CodeView reports selection-end after this callback. Starting the draft
     // on the next microtask lets that report finish before the action bar is cleared.
     if (opensComment) queueMicrotask(() => onBeginComment(selection))
-  }, [onBeginComment, onSelectLines, selectedLines])
+  })
   const renderGutterUtility = useCallback((
     getHoveredLine: () => { lineNumber: number; side?: 'additions' | 'deletions' } | undefined,
     item: CodeViewItem<ReviewAnnotationMetadata>
@@ -872,13 +921,7 @@ const MultiFileViewer = memo(function MultiFileViewer({
       : undefined
   }), [loading, onLoadMore, remainingPathCount, renderGutterUtility, renderHeaderMetadata,
     renderHeaderPrefix, renderReviewAnnotation, renderReviewSummary])
-  const codeStyle = useMemo(() => ({
-    '--diffs-font-family': CODE_FONTS[preferences.codeFont].fontFamily,
-    '--diffs-header-font-family': INTERFACE_FONTS[preferences.interfaceFont].fontFamily,
-    '--diffs-font-size': `var(${LIVE_CODE_FONT_SIZE_PROPERTY}, ${preferences.codeFontSize}px)`,
-    '--diffs-line-height': `var(${LIVE_CODE_LINE_HEIGHT_PROPERTY}, ${preferences.codeLineHeight}px)`,
-    '--diffs-font-features': '"calt" 1, "liga" 1'
-  }) as CSSProperties, [preferences])
+  const codeStyle = useReviewCodeStyle(preferences)
   const codeViewOptions = useReviewCodeViewOptions({
     diffStyle,
     preferences,
@@ -921,9 +964,13 @@ const MultiFileViewer = memo(function MultiFileViewer({
     )
     return items == null ? [] : [{ id, items }]
   })
-  worldViewCache.retainMountedViewers(viewerSlots.map((slot) => slot.id))
-
   const activeHasItems = paths.length > 0 && loadState.items.length > 0
+  // A hidden slot keeps its React state but not its Pierre instance, so only the
+  // visible one is charged as a viewer.
+  worldViewCache.retainMountedViewers(
+    worldId != null && activeHasItems && viewerSlots.some((slot) => slot.id === worldId) ? [worldId] : []
+  )
+
   const emptyOverlay = (
     <ReviewEmptyOverlay
       pathCount={paths.length}
@@ -952,6 +999,7 @@ const MultiFileViewer = memo(function MultiFileViewer({
           onHighlightLines={onHighlightLines}
           onScroll={handleScroll}
           scrollContainerRef={scrollContainerRef}
+          cancelScrollRestoreRef={cancelScrollRestoreRef}
           setViewerRef={setViewerRef}
           getInitialScrollTop={getInitialScrollTop}
           loading={loading}
@@ -1107,6 +1155,7 @@ const MultiFileReview = memo(function MultiFileReview({
   scrollToReviewRevision,
   navigationPath,
   navigationRevision,
+  handledNavigationRevisionRef,
   getInitialScrollTop,
   onScrollPositionChange,
   onVisiblePathChange,
@@ -1128,9 +1177,9 @@ const MultiFileReview = memo(function MultiFileReview({
   const [markdownSources, setMarkdownSources] = useState<ReadonlyMap<string, MarkdownHydratedSource>>(EMPTY_MARKDOWN_SOURCES)
   const viewerRef = useRef<CodeViewHandle<ReviewAnnotationMetadata> | null>(null)
   const scrollContainerRef = useRef<HTMLDivElement | null>(null)
+  const cancelScrollRestoreRef = useRef<(() => void) | null>(null)
   const viewedAdvanceFrameRef = useRef(0)
   const markdownPreviewPinRef = useRef<ReviewScrollAnchor | null>(null)
-  const handledNavigationRevisionRef = useRef(navigationRevision)
   const stablePaths = paths
   const {
     selectedLines,
@@ -1207,13 +1256,18 @@ const MultiFileReview = memo(function MultiFileReview({
       return
     }
     handledNavigationRevisionRef.current = navigationRevision
+    // A viewer coming back to the front — the reader was in the single-file view
+    // and clicked a file of the review — puts its old position back over several
+    // frames, and that won over the jump: the review reopened where it was left,
+    // not on the file.
+    cancelScrollRestoreRef.current?.()
     viewer?.scrollTo({
       type: 'item',
       id,
       align: 'start',
       behavior: 'smooth-auto'
     })
-  }, [loadState.loadedPaths, navigationPath, navigationRevision, paths])
+  }, [handledNavigationRevisionRef, loadState.loadedPaths, navigationPath, navigationRevision, paths])
 
   useEffect(() => {
     if (scrollToReviewRevision === 0) return
@@ -1281,6 +1335,7 @@ const MultiFileReview = memo(function MultiFileReview({
     let frame = 0
     let settledFrames = 0
     const startedAt = performance.now()
+    const scrollExactly = createExactScroller()
     const step = (): void => {
       const viewer = viewerRef.current
       const instance = viewer?.getInstance()
@@ -1295,7 +1350,7 @@ const MultiFileReview = memo(function MultiFileReview({
           if (settledFrames >= SCROLL_RESTORE_SETTLED_FRAMES) return
         } else {
           settledFrames = 0
-          viewer.scrollTo({ type: 'position', position: target, behavior: 'instant' })
+          scrollExactly(viewer, target, current)
         }
       }
       if (performance.now() - startedAt < SCROLL_RESTORE_TIMEOUT_MS) {
@@ -1396,6 +1451,7 @@ const MultiFileReview = memo(function MultiFileReview({
       selectedLines={selectedLines} annotatedItems={annotatedItems} threadsByPath={threadsByPath}
       collapsedItemIds={collapsedItemIds} viewedPaths={viewedPaths}
       onToggleViewed={toggleViewed} scrollContainerRef={scrollContainerRef}
+      cancelScrollRestoreRef={cancelScrollRestoreRef}
       previewableMarkdownPaths={previewableMarkdownPaths} markdownPreviewPaths={markdownPreviewPaths}
       onToggleMarkdownPreview={toggleMarkdownPreview}
       viewerRef={viewerRef}

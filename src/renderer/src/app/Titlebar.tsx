@@ -1,5 +1,5 @@
 import { lazy, memo, Suspense } from 'react'
-import { IconGear, IconSearch, IconTerminal } from '@pierre/icons'
+import { IconBranch, IconGear, IconSearch, IconTerminal } from '@pierre/icons'
 
 import type { RepositorySnapshot } from '../../../shared/contracts'
 import type { RecentFolder } from '../explorer/recentFolders'
@@ -37,6 +37,8 @@ interface TitlebarProps {
   onAgentToggle(): void
   terminalOpen: boolean
   onTerminalToggle(): void
+  onSourceControlOpen?(): void
+  onSourceControlPreload?(): void
 }
 
 export const Titlebar = memo(function Titlebar({
@@ -57,7 +59,9 @@ export const Titlebar = memo(function Titlebar({
   agentOpen,
   onAgentToggle,
   terminalOpen,
-  onTerminalToggle
+  onTerminalToggle,
+  onSourceControlOpen,
+  onSourceControlPreload = NOOP
 }: TitlebarProps): React.JSX.Element {
   return (
     <div className="titlebar">
@@ -98,6 +102,26 @@ export const Titlebar = memo(function Titlebar({
                 <IconSearch />
               </button>
             )}
+            {snapshot?.kind === 'git' && onSourceControlOpen != null ? (
+              <button
+                className="icon-button source-control-titlebar-button"
+                type="button"
+                onClick={onSourceControlOpen}
+                onPointerEnter={onSourceControlPreload}
+                onFocus={onSourceControlPreload}
+                aria-label={snapshot.statuses.length === 0
+                  ? 'Source control'
+                  : `Source control, ${snapshot.statuses.length} changed ${snapshot.statuses.length === 1 ? 'file' : 'files'}`}
+                title="Source Control"
+              >
+                <IconBranch />
+                {snapshot.statuses.length === 0 ? null : (
+                  <span className="source-control-badge" aria-hidden="true">
+                    {snapshot.statuses.length > 99 ? '99+' : snapshot.statuses.length}
+                  </span>
+                )}
+              </button>
+            ) : null}
             <button className="icon-button" type="button" onClick={onSettingsOpen} aria-label="Open settings" title="Settings">
               <IconGear />
             </button>

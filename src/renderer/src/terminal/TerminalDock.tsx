@@ -35,6 +35,36 @@ type TerminalStatus = 'starting' | 'running' | 'exited' | 'failed'
 // fit reflows the whole scrollback and sends a SIGWINCH to the shell.
 const RESIZE_FIT_DELAY_MS = 80
 
+// xterm parses each write() call whole and only yields to the page between
+// calls, so the up-to-512 KB tail main replays when the dock is shown again was
+// one uninterrupted parse. At 64 KB a slice parses in a few milliseconds and
+// xterm's own 12 ms write budget gets a boundary to stop at.
+export const TERMINAL_WRITE_CHUNK = 64 * 1_024
+
+/**
+ * Hands output to xterm in slices of at most `chunkSize` UTF-16 units, never
+ * between the two halves of a surrogate pair. xterm queues every call in order,
+ * so live output that arrives while a large replay is still parsing lands
+ * behind it rather than inside it.
+ */
+export function writeTerminalOutput(
+  terminal: Pick<Terminal, 'write'>,
+  data: string,
+  chunkSize: number = TERMINAL_WRITE_CHUNK
+): void {
+  if (data.length <= chunkSize) {
+    terminal.write(data)
+    return
+  }
+  for (let start = 0; start < data.length;) {
+    let end = Math.min(start + chunkSize, data.length)
+    const last = data.charCodeAt(end - 1)
+    if (end < data.length && last >= 0xd800 && last <= 0xdbff) end -= 1
+    terminal.write(data.slice(start, end))
+    start = end
+  }
+}
+
 export interface TerminalDockHandle {
   focus(): void
 }
@@ -387,7 +417,8 @@ export const TerminalDock = forwardRef<TerminalDockHandle, TerminalDockProps>(fu
   useEffect(() => {
     const api = requireRepositoryApi()
     const unsubscribeData = api.onTerminalData((event) => {
-      if (event.sessionId === sessionIdRef.current) terminalRef.current?.write(event.data)
+      const terminal = terminalRef.current
+      if (event.sessionId === sessionIdRef.current && terminal != null) writeTerminalOutput(terminal, event.data)
     })
     const unsubscribeExit = api.onTerminalExit((event) => {
       if (event.sessionId !== sessionIdRef.current) return

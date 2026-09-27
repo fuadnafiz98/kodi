@@ -21,3 +21,27 @@ export function revealInExplorer(path: string): boolean {
   handler(path)
   return true
 }
+
+/**
+ * Opening a file from the palette goes through the workspace for the same
+ * reason. Selecting the path in app state was not enough: after a click on a
+ * file and a scroll away from it, ⌘P back to that file set the value it already
+ * held, nothing re-rendered, and the review stayed where it was.
+ */
+export type WorkspaceFileOpener = (path: string) => void
+
+let fileOpener: WorkspaceFileOpener | null = null
+
+export function setWorkspaceFileOpener(next: WorkspaceFileOpener): () => void {
+  fileOpener = next
+  return () => {
+    if (fileOpener === next) fileOpener = null
+  }
+}
+
+/** Returns false when no workspace is mounted to open in. */
+export function openInWorkspace(path: string): boolean {
+  if (fileOpener == null || path === '') return false
+  fileOpener(path)
+  return true
+}

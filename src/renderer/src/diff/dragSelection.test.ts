@@ -1,10 +1,11 @@
-import { describe, expect, test } from 'bun:test'
+import { afterEach, describe, expect, test } from 'bun:test'
 
 import {
   codeFromEventPath,
+  collectDragLines,
   DRAG_SELECTION_CSS,
   findClosestDragLine,
-  measureDragLines,
+  syncDragGuideLifecycle,
   type DragLineGeometry
 } from './dragSelection'
 
@@ -85,21 +86,136 @@ describe('codeFromEventPath', () => {
   })
 })
 
-describe('measureDragLines', () => {
+describe('collectDragLines', () => {
   test('maps unified line types to sides the way Pierre does', () => {
     const code = codeWithGutterCells({ 'data-unified': '' }, [
       { index: 0, number: 10, type: 'change-deletion' },
       { index: 1, number: 10, type: 'change-addition' },
       { index: 2, number: 11, type: 'context' }
     ])
-    const { lines } = measureDragLines(code)
-    expect(lines.map((line) => line.lineSide)).toEqual(['deletions', 'additions', 'additions'])
+    const { cells } = collectDragLines(code)
+    expect(cells.map((cell) => cell.lineSide)).toEqual(['deletions', 'additions', 'additions'])
   })
 
   test('lets a split pane side override line types', () => {
     const code = codeWithGutterCells({ 'data-additions': '' }, [
       { index: 0, number: 10, type: 'change-deletion' }
     ])
-    expect(measureDragLines(code).lines[0]?.lineSide).toBe('additions')
+    expect(collectDragLines(code).cells[0]?.lineSide).toBe('additions')
+  })
+})
+
+describe('syncDragGuideLifecycle at scale', () => {
+  const LINE_HEIGHT = 20
+  const LINE_COUNT = 5_000
+
+  // A long file's gutter inside a scrolled viewer. happy-dom has no layout, so
+  // the rect read stands in for it — each row's top minus the scroll offset —
+  // and counts calls. The count is what is asserted, not happy-dom's speed.
+  function scrolledDrag() {
+    const scroller = document.createElement('div')
+    scroller.className = 'multi-file-code-view'
+    const host = document.createElement('div')
+    scroller.append(host)
+    document.body.append(scroller)
+    const root = host.attachShadow({ mode: 'open' })
+    const code = codeWithGutterCells({ 'data-additions': '' }, [])
+    const gutter = code.querySelector<HTMLElement>('[data-gutter]')!
+    const addRows = (from: number, to: number): void => {
+      for (let index = from; index < to; index += 1) {
+        const cell = document.createElement('div')
+        cell.setAttribute('data-column-number', String(index + 1))
+        cell.setAttribute('data-line-index', String(index))
+        gutter.append(cell)
+      }
+    }
+    addRows(0, LINE_COUNT)
+    const button = document.createElement('button')
+    button.setAttribute('data-utility-button', '')
+    code.append(button)
+    root.append(code)
+
+    let scrollTop = 0
+    let reads = 0
+    // Shadowed on HTMLElement and deleted afterwards, which uncovers the
+    // Element implementation again.
+    const prototype = HTMLElement.prototype
+    Object.defineProperty(prototype, 'getBoundingClientRect', {
+      configurable: true,
+      value(this: HTMLElement) {
+        reads += 1
+        const top = Number(this.dataset.lineIndex ?? 0) * LINE_HEIGHT - scrollTop
+        return { top, bottom: top + LINE_HEIGHT }
+      }
+    })
+
+    const selected: unknown[] = []
+    syncDragGuideLifecycle(host, 'mount', (range) => selected.push(range))
+    const pointer = (type: string, clientY: number): void => {
+      button.dispatchEvent(new PointerEvent(type, { pointerId: 7, clientY, bubbles: true, composed: true, cancelable: true }))
+    }
+    return {
+      selected,
+      pointer,
+      reads: () => reads,
+      scrollBy(pixels: number) {
+        scrollTop += pixels
+        scroller.dispatchEvent(new Event('scroll'))
+      },
+      rerender(rows: number) {
+        addRows(LINE_COUNT, LINE_COUNT + rows)
+        syncDragGuideLifecycle(host, 'update', (range) => selected.push(range))
+      },
+      restore() {
+        syncDragGuideLifecycle(host, 'unmount', () => {})
+        delete (prototype as { getBoundingClientRect?: unknown }).getBoundingClientRect
+        scroller.remove()
+      }
+    }
+  }
+
+  let active: ReturnType<typeof scrolledDrag> | null = null
+  afterEach(() => {
+    active?.restore()
+    active = null
+  })
+
+  // Re-measuring every row after a scroll read 5,000 rects per move here.
+  const READ_BUDGET = 2 * Math.ceil(Math.log2(LINE_COUNT)) + 2
+
+  test('a scrolling drag reads a bounded number of rows per move', () => {
+    const drag = scrolledDrag()
+    active = drag
+    drag.pointer('pointerdown', 100 * LINE_HEIGHT + 5)
+    const readsPerMove: number[] = []
+    const msPerMove: number[] = []
+    for (let step = 0; step < 40; step += 1) {
+      drag.scrollBy(LINE_HEIGHT * 3)
+      const before = drag.reads()
+      const startedAt = performance.now()
+      drag.pointer('pointermove', 400 + (step % 5) * 7)
+      msPerMove.push(performance.now() - startedAt)
+      readsPerMove.push(drag.reads() - before)
+    }
+    drag.pointer('pointerup', 400)
+
+    const sorted = [...msPerMove].sort((left, right) => left - right)
+    console.info(`drag guide after scroll: ${Math.max(...readsPerMove)} rect reads per move (max), `
+      + `median ${sorted[20]!.toFixed(2)} ms, max ${sorted[39]!.toFixed(2)} ms`)
+    expect(Math.max(...readsPerMove)).toBeLessThanOrEqual(READ_BUDGET)
+    // Forty steps of three rows put the last move (y 428) on row 141, line 142.
+    expect(drag.selected).toEqual([{ start: 101, end: 142, side: 'additions', endSide: 'additions' }])
+  })
+
+  test('rows the viewer renders mid-drag are picked up on the next move', () => {
+    const drag = scrolledDrag()
+    active = drag
+    drag.pointer('pointerdown', 5)
+    drag.rerender(20)
+    const before = drag.reads()
+    drag.pointer('pointermove', (LINE_COUNT + 10) * LINE_HEIGHT + 5)
+    expect(drag.reads() - before).toBeLessThanOrEqual(READ_BUDGET)
+    drag.pointer('pointerup', 0)
+    expect(drag.selected).toEqual([{ start: 1, end: LINE_COUNT + 11, side: 'additions', endSide: 'additions' }])
   })
 })

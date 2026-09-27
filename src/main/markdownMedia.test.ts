@@ -1,6 +1,12 @@
 import { describe, expect, test } from 'bun:test'
 
-import { loadMarkdownMedia, MAX_MARKDOWN_MEDIA_BYTES } from './markdownMedia.js'
+import {
+  GITHUB_TOKEN_TTL_MS,
+  loadMarkdownMedia,
+  MAX_MARKDOWN_MEDIA_BYTES,
+  readGitHubAuthToken,
+  resetGitHubAuthTokenForTests
+} from './markdownMedia.js'
 
 describe('loadMarkdownMedia', () => {
   test('rejects hosts outside GitHub', async () => {
@@ -50,5 +56,49 @@ describe('loadMarkdownMedia', () => {
       fetchImpl,
       async () => null
     )).rejects.toThrow('too large')
+  })
+})
+
+describe('readGitHubAuthToken', () => {
+  test('asks gh once per ten minutes and forgets a miss', async () => {
+    resetGitHubAuthTokenForTests()
+    let spawns = 0
+    let answer: string | null = null
+    const spawn = async (): Promise<string | null> => {
+      spawns += 1
+      return answer
+    }
+    try {
+      expect(await readGitHubAuthToken(spawn, 0)).toBeNull()
+      // Signed in since: the miss was not remembered.
+      answer = 'token-1'
+      expect(await readGitHubAuthToken(spawn, 1)).toBe('token-1')
+      expect(await readGitHubAuthToken(spawn, 2)).toBe('token-1')
+      expect(await readGitHubAuthToken(spawn, GITHUB_TOKEN_TTL_MS)).toBe('token-1')
+      expect(spawns).toBe(2)
+
+      answer = 'token-2'
+      expect(await readGitHubAuthToken(spawn, GITHUB_TOKEN_TTL_MS + 2)).toBe('token-2')
+      expect(spawns).toBe(3)
+    } finally {
+      resetGitHubAuthTokenForTests()
+    }
+  })
+
+  test('shares one spawn between concurrent loads and drops a failed one', async () => {
+    resetGitHubAuthTokenForTests()
+    let spawns = 0
+    const failing = async (): Promise<string | null> => {
+      spawns += 1
+      throw new Error('gh is missing')
+    }
+    try {
+      const [left, right] = await Promise.all([readGitHubAuthToken(failing, 0), readGitHubAuthToken(failing, 0)])
+      expect([left, right, spawns]).toEqual([null, null, 1])
+      await readGitHubAuthToken(failing, 1)
+      expect(spawns).toBe(2)
+    } finally {
+      resetGitHubAuthTokenForTests()
+    }
   })
 })

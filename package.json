@@ -36,7 +36,17 @@
     "perf:patch-stream": "bun scripts/benchmark-patch-stream.mjs",
     "perf:memory-probe": "bun scripts/perf/memory-probe.mjs",
     "perf:lifecycle-probe": "bun scripts/perf/lifecycle-probe.mjs",
-    "perf:matrix": "bash scripts/perf/run-matrix.sh"
+    "perf:matrix": "bash scripts/perf/run-matrix.sh",
+    "e2e": "bun scripts/e2e/run-all.mjs",
+    "e2e:large-worktree": "bun scripts/e2e/large-worktree.e2e.mjs",
+    "e2e:huge-repo": "bun scripts/e2e/huge-repo.e2e.mjs",
+    "e2e:review-editing": "bun scripts/e2e/review-editing.e2e.mjs",
+    "e2e:session-restore": "bun scripts/e2e/session-restore.e2e.mjs",
+    "e2e:cold-start": "bun scripts/e2e/cold-start.e2e.mjs",
+    "e2e:smoothness": "bun scripts/e2e/smoothness.e2e.mjs",
+    "e2e:soak": "bun scripts/e2e/soak.e2e.mjs",
+    "e2e:palette-navigation": "bun scripts/e2e/palette-navigation.e2e.mjs",
+    "e2e:file-contents": "bun scripts/e2e/file-contents.e2e.mjs"
   },
   "comment:dependencies": "electron-builder packs `dependencies` into the app verbatim. Only packages the main process resolves at runtime belong here: the Claude Agent SDK, @vscode/ripgrep, and the native node-pty bridge. Everything the renderer uses is bundled by Vite into out/renderer, so shipping it again would be dead weight.",
   "dependencies": {

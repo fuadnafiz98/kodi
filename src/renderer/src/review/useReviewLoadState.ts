@@ -1,12 +1,13 @@
 import { startTransition, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { CodeViewItem } from '@pierre/diffs'
 
-import type { OmittedDiffFile, RepositoryChangeEvent, RepositoryReview } from '../../../shared/contracts'
+import { COMMAND_ABORTED_MESSAGE, type OmittedDiffFile, type RepositoryChangeEvent, type RepositoryReview } from '../../../shared/contracts'
 import { COMPARISON_FETCH_CONCURRENCY } from '../diff/diffWorkerConfig'
 import type { ReviewAnnotationMetadata } from './ReviewComments'
 import {
   createPatchReviewItems,
   createReviewItem,
+  keepUnchangedReviewItem,
   mergeReviewItems,
   orderReviewItems,
   pathFromReviewItemId as pathFromItemId,
@@ -15,6 +16,8 @@ import {
 } from './reviewItems'
 import { resetReviewFileMetrics, setLoadedReviewItemCount } from './reviewMetrics'
 import { worldViewCache } from './worldViewCache'
+import { countKodiMetric } from '../perf/kodiCounters'
+import { createStreamCompletion } from './streamCompletion'
 
 export interface ReviewLoadState {
   items: CodeViewItem<ReviewAnnotationMetadata>[]
@@ -35,6 +38,32 @@ const EMPTY_LOAD_STATE: ReviewLoadState = {
 }
 
 export const FOLDER_REVIEW_PAGE_SIZE = 50
+
+// A watcher refresh aborts a working-tree patch still being built for the
+// older snapshot. That is a git repository answering "ask again", not a plain
+// folder with no patch: treating it as the latter fetched fifty files one by
+// one, re-parsed and re-highlighted them, on every save made while a review was
+// loading — the stalls a busy repository kept hitting.
+const SUPERSEDED_PATCH_RETRIES = 3
+
+export async function requestWorkingTreePatch(
+  repository: Pick<NonNullable<Window['repository']>, 'getWorkingTreePatch'>,
+  paths: readonly string[],
+  requestId: string | undefined,
+  isCancelled: () => boolean,
+  wait: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+): ReturnType<NonNullable<Window['repository']>['getWorkingTreePatch']> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await repository.getWorkingTreePatch([...paths], requestId)
+    } catch (error) {
+      const superseded = error instanceof Error && error.message.includes(COMMAND_ABORTED_MESSAGE)
+      if (!superseded || isCancelled() || attempt >= SUPERSEDED_PATCH_RETRIES) throw error
+      await wait(100 * (attempt + 1))
+      if (isCancelled()) throw error
+    }
+  }
+}
 
 // A streamed pull request review whose fetch dies mid-flight leaves
 // `expectedFileCount` above what actually arrived, and `loading` then stays true
@@ -197,6 +226,40 @@ interface ReviewLoadStateOptions {
   repositoryReview: RepositoryReview | null
   repositoryChange: RepositoryChangeEvent | null
   worldId?: string | null
+  /**
+   * The repository this review belongs to. Main otherwise answers from whichever
+   * session is in front, and a tab's load that crossed a tab switch was served
+   * by the other repository.
+   */
+  root?: string
+}
+
+/**
+ * A retry after a superseded build streams its pages again under the same
+ * request, so an omission can arrive twice; counted twice, it pushed the
+ * skipped count past the files that were really skipped.
+ */
+export function appendOmittedFiles(
+  current: readonly OmittedDiffFile[],
+  incoming: readonly OmittedDiffFile[]
+): OmittedDiffFile[] {
+  if (incoming.length === 0) return current as OmittedDiffFile[]
+  const known = new Set(current.map((file) => file.path))
+  const next = [...current]
+  for (const file of incoming) {
+    if (known.has(file.path)) continue
+    known.add(file.path)
+    next.push(file)
+  }
+  return next
+}
+
+/** The patch call pinned to one repository. */
+function workingTreePatchFor(
+  repository: NonNullable<Window['repository']>,
+  root: string | undefined
+): Pick<NonNullable<Window['repository']>, 'getWorkingTreePatch'> {
+  return { getWorkingTreePatch: (paths, requestId) => repository.getWorkingTreePatch(paths, requestId, root) }
 }
 
 interface ReviewLoadStateApi {
@@ -226,10 +289,22 @@ export function useReviewLoadState({
   stablePaths,
   repositoryReview,
   repositoryChange,
-  worldId = null
+  worldId = null,
+  root
 }: ReviewLoadStateOptions): ReviewLoadStateApi {
   const loadedPathsKeyRef = useRef<string | null>(null)
   const loadedPageCountRef = useRef(0)
+  // Whether the current path set was served by the working-tree patch. Once it
+  // was, a rerun for the same paths (a new `stablePaths` identity, a status
+  // change) has nothing to page: falling through fetched fifty comparisons one
+  // by one and switched a git review into the folder's paged mode.
+  const servedByPatchRef = useRef(false)
+  // The paths the last working-tree patch delivered. A path set that only grew
+  // (a save made another file dirty, a new file) fetches the newcomers alone:
+  // refetching and re-parsing every file on each of those ticks was a long task
+  // per save on a large review. Content changes to the files already held come
+  // through the change event below, not through a path-set change.
+  const servedPathsRef = useRef<ReadonlySet<string>>(new Set())
   const [folderLoadState, setFolderLoadState] = useState<ReviewLoadState>(EMPTY_LOAD_STATE)
   const [pagination, setPagination] = useState({ key: '', limit: FOLDER_REVIEW_PAGE_SIZE })
   const loadLimit = pagination.key === pathsKey ? pagination.limit : FOLDER_REVIEW_PAGE_SIZE
@@ -329,14 +404,17 @@ export function useReviewLoadState({
     }
   }, [externalReview, worldId])
   const externalReviewItems = externalReview?.items ?? null
+  // Keyed on the omitted files rather than the review: a review rebuilt around
+  // the same patch would otherwise mint a new load state and path Set.
+  const externalOmittedFiles = repositoryReview?.omittedFiles
   const externalLoadState = useMemo(() => {
     if (externalReviewItems == null) return null
     return reviewLoadStateFromExternalItems(
       externalReviewItems,
       stablePaths,
-      repositoryReview?.omittedFiles ?? []
+      externalOmittedFiles ?? []
     )
-  }, [externalReviewItems, repositoryReview, stablePaths])
+  }, [externalOmittedFiles, externalReviewItems, stablePaths])
   const loadState = externalLoadState ?? folderLoadState
   const { loading, targetPathCount } = reviewProgress({
     streamingFileCount,
@@ -361,15 +439,29 @@ export function useReviewLoadState({
     if (externalReviewItems != null) return
     const isNewPathSet = loadedPathsKeyRef.current !== pathsKey
     loadedPathsKeyRef.current = pathsKey
+    if (!isNewPathSet && servedByPatchRef.current) return
+    const heldPaths = isNewPathSet && servedByPatchRef.current ? servedPathsRef.current : null
+    const requestPaths = heldPaths == null ? stablePaths : stablePaths.filter((path) => !heldPaths.has(path))
+    const partial = requestPaths.length < stablePaths.length
     if (isNewPathSet) {
       loadedPageCountRef.current = 0
+      servedByPatchRef.current = false
+      const stableSet = new Set(stablePaths)
       // Whatever is on screen stays there while the new patch is fetched. Emptying
       // the list dropped the viewer to its loading state, and returning from that
       // remounted it — the reader lost their scroll position and every file had to
       // be highlighted again, on every `git add` and every new untracked file.
-      setFolderLoadState((current) => current.items.length === 0
+      setFolderLoadState((current) => current.items.length === 0 && !partial
         ? EMPTY_LOAD_STATE
-        : { ...EMPTY_LOAD_STATE, items: retainReviewItems(current.items, stablePaths) })
+        : {
+          ...EMPTY_LOAD_STATE,
+          items: retainReviewItems(current.items, stablePaths),
+          omittedFiles: partial ? current.omittedFiles.filter((file) => stableSet.has(file.path)) : []
+        })
+    }
+    const servedAll = (): void => {
+      servedByPatchRef.current = true
+      servedPathsRef.current = new Set(stablePaths)
     }
 
     async function loadComparisons(): Promise<void> {
@@ -383,18 +475,36 @@ export function useReviewLoadState({
         return
       }
 
+      if (isNewPathSet && requestPaths.length === 0) {
+        // Paths only left the review; the retained items are the whole answer.
+        servedAll()
+        setFolderLoadState((current) => ({
+          ...current,
+          loadedPaths: new Set(stablePaths),
+          failedCount: 0,
+          skippedCount: Math.max(0, stablePaths.length - current.items.length - current.omittedFiles.length),
+          paged: false
+        }))
+        return
+      }
       if (isNewPathSet) {
         const requestId = crypto.randomUUID()
         let streamed = false
+        const completion = createStreamCompletion()
         stopProgress = repository.onLocalReviewProgress?.((progress) => {
-          if (cancelled || progress.requestId !== requestId || progress.kind !== 'files') return
+          if (cancelled || progress.requestId !== requestId) return
+          if (progress.kind === 'done') {
+            completion.markDone()
+            return
+          }
+          if (progress.kind !== 'files') return
           streamed = true
           const incoming = progress.patch === ''
             ? []
             : createPatchReviewItems<ReviewAnnotationMetadata>(progress.patch, `working-tree-${requestId}`)
           startTransition(() => {
             setFolderLoadState((current) => {
-              const omittedFiles = [...current.omittedFiles, ...progress.omittedFiles]
+              const omittedFiles = appendOmittedFiles(current.omittedFiles, progress.omittedFiles)
               const loadedPaths = new Set(current.loadedPaths)
               for (const item of incoming) loadedPaths.add(pathFromItemId(item.id))
               for (const file of progress.omittedFiles) loadedPaths.add(file.path)
@@ -410,9 +520,14 @@ export function useReviewLoadState({
           })
         })
         try {
-          const workingTreePatch = await repository.getWorkingTreePatch(stablePaths, requestId)
+          const workingTreePatch = await requestWorkingTreePatch(workingTreePatchFor(repository, root), requestPaths, requestId,
+            () => cancelled)
+          if (cancelled) return
+          // The reply can overtake the pages sent before it (see streamCompletion).
+          if (stopProgress != null) await completion.wait()
           if (cancelled) return
           if (streamed) {
+            servedAll()
             setFolderLoadState((current) => {
               const items = current.items.length > 0
                 ? orderReviewItems(current.items, stablePaths)
@@ -420,43 +535,50 @@ export function useReviewLoadState({
                   workingTreePatch.patch,
                   `working-tree-${requestId}`
                 ), stablePaths)
+              // The stream appended the newcomers' omissions as they arrived.
+              const omittedFiles = partial ? current.omittedFiles : workingTreePatch.omittedFiles
               return {
                 items,
                 loadedPaths: new Set(stablePaths),
-                omittedFiles: workingTreePatch.omittedFiles,
+                omittedFiles,
                 failedCount: 0,
-                skippedCount: Math.max(
-                  0,
-                  stablePaths.length - items.length - workingTreePatch.omittedFiles.length
-                ),
+                skippedCount: Math.max(0, stablePaths.length - items.length - omittedFiles.length),
                 paged: false
               }
             })
             return
           }
-          const items = orderReviewItems(createPatchReviewItems<ReviewAnnotationMetadata>(
+          const parsed = createPatchReviewItems<ReviewAnnotationMetadata>(
             workingTreePatch.patch,
             `working-tree-${requestId}`
-          ), stablePaths)
-          if (items.length > 0 || stablePaths.length === 0) {
-            setFolderLoadState({
-              items,
-              loadedPaths: new Set(stablePaths),
-              omittedFiles: workingTreePatch.omittedFiles,
-              failedCount: 0,
-              skippedCount: Math.max(
-                0,
-                stablePaths.length - items.length - workingTreePatch.omittedFiles.length
-              ),
-              paged: false
+          )
+          if (parsed.length > 0 || requestPaths.length === 0 || partial) {
+            servedAll()
+            setFolderLoadState((current) => {
+              const items = orderReviewItems(mergeReviewItems(current.items, parsed), stablePaths)
+              const omittedFiles = partial
+                ? appendOmittedFiles(current.omittedFiles, workingTreePatch.omittedFiles)
+                : workingTreePatch.omittedFiles
+              return {
+                items,
+                loadedPaths: new Set(stablePaths),
+                omittedFiles,
+                failedCount: 0,
+                skippedCount: Math.max(0, stablePaths.length - items.length - omittedFiles.length),
+                paged: false
+              }
             })
             return
           }
-        } catch {
+          countKodiMetric('reviewPagedFallbacks', `empty patch for ${stablePaths.length} paths`)
+        } catch (error) {
           // A plain folder has no Git patch. Load its files through the paged fallback below.
+          countKodiMetric('reviewPagedFallbacks', `patch failed: ${error instanceof Error ? error.message : String(error)}`)
         } finally {
           stopProgress?.()
         }
+      } else {
+        countKodiMetric('reviewPagedFallbacks', `rerun for the same ${stablePaths.length} paths, page ${loadedPageCountRef.current}, limit ${loadLimit}`)
       }
 
       const pageStart = loadedPageCountRef.current
@@ -465,6 +587,7 @@ export function useReviewLoadState({
         const batchPaths = pagedPaths.slice(start, start + COMPARISON_FETCH_CONCURRENCY)
         const results = await Promise.all(batchPaths.map(async (path) => {
           try {
+            countKodiMetric('comparisonRequests')
             const item = createReviewItem<ReviewAnnotationMetadata>(await repository.getComparison(path))
             return { path, item, failed: false }
           } catch {
@@ -509,7 +632,7 @@ export function useReviewLoadState({
       // An interrupted first pass must not look like a completed one to the next run.
       if (isNewPathSet && !loaded) loadedPathsKeyRef.current = null
     }
-  }, [externalReviewItems, loadLimit, pathsKey, repositoryReview, stablePaths])
+  }, [externalReviewItems, loadLimit, pathsKey, repositoryReview, root, stablePaths])
 
   useEffect(() => {
     if (externalReviewItems != null || repositoryChange == null) return
@@ -520,7 +643,8 @@ export function useReviewLoadState({
 
     void (async () => {
       try {
-        const workingTreePatch = await window.repository!.getWorkingTreePatch(pathsToReload)
+        const workingTreePatch = await requestWorkingTreePatch(workingTreePatchFor(window.repository!, root), pathsToReload,
+          undefined, () => cancelled)
         const patchItems = createPatchReviewItems<ReviewAnnotationMetadata>(
           workingTreePatch.patch,
           `working-tree-${repositoryChange.revision}`
@@ -545,7 +669,7 @@ export function useReviewLoadState({
             if (!replacements.has(item.id)) return [item]
             const replacement = replacements.get(item.id)
             replacements.delete(item.id)
-            return replacement == null ? [] : [replacement]
+            return replacement == null ? [] : [keepUnchangedReviewItem(item, replacement)]
           })
           for (const replacement of replacements.values()) {
             if (replacement != null) nextItems.push(replacement)
@@ -556,7 +680,7 @@ export function useReviewLoadState({
     })
 
     return () => { cancelled = true }
-  }, [externalReviewItems, repositoryChange, stablePaths])
+  }, [externalReviewItems, repositoryChange, root, stablePaths])
 
   useEffect(() => {
     resetReviewFileMetrics()

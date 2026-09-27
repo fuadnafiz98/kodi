@@ -278,3 +278,29 @@ test('opening a plain folder starts in the file browser', async () => {
   expect(result.current.workspaceView).toBe('file')
   expect(result.current.selectedPath).toBe('src/app.ts')
 })
+
+test('the active review keeps its identity when the world is rebuilt around it', async () => {
+  const { result } = renderHook(() => useReviewWorlds({
+    snapshot,
+    selectedPath: null,
+    workspaceView: 'multi',
+    onActivateSnapshot: () => {},
+    onActivateRepository: async () => snapshot,
+    onReleaseRepository: async () => {},
+    onActivationError: () => {},
+    onSelectPath: () => {},
+    onWorkspaceViewChange: () => {}
+  }))
+  await waitFor(() => expect(result.current.worlds).toHaveLength(1))
+  let patchWorldId!: string
+  act(() => {
+    patchWorldId = result.current.openPatchWorld(snapshot, { ...review, patch: 'diff' }, 1, false)
+  })
+  const activeReview = result.current.activeReview
+  expect(activeReview?.patchLength).toBe(4)
+
+  act(() => result.current.syncRepositorySnapshot({ ...snapshot, head: 'moved' }))
+  act(() => result.current.setPatchLoadStatus(patchWorldId, 1, 'ready'))
+  expect(result.current.activeWorld).not.toBeNull()
+  expect(result.current.activeReview).toBe(activeReview)
+})

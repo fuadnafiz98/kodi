@@ -16,7 +16,7 @@ export function formatUpdatedAgo(elapsedMs: number): string {
 // means index.lock contention, or two merges into the same base, so they exclude
 // each other. Read-only work (review:, commit:, compare:) never joins the set, so
 // opening a review while a merge finishes stays allowed.
-const MUTATING_ACTION_PREFIXES = ['sync:', 'checkout:', 'merge:', 'ready:', 'branch:']
+const MUTATING_ACTION_PREFIXES = ['sync:', 'checkout:', 'merge:', 'ready:', 'branch:', 'scm:']
 
 export function isMutatingAction(actionKey: string | null): boolean {
   return actionKey != null && MUTATING_ACTION_PREFIXES.some((prefix) => actionKey.startsWith(prefix))

@@ -209,13 +209,34 @@ export function patchContentSignature(type: string, additions: readonly string[]
  * Keying by content closes it. `version` stays in front so the load state's
  * page seams keep working.
  */
-function patchCacheKey(fileDiff: { name: string; prevName?: string | null; type: string;
+function patchContentKey(fileDiff: { name: string; prevName?: string | null; type: string;
   additionLines: readonly string[]; deletionLines: readonly string[]
-  prevObjectId?: string | null; newObjectId?: string | null }, version: string): string {
+  prevObjectId?: string | null; newObjectId?: string | null }): string {
   const identity = fileDiff.newObjectId != null
     ? `${fileDiff.prevObjectId ?? 'none'}..${fileDiff.newObjectId}`
     : patchContentSignature(fileDiff.type, fileDiff.additionLines, fileDiff.deletionLines)
-  return `${version}:${fileDiff.prevName ?? ''}>${fileDiff.name}:${identity}`
+  return `${fileDiff.prevName ?? ''}>${fileDiff.name}:${identity}`
+}
+
+// What a parsed diff *is*, without the load it came from. Every reload of the
+// working tree carries a new version, so its cache keys differ even for files
+// that did not change — and the viewer, which keys its highlight cache on
+// `cacheKey`, re-highlighted the whole review on every save anywhere in the
+// repository. An incoming item with the same content keeps the one on screen.
+const contentKeys = new WeakMap<object, string>()
+
+function sameContent<Metadata>(current: CodeViewItem<Metadata>, incoming: CodeViewItem<Metadata>): boolean {
+  if (current.type !== 'diff' || incoming.type !== 'diff') return false
+  const currentKey = contentKeys.get(current.fileDiff)
+  return currentKey != null && currentKey === contentKeys.get(incoming.fileDiff)
+}
+
+/** `incoming`, unless the item already held for it shows the same diff. */
+export function keepUnchangedReviewItem<Metadata>(
+  current: CodeViewItem<Metadata> | undefined,
+  incoming: CodeViewItem<Metadata>
+): CodeViewItem<Metadata> {
+  return current != null && current.id === incoming.id && sameContent(current, incoming) ? current : incoming
 }
 
 export function createPatchReviewItems<Metadata>(patch: string, version: string): CodeViewItem<Metadata>[] {
@@ -225,7 +246,9 @@ export function createPatchReviewItems<Metadata>(patch: string, version: string)
     for (const fileDiff of parsedPatch.files) {
       if (seenPaths.has(fileDiff.name)) continue
       seenPaths.add(fileDiff.name)
-      fileDiff.cacheKey = patchCacheKey(fileDiff, version)
+      const contentKey = patchContentKey(fileDiff)
+      fileDiff.cacheKey = `${version}:${contentKey}`
+      contentKeys.set(fileDiff, contentKey)
       items.push({ id: reviewItemId(fileDiff.name), type: 'diff', fileDiff })
     }
   }
@@ -237,7 +260,7 @@ export function mergeReviewItems<Metadata>(
   incomingItems: readonly CodeViewItem<Metadata>[]
 ): CodeViewItem<Metadata>[] {
   const itemsById = new Map(currentItems.map((item) => [item.id, item]))
-  for (const item of incomingItems) itemsById.set(item.id, item)
+  for (const item of incomingItems) itemsById.set(item.id, keepUnchangedReviewItem(itemsById.get(item.id), item))
   return [...itemsById.values()]
 }
 

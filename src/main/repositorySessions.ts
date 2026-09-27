@@ -9,6 +9,10 @@ interface RepositorySession {
   repository: RepositoryService
   watcher: RepositoryWatcher
   lastActiveAt: number
+  // Order of the last time this session was the one in front; null while it has
+  // only ever run in the background (a pull request warmup, a checkout resolved
+  // for a review), which is not a folder the reader has open.
+  activation: number | null
 }
 
 const INACTIVE_CACHE_FLOOR_BYTES = 8 * 1024 * 1024
@@ -25,6 +29,7 @@ const LIVE_SNAPSHOT_DEADLINE_MS = 150
 
 export class RepositorySessionRegistry {
   #activeRoot: string | null = null
+  #activations = 0
   #cacheDirectory: string | null = null
   #sessions = new Map<string, RepositorySession>()
   #suspended = false
@@ -57,6 +62,21 @@ export class RepositorySessionRegistry {
       pendingWatcherPaths += watcher.pendingPathCount
     }
     return { watcherCount, pendingWatcherPaths }
+  }
+
+  /**
+   * The open folder the reader was in front of most recently, for the restore to
+   * fall back on when the tab in front closes. Closing a tab can focus a new-tab
+   * page, which activates nothing, and the next launch then opened the dashboard
+   * although a repository tab was still open.
+   */
+  lastActiveRoot(): string | null {
+    if (this.#activeRoot != null) return this.#activeRoot
+    let latest: { root: string; activation: number } | null = null
+    for (const [root, { activation }] of this.#sessions) {
+      if (activation != null && (latest == null || activation > latest.activation)) latest = { root, activation }
+    }
+    return latest?.root ?? null
   }
 
   getActiveSnapshot(): RepositorySnapshot | null {
@@ -229,15 +249,12 @@ export class RepositorySessionRegistry {
       this.publish,
       this.reportError
     )
-    const session: RepositorySession = { repository, watcher, lastActiveAt: Date.now() }
+    const session: RepositorySession = { repository, watcher, lastActiveAt: Date.now(), activation: null }
     repository.setSelfWriteObserver((path) => watcher.expectSelfWrite(path))
     // The gitignored set can land after the refresh that asked for it returned,
     // and it only ever adds paths, so it is published on its own with no
     // invalidated files.
-    repository.setSnapshotObserver((snapshot) => {
-      watcher.sync(snapshot)
-      this.publish({ snapshot, changedPaths: [], revision: Date.now() })
-    })
+    repository.setSnapshotObserver((snapshot) => watcher.announce(snapshot, []))
     watcher.setSuspended(this.#suspended)
     return session
   }
@@ -261,6 +278,8 @@ export class RepositorySessionRegistry {
     const active = this.#sessions.get(root)
     if (active != null) {
       active.lastActiveAt = Date.now()
+      this.#activations += 1
+      active.activation = this.#activations
       // A paused session watched nothing while it was in the background, so its
       // snapshot is as old as the moment it lost focus. One refresh catches it up.
       if (active.watcher.resume()) void this.#refreshAndPublish(active)
@@ -322,11 +341,14 @@ export class RepositorySessionRegistry {
     previous: RepositorySnapshot | null,
     live: RepositorySnapshot
   ): RepositorySnapshot {
-    session.watcher.sync(live)
+    // Nothing watched the tree while this session was out of sight, so any file
+    // may have changed. A repository narrows that to its statuses; a plain
+    // folder has none, and naming every visible path sent the list twice.
+    const invalidateAll = previous != null && live.kind === 'folder'
     const changedPaths = previous == null
       ? live.statuses.map((entry) => entry.path)
-      : collectChangedPaths(previous, live, new Set(['*']))
-    this.publish({ snapshot: live, changedPaths, revision: Date.now() })
+      : invalidateAll ? [] : collectChangedPaths(previous, live, new Set(['*']))
+    session.watcher.announce(live, changedPaths, { invalidateAll })
     return live
   }
 

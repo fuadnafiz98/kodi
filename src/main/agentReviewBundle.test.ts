@@ -12,7 +12,10 @@ import {
   migrateLegacyReviewDirectory,
   prepareAgentReviewContext,
   rememberedAgentReviewFrom,
-  writeAgentReviewBundle
+  RememberedReviewStore,
+  reviewKey,
+  writeAgentReviewBundle,
+  type RememberedAgentReview
 } from './agentReviewBundle.js'
 
 const snapshot = (root: string): RepositorySnapshot => ({
@@ -153,5 +156,74 @@ describe('prepareAgentReviewContext', () => {
     expect(context).toContain('Do not fetch remotes')
     expect(context).toContain('No local patch file is available')
     expect(context).toContain('git fetch')
+  })
+})
+
+describe('RememberedReviewStore', () => {
+  const review = (id: string, patch: string): RememberedAgentReview => ({
+    ...remembered,
+    key: reviewKey('base', id),
+    headOid: id,
+    patch
+  })
+
+  test('evicts the oldest reviews once their patches pass the byte budget', () => {
+    const store = new RememberedReviewStore(8, 100)
+    store.remember(review('a', 'a'.repeat(40)))
+    store.remember(review('b', 'b'.repeat(40)))
+    store.remember(review('c', 'c'.repeat(40)))
+
+    expect(store.get(reviewKey('base', 'a'))).toBeNull()
+    expect(store.get(reviewKey('base', 'b'))?.patch).toHaveLength(40)
+    expect(store.get(reviewKey('base', 'c'))?.patch).toHaveLength(40)
+    expect(store.bytes).toBe(80)
+  })
+
+  test('re-remembering a review moves it to the back and does not count it twice', () => {
+    const store = new RememberedReviewStore(2, 1_000)
+    store.remember(review('a', 'aa'))
+    store.remember(review('b', 'bb'))
+    store.remember(review('a', 'aaa'))
+    store.remember(review('c', 'cc'))
+
+    expect(store.get(reviewKey('base', 'b'))).toBeNull()
+    expect(store.get(reviewKey('base', 'a'))?.patch).toBe('aaa')
+    expect(store.size).toBe(2)
+    expect(store.bytes).toBe(5)
+  })
+
+  test('keeps a review bigger than the budget without its patch, and clears', () => {
+    const store = new RememberedReviewStore(8, 10)
+    store.remember(review('small', 'tiny'))
+    store.remember(review('huge', 'x'.repeat(11)))
+
+    const huge = store.get(reviewKey('base', 'huge'))
+    expect(huge?.patch).toBe('')
+    expect(huge?.files).toEqual(remembered.files)
+    expect(store.get(reviewKey('base', 'small'))?.patch).toBe('tiny')
+    expect(store.bytes).toBe(4)
+
+    store.clear()
+    expect(store.size).toBe(0)
+    expect(store.bytes).toBe(0)
+  })
+})
+
+describe('prepareAgentReviewContext with a patchless review', () => {
+  test('writes the cached patch for a review remembered without one', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'kodi-review-patchless-'))
+    await mkdir(join(root, '.git'), { recursive: true })
+    const cachedPatch = 'diff --git a/src/auth.py b/src/auth.py\n+from_disk\n'
+
+    const context = await prepareAgentReviewContext({
+      snapshot: snapshot(root),
+      subject: subject(root),
+      remembered: { ...remembered, key: reviewKey('base-oid', 'head-oid'), patch: '' },
+      cached: { headRefOid: 'head-oid', files: remembered.files, omittedFiles: [], patch: cachedPatch }
+    })
+
+    expect(context).toContain(agentReviewPaths(root).patch)
+    expect(context).toContain('Review: #7 Add session management')
+    expect(await readFile(agentReviewPaths(root).patch, 'utf8')).toBe(cachedPatch)
   })
 })

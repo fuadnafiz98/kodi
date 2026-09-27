@@ -18,7 +18,13 @@ import { randomUUID } from 'node:crypto'
  * directory handle, and a persisted-but-unsynced rename is still strictly
  * better than a partial write, so a failure there does not fail the write.
  */
-export async function writeFileAtomic(path: string, contents: string): Promise<void> {
+export async function writeFileAtomic(
+  path: string,
+  contents: string,
+  // Asked once the bytes are on disk, just before the rename. A write that was
+  // superseded while it was in flight answers false and leaves the file alone.
+  shouldCommit: () => boolean = () => true
+): Promise<void> {
   const temporaryPath = `${path}.${randomUUID()}.tmp`
   try {
     const handle = await open(temporaryPath, 'w')
@@ -27,6 +33,10 @@ export async function writeFileAtomic(path: string, contents: string): Promise<v
       await handle.sync()
     } finally {
       await handle.close()
+    }
+    if (!shouldCommit()) {
+      await unlink(temporaryPath).catch(() => undefined)
+      return
     }
     await rename(temporaryPath, path)
   } catch (error) {

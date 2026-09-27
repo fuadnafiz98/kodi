@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process'
-import { mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
+import { mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
@@ -204,7 +205,7 @@ describe('parsePorcelainV2Status', () => {
     expect(status.untrackedPaths).toEqual(['notes.txt'])
     expect(status.statuses).toEqual([
       { path: 'src/value.ts', status: 'modified' },
-      { path: 'src/added.ts', status: 'added' },
+      { path: 'src/added.ts', status: 'added', staged: 'all' },
       { path: 'src/gone.ts', status: 'deleted' },
       { path: 'notes.txt', status: 'untracked' }
     ])
@@ -218,7 +219,7 @@ describe('parsePorcelainV2Status', () => {
     ].join('\0') + '\0')
 
     expect(parsePorcelainV2Status(output).statuses).toEqual([
-      { path: 'src/new.ts', previousPath: 'src/old.ts', status: 'renamed' },
+      { path: 'src/new.ts', previousPath: 'src/old.ts', status: 'renamed', staged: 'all' },
       { path: 'src/after.ts', status: 'modified' }
     ])
   })
@@ -232,6 +233,20 @@ describe('parsePorcelainV2Status', () => {
     expect(parsePorcelainV2Status(output).statuses).toEqual([
       { path: 'src/both.ts', status: 'conflicted' },
       { path: 'src/added.ts', status: 'conflicted' }
+    ])
+  })
+
+  it('tells a fully staged change from one with further edits', () => {
+    const output = Buffer.from([
+      '1 M. N... 100644 100644 100644 aaa bbb src/staged.ts',
+      '1 MM N... 100644 100644 100644 aaa bbb src/partial.ts',
+      'u UU N... 100644 100644 100644 100644 aaa bbb ccc src/both.ts'
+    ].join('\0') + '\0')
+
+    expect(parsePorcelainV2Status(output).statuses).toEqual([
+      { path: 'src/staged.ts', status: 'modified', staged: 'all' },
+      { path: 'src/partial.ts', status: 'modified', staged: 'partial' },
+      { path: 'src/both.ts', status: 'conflicted' }
     ])
   })
 
@@ -1370,6 +1385,433 @@ describe('RepositoryService pull request review', () => {
 })
 
 describe('RepositoryService', () => {
+  async function openCommitFixture(prefix: string): Promise<{ repositoryPath: string; repository: RepositoryService }> {
+    const repositoryPath = await mkdtemp(join(tmpdir(), prefix))
+    await initRepository(repositoryPath)
+    // The service spawns git with the real environment, so the fixture pins
+    // identity, signing and hooks locally instead of trusting ~/.gitconfig.
+    await runGit(repositoryPath, 'config', 'user.name', 'Kodi Test')
+    await runGit(repositoryPath, 'config', 'user.email', 'test@example.invalid')
+    await runGit(repositoryPath, 'config', 'commit.gpgsign', 'false')
+    await runGit(repositoryPath, 'config', 'core.hooksPath', join(repositoryPath, '.no-hooks'))
+    await writeFile(join(repositoryPath, 'kept.ts'), 'one\n', 'utf8')
+    await writeFile(join(repositoryPath, 'gone.ts'), 'bye\n', 'utf8')
+    await commitAll(repositoryPath, 'Initial commit')
+    const repository = new RepositoryService()
+    await repository.open(repositoryPath)
+    return { repositoryPath, repository }
+  }
+
+  it('stages, unstages and commits changed files', async () => {
+    const { repositoryPath, repository } = await openCommitFixture('kodi-commit-')
+    try {
+      await writeFile(join(repositoryPath, 'kept.ts'), 'two\n', 'utf8')
+      await rm(join(repositoryPath, 'gone.ts'))
+      await writeFile(join(repositoryPath, 'new file.ts'), 'new\n', 'utf8')
+      await repository.refresh()
+
+      let snapshot = await repository.stagePaths(['kept.ts', 'gone.ts', 'new file.ts'])
+      expect(snapshot.statuses.map((entry) => [entry.path, entry.staged])).toEqual([
+        ['gone.ts', 'all'],
+        ['kept.ts', 'all'],
+        ['new file.ts', 'all']
+      ])
+
+      snapshot = await repository.unstagePaths(['new file.ts'])
+      expect(snapshot.statuses.find((entry) => entry.path === 'new file.ts')).toEqual({
+        path: 'new file.ts',
+        status: 'untracked'
+      })
+
+      snapshot = await repository.commitChanges({ message: '  Update kept\n\n-body with a dash\n' })
+      expect(snapshot.statuses).toEqual([{ path: 'new file.ts', status: 'untracked' }])
+      expect(await runGitAllowingDifferences(repositoryPath, 'log', '-1', '--format=%B')).toBe('Update kept\n\n-body with a dash\n\n')
+
+      snapshot = await repository.commitChanges({ message: 'Add the rest', all: true })
+      expect(snapshot.statuses).toEqual([])
+      expect(await runGitAllowingDifferences(repositoryPath, 'show', '--name-only', '--format=', 'HEAD')).toBe('new file.ts\n')
+    } finally {
+      repository.dispose()
+      await rm(repositoryPath, { recursive: true, force: true })
+    }
+  })
+
+  it('amends without a message and refuses an empty new commit message', async () => {
+    const { repositoryPath, repository } = await openCommitFixture('kodi-amend-')
+    try {
+      await writeFile(join(repositoryPath, 'kept.ts'), 'two\n', 'utf8')
+      await repository.refresh()
+      await repository.stagePaths(['kept.ts'])
+      await expect(repository.commitChanges({ message: '   ' })).rejects.toThrow('Write a commit message first.')
+      const snapshot = await repository.commitChanges({ message: '', amend: true })
+      expect(snapshot.statuses).toEqual([])
+      expect(await runGitAllowingDifferences(repositoryPath, 'log', '--format=%s')).toBe('Initial commit\n')
+    } finally {
+      repository.dispose()
+      await rm(repositoryPath, { recursive: true, force: true })
+    }
+  })
+
+  it('discards only unstaged work and deletes untracked files', async () => {
+    const { repositoryPath, repository } = await openCommitFixture('kodi-discard-')
+    try {
+      await writeFile(join(repositoryPath, 'kept.ts'), 'staged\n', 'utf8')
+      await repository.refresh()
+      await repository.stagePaths(['kept.ts'])
+      await writeFile(join(repositoryPath, 'kept.ts'), 'staged then edited\n', 'utf8')
+      await writeFile(join(repositoryPath, 'scratch.ts'), 'temp\n', 'utf8')
+      await repository.refresh()
+
+      const snapshot = await repository.discardPaths(['kept.ts', 'scratch.ts'])
+      expect(snapshot.statuses).toEqual([{ path: 'kept.ts', status: 'modified', staged: 'all' }])
+      expect(await readFile(join(repositoryPath, 'kept.ts'), 'utf8')).toBe('staged\n')
+      await expect(stat(join(repositoryPath, 'scratch.ts'))).rejects.toThrow()
+      await expect(repository.discardPaths(['../outside'])).rejects.toThrow('no longer changed')
+    } finally {
+      repository.dispose()
+      await rm(repositoryPath, { recursive: true, force: true })
+    }
+  })
+
+  describe('a staged rename', () => {
+    // Long enough that one appended line keeps the pair above git's rename
+    // similarity threshold.
+    const original = Array.from({ length: 20 }, (_unused, index) => `line ${index}\n`).join('')
+
+    async function openRenameFixture(
+      prefix: string,
+      worktree: 'unchanged' | 'modified' | 'deleted'
+    ): Promise<{ repositoryPath: string; repository: RepositoryService }> {
+      const fixture = await openCommitFixture(prefix)
+      const { repositoryPath, repository } = fixture
+      await writeFile(join(repositoryPath, 'old.ts'), original, 'utf8')
+      await commitAll(repositoryPath, 'Add old')
+      await runGit(repositoryPath, 'mv', 'old.ts', 'new.ts')
+      if (worktree === 'modified') await writeFile(join(repositoryPath, 'new.ts'), `${original}edited\n`, 'utf8')
+      if (worktree === 'deleted') await rm(join(repositoryPath, 'new.ts'))
+      await repository.refresh()
+      return fixture
+    }
+
+    async function porcelain(repositoryPath: string): Promise<string> {
+      return runGitAllowingDifferences(repositoryPath, 'status', '--porcelain')
+    }
+
+    it('stages an RM entry without naming the original path the index already dropped', async () => {
+      const { repositoryPath, repository } = await openRenameFixture('kodi-rename-stage-', 'modified')
+      try {
+        expect(repository.getSessionSnapshot()?.statuses).toEqual([
+          { path: 'new.ts', previousPath: 'old.ts', status: 'renamed', staged: 'partial' }
+        ])
+        // `add -A :(literal)old.ts` failed the whole batch with exit 128.
+        const snapshot = await repository.stagePaths(['new.ts'])
+        expect(snapshot.statuses).toEqual([{ path: 'new.ts', previousPath: 'old.ts', status: 'renamed', staged: 'all' }])
+        expect(await porcelain(repositoryPath)).toBe('R  old.ts -> new.ts\n')
+      } finally {
+        repository.dispose()
+        await rm(repositoryPath, { recursive: true, force: true })
+      }
+    })
+
+    it('unstages both halves of a rename', async () => {
+      const { repositoryPath, repository } = await openRenameFixture('kodi-rename-unstage-', 'modified')
+      try {
+        await repository.unstagePaths(['new.ts'])
+        // Restoring only `new.ts` left a staged deletion of `old.ts` behind.
+        expect(await porcelain(repositoryPath)).toBe(' D old.ts\n?? new.ts\n')
+        expect(await readFile(join(repositoryPath, 'new.ts'), 'utf8')).toBe(`${original}edited\n`)
+      } finally {
+        repository.dispose()
+        await rm(repositoryPath, { recursive: true, force: true })
+      }
+    })
+
+    it('discards an RM entry back to the staged rename', async () => {
+      const { repositoryPath, repository } = await openRenameFixture('kodi-rename-discard-', 'modified')
+      try {
+        // `restore --worktree :(literal)old.ts` exited 1 and discarded nothing.
+        const snapshot = await repository.discardPaths(['new.ts'])
+        expect(snapshot.statuses).toEqual([{ path: 'new.ts', previousPath: 'old.ts', status: 'renamed', staged: 'all' }])
+        expect(await readFile(join(repositoryPath, 'new.ts'), 'utf8')).toBe(original)
+      } finally {
+        repository.dispose()
+        await rm(repositoryPath, { recursive: true, force: true })
+      }
+    })
+
+    it('stages and discards an RD entry', async () => {
+      const staged = await openRenameFixture('kodi-rename-rd-stage-', 'deleted')
+      try {
+        expect(staged.repository.getSessionSnapshot()?.statuses).toEqual([
+          { path: 'new.ts', previousPath: 'old.ts', status: 'renamed', staged: 'partial' }
+        ])
+        await staged.repository.stagePaths(['new.ts'])
+        expect(await porcelain(staged.repositoryPath)).toBe('D  old.ts\n')
+      } finally {
+        staged.repository.dispose()
+        await rm(staged.repositoryPath, { recursive: true, force: true })
+      }
+
+      const discarded = await openRenameFixture('kodi-rename-rd-discard-', 'deleted')
+      try {
+        await discarded.repository.discardPaths(['new.ts'])
+        expect(await porcelain(discarded.repositoryPath)).toBe('R  old.ts -> new.ts\n')
+        expect(await readFile(join(discarded.repositoryPath, 'new.ts'), 'utf8')).toBe(original)
+      } finally {
+        discarded.repository.dispose()
+        await rm(discarded.repositoryPath, { recursive: true, force: true })
+      }
+    })
+
+    it('treats stage and discard of a fully staged R. entry as nothing to do, and unstages it', async () => {
+      const { repositoryPath, repository } = await openRenameFixture('kodi-rename-clean-', 'unchanged')
+      try {
+        await repository.stagePaths(['new.ts'])
+        await repository.discardPaths(['new.ts'])
+        expect(await porcelain(repositoryPath)).toBe('R  old.ts -> new.ts\n')
+        await repository.unstagePaths(['new.ts'])
+        expect(await porcelain(repositoryPath)).toBe(' D old.ts\n?? new.ts\n')
+      } finally {
+        repository.dispose()
+        await rm(repositoryPath, { recursive: true, force: true })
+      }
+    })
+
+    it('leaves an untracked file at the original path alone when the rename is discarded', async () => {
+      const { repositoryPath, repository } = await openRenameFixture('kodi-rename-reused-', 'modified')
+      try {
+        await writeFile(join(repositoryPath, 'old.ts'), 'a new file under the old name\n', 'utf8')
+        await repository.refresh()
+        await repository.discardPaths(['new.ts'])
+        // Looking the original path up again classified it as untracked and deleted it.
+        expect(await readFile(join(repositoryPath, 'old.ts'), 'utf8')).toBe('a new file under the old name\n')
+        expect(await readFile(join(repositoryPath, 'new.ts'), 'utf8')).toBe(original)
+      } finally {
+        repository.dispose()
+        await rm(repositoryPath, { recursive: true, force: true })
+      }
+    })
+  })
+
+  describe('an unstaged rename', () => {
+    const original = Array.from({ length: 20 }, (_unused, index) => `line ${index}\n`).join('')
+
+    // `git add -N` on the new name with the old one deleted: git pairs the two
+    // into a working-tree rename, which porcelain v2 reports as `.R`.
+    async function openIntentToAddRename(prefix: string): Promise<{ repositoryPath: string; repository: RepositoryService }> {
+      const fixture = await openCommitFixture(prefix)
+      const { repositoryPath, repository } = fixture
+      await writeFile(join(repositoryPath, 'old.ts'), original, 'utf8')
+      await commitAll(repositoryPath, 'Add old')
+      await rm(join(repositoryPath, 'old.ts'))
+      await writeFile(join(repositoryPath, 'new.ts'), `${original}edited\n`, 'utf8')
+      await runGit(repositoryPath, 'add', '-N', 'new.ts')
+      await repository.refresh()
+      return fixture
+    }
+
+    async function porcelain(repositoryPath: string): Promise<string> {
+      return runGitAllowingDifferences(repositoryPath, 'status', '--porcelain')
+    }
+
+    it('parses as a rename with nothing staged', async () => {
+      const { repositoryPath, repository } = await openIntentToAddRename('kodi-ita-parse-')
+      try {
+        expect(repository.getSessionSnapshot()?.statuses).toEqual([
+          { path: 'new.ts', previousPath: 'old.ts', status: 'renamed' }
+        ])
+        expect(await porcelain(repositoryPath)).toBe(' R old.ts -> new.ts\n')
+      } finally {
+        repository.dispose()
+        await rm(repositoryPath, { recursive: true, force: true })
+      }
+    })
+
+    it('stages both halves into a staged rename', async () => {
+      const { repositoryPath, repository } = await openIntentToAddRename('kodi-ita-stage-')
+      try {
+        const snapshot = await repository.stagePaths(['new.ts'])
+        expect(snapshot.statuses).toEqual([{ path: 'new.ts', previousPath: 'old.ts', status: 'renamed', staged: 'all' }])
+        expect(await porcelain(repositoryPath)).toBe('R  old.ts -> new.ts\n')
+      } finally {
+        repository.dispose()
+        await rm(repositoryPath, { recursive: true, force: true })
+      }
+    })
+
+    it('unstages the placeholder, leaving the new file untracked', async () => {
+      const { repositoryPath, repository } = await openIntentToAddRename('kodi-ita-unstage-')
+      try {
+        await repository.unstagePaths(['new.ts'])
+        expect(await porcelain(repositoryPath)).toBe(' D old.ts\n?? new.ts\n')
+        expect(await readFile(join(repositoryPath, 'new.ts'), 'utf8')).toBe(`${original}edited\n`)
+      } finally {
+        repository.dispose()
+        await rm(repositoryPath, { recursive: true, force: true })
+      }
+    })
+
+    it('discards back to the original file, with no empty new file left listed as added', async () => {
+      const { repositoryPath, repository } = await openIntentToAddRename('kodi-ita-discard-')
+      try {
+        // `restore --worktree new.ts old.ts` exited 0, but it restored the
+        // placeholder too: new.ts was emptied and stayed listed as ` A`.
+        const snapshot = await repository.discardPaths(['new.ts'])
+        expect(snapshot.statuses).toEqual([])
+        expect(await porcelain(repositoryPath)).toBe('')
+        expect(await readFile(join(repositoryPath, 'old.ts'), 'utf8')).toBe(original)
+        expect(existsSync(join(repositoryPath, 'new.ts'))).toBe(false)
+      } finally {
+        repository.dispose()
+        await rm(repositoryPath, { recursive: true, force: true })
+      }
+    })
+
+    it('discards a plain intent-to-add file the same way', async () => {
+      const { repositoryPath, repository } = await openCommitFixture('kodi-ita-added-')
+      try {
+        await writeFile(join(repositoryPath, 'fresh.ts'), 'fresh\n', 'utf8')
+        await runGit(repositoryPath, 'add', '-N', 'fresh.ts')
+        await repository.refresh()
+        expect(repository.getSessionSnapshot()?.statuses).toEqual([{ path: 'fresh.ts', status: 'added' }])
+
+        const snapshot = await repository.discardPaths(['fresh.ts'])
+        expect(snapshot.statuses).toEqual([])
+        expect(existsSync(join(repositoryPath, 'fresh.ts'))).toBe(false)
+      } finally {
+        repository.dispose()
+        await rm(repositoryPath, { recursive: true, force: true })
+      }
+    })
+  })
+
+  it('keeps the self-write window open for the whole of a slow branch switch', async () => {
+    const { repositoryPath, repository } = await openCommitFixture('kodi-switch-window-')
+    const hooks = await mkdtemp(join(tmpdir(), 'kodi-switch-hooks-'))
+    try {
+      await runGit(repositoryPath, 'branch', 'other')
+      // Longer than the watcher's one-second window.
+      await writeFile(join(hooks, 'post-checkout'), '#!/bin/sh\nsleep 1.6\n', { mode: 0o755 })
+      await runGit(repositoryPath, 'config', 'core.hooksPath', hooks)
+      await repository.refresh()
+
+      const armedAt: number[] = []
+      repository.setSelfWriteObserver((path) => { if (path === '.git/index') armedAt.push(Date.now()) })
+      let refreshedAt = 0
+      const snapshot = repository.getSessionSnapshot()!
+      // The refresh arms the window on its own; only the switch is measured.
+      const refreshSpy = spyOn(repository, 'refresh').mockImplementation(async () => {
+        refreshedAt = Date.now()
+        return snapshot
+      })
+      const startedAt = Date.now()
+      try {
+        await repository.switchBranch('other')
+      } finally {
+        refreshSpy.mockRestore()
+      }
+
+      expect(refreshedAt - startedAt).toBeGreaterThan(1_500)
+      // The switch was never armed at all; arming it only on either side would
+      // leave a gap as long as the hook.
+      expect(armedAt[0]! - startedAt).toBeLessThan(200)
+      const gaps = armedAt.slice(1).map((at, index) => at - armedAt[index]!)
+      expect(Math.max(...gaps)).toBeLessThan(1_000)
+      expect(refreshedAt - armedAt.at(-1)!).toBeLessThan(200)
+      expect(await runGitAllowingDifferences(repositoryPath, 'branch', '--show-current')).toBe('other\n')
+    } finally {
+      repository.dispose()
+      await rm(repositoryPath, { recursive: true, force: true })
+      await rm(hooks, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses to discard a nested repository before touching anything', async () => {
+    const { repositoryPath, repository } = await openCommitFixture('kodi-discard-nested-')
+    try {
+      await writeFile(join(repositoryPath, 'kept.ts'), 'edited\n', 'utf8')
+      const nested = join(repositoryPath, 'nested')
+      await mkdir(nested)
+      await initRepository(nested)
+      await writeFile(join(nested, 'inner.ts'), 'inner\n', 'utf8')
+      await commitAll(nested, 'Inner')
+      const snapshot = await repository.refresh()
+      expect(snapshot.statuses.map((entry) => entry.path)).toEqual(['kept.ts', 'nested/'])
+
+      // `unlink` on the folder used to throw a bare EPERM after `kept.ts` was
+      // already restored.
+      await expect(repository.discardPaths(['kept.ts', 'nested/'])).rejects.toThrow('nested/ is a separate Git repository.')
+      expect(await readFile(join(repositoryPath, 'kept.ts'), 'utf8')).toBe('edited\n')
+      expect(await readFile(join(nested, 'inner.ts'), 'utf8')).toBe('inner\n')
+    } finally {
+      repository.dispose()
+      await rm(repositoryPath, { recursive: true, force: true })
+    }
+  })
+
+  it('removes an untracked folder entry whole without following a symlink out of it', async () => {
+    const { repositoryPath, repository } = await openCommitFixture('kodi-discard-folder-')
+    const outside = await mkdtemp(join(tmpdir(), 'kodi-discard-outside-'))
+    try {
+      await writeFile(join(outside, 'precious.ts'), 'keep me\n', 'utf8')
+      const folder = join(repositoryPath, 'folder')
+      await mkdir(join(folder, 'deep'), { recursive: true })
+      await writeFile(join(folder, 'deep', 'file.ts'), 'temp\n', 'utf8')
+      await symlink(outside, join(folder, 'escape'))
+      const live = await repository.refresh()
+      // The status walk only reports a folder as a whole when it will not
+      // descend into it; the entry is planted directly to reach that branch.
+      repository.hydrate({ ...live, statuses: [...live.statuses, { path: 'folder/', status: 'untracked' }] })
+
+      await repository.discardPaths(['folder/'])
+      await expect(stat(folder)).rejects.toThrow()
+      expect(await readFile(join(outside, 'precious.ts'), 'utf8')).toBe('keep me\n')
+    } finally {
+      repository.dispose()
+      await rm(repositoryPath, { recursive: true, force: true })
+      await rm(outside, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps the self-write window armed after a commit, not only before it', async () => {
+    const { repositoryPath, repository } = await openCommitFixture('kodi-commit-window-')
+    const hooks = await mkdtemp(join(tmpdir(), 'kodi-commit-hooks-'))
+    try {
+      const committed = join(hooks, 'committed')
+      await writeFile(join(hooks, 'post-commit'), `#!/bin/sh\ntouch '${committed}'\n`, { mode: 0o755 })
+      await runGit(repositoryPath, 'config', 'core.hooksPath', hooks)
+      await writeFile(join(repositoryPath, 'kept.ts'), 'two\n', 'utf8')
+      await repository.refresh()
+
+      const log: string[] = []
+      repository.setSelfWriteObserver(() => { log.push(existsSync(committed) ? 'armed after commit' : 'armed') })
+      const refresh = repository.refresh.bind(repository)
+      const refreshSpy = spyOn(repository, 'refresh').mockImplementation(() => {
+        log.push('refresh')
+        return refresh()
+      })
+      try {
+        await repository.commitChanges({ message: 'Update', all: true })
+      } finally {
+        refreshSpy.mockRestore()
+      }
+
+      // A hook that outlasts the one-second window let the index write land
+      // unannounced; the refresh re-arming it is too late when it queues.
+      expect(log.indexOf('armed after commit')).toBeGreaterThan(-1)
+      expect(log.indexOf('armed after commit')).toBeLessThan(log.indexOf('refresh'))
+      // `add -A` is armed on both sides too, ahead of the commit's own arming.
+      // A slow machine can add heartbeats in between; they only arm it again.
+      const beforeCommit = log.slice(0, log.indexOf('armed after commit'))
+      expect(beforeCommit.length).toBeGreaterThanOrEqual(3)
+      expect(new Set(beforeCommit)).toEqual(new Set(['armed']))
+    } finally {
+      repository.dispose()
+      await rm(repositoryPath, { recursive: true, force: true })
+      await rm(hooks, { recursive: true, force: true })
+    }
+  })
+
   it('treats an empty content search as cancellation before a folder is open', async () => {
     const repository = new RepositoryService()
     expect(await repository.searchContent('')).toEqual([])
@@ -1501,9 +1943,16 @@ describe('RepositoryService', () => {
 
       expect(pages.length).toBeGreaterThanOrEqual(1)
       expect(filesFromPatch(pages[0]!.patch).map((file) => file.path)).toEqual(['a.ts'])
-      expect(filesFromPatch(result.patch).map((file) => file.path)).toEqual(['a.ts', 'b.ts'])
-      expect(result.patch).toContain('export const a = 2')
-      expect(result.patch).toContain('export const b = 2')
+      // The pages carried the whole diff, so the reply does not clone it again.
+      expect(result).toEqual({ patch: '', omittedFiles: [] })
+      const streamed = pages.map((page) => page.patch).join('\n')
+      expect(filesFromPatch(streamed).map((file) => file.path)).toEqual(['a.ts', 'b.ts'])
+      expect(streamed).toContain('export const a = 2')
+      expect(streamed).toContain('export const b = 2')
+
+      // A caller that did not listen still gets the joined patch.
+      const unstreamed = await repository.getWorkingTreePatch(['a.ts', 'b.ts'])
+      expect(unstreamed.patch).toBe(streamed)
     } finally {
       repository.dispose()
       await rm(repositoryPath, { recursive: true, force: true })
@@ -1527,8 +1976,10 @@ describe('RepositoryService', () => {
         pages.push(page)
       })
       expect(pages[0]?.patch).toBe(createNewFilePatch('empty-new.ts', ''))
-      expect(result.patch).toContain('empty-new.ts')
-      expect(result.patch).toContain('+changed')
+      expect(result.patch).toBe('')
+      const streamed = pages.map((page) => page.patch).join('\n')
+      expect(streamed).toContain('empty-new.ts')
+      expect(streamed).toContain('+changed')
     } finally {
       repository.dispose()
       await rm(repositoryPath, { recursive: true, force: true })
@@ -1560,7 +2011,10 @@ describe('RepositoryService', () => {
       expect(secondPages.length).toBeGreaterThanOrEqual(1)
       expect(filesFromPatch(secondPages[0]!.patch).map((file) => file.path)).toEqual(['a.ts'])
       expect(left).toEqual(right)
-      expect(filesFromPatch(left.patch).map((file) => file.path)).toEqual(['a.ts', 'b.ts'])
+      expect(secondPages).toEqual(firstPages)
+      expect(left.patch).toBe('')
+      expect(filesFromPatch(secondPages.map((page) => page.patch).join('\n')).map((file) => file.path))
+        .toEqual(['a.ts', 'b.ts'])
     } finally {
       repository.dispose()
       await rm(repositoryPath, { recursive: true, force: true })
@@ -2010,12 +2464,14 @@ describe('RepositoryService', () => {
         { path: 'generated.txt', reason: 'too-large', additions: 25_000, deletions: 1 },
         { path: 'huge.txt', reason: 'too-large', additions: 0, deletions: 0 }
       ])
-      expect(workingTreePatch.patch).not.toContain('generated.txt')
-      expect(workingTreePatch.patch).not.toContain('huge.txt')
+      expect(workingTreePatch.patch).toBe('')
+      const streamed = pages.map((page) => page.patch).join('\n')
+      expect(streamed).not.toContain('generated.txt')
+      expect(streamed).not.toContain('huge.txt')
       expect(createNewFilePatch('new.txt', 'added line\n')).toBe(
         gitNewFilePatch.split('\n').filter((line) => !line.startsWith('index ')).join('\n')
       )
-      expect(workingTreePatch.patch).toContain(createNewFilePatch('new.txt', 'added line\n'))
+      expect(streamed).toContain(createNewFilePatch('new.txt', 'added line\n'))
     } finally {
       await rm(repositoryPath, { recursive: true, force: true })
     }
@@ -2796,8 +3252,11 @@ describe('parsePorcelainV2Status against real git output', () => {
       expect(byPath.get('ren-new.ts')).toEqual({
         path: 'ren-new.ts',
         previousPath: 'ren-old.ts',
-        status: 'renamed'
+        status: 'renamed',
+        staged: 'all'
       })
+      expect(byPath.get('mod.ts')?.staged).toBeUndefined()
+      expect(byPath.get('staged.ts')?.staged).toBe('all')
       // An unchanged tracked file must not be reported at all.
       expect(byPath.has('with space.ts')).toBe(false)
     } finally {

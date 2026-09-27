@@ -3,6 +3,7 @@ import { access } from 'node:fs/promises'
 import { isAbsolute, resolve } from 'node:path'
 
 import type { RepositoryChangeEvent, RepositorySnapshot } from '../shared/contracts.js'
+import { snapshotWithoutPaths } from '../shared/heldPaths.js'
 
 const CHANGE_DEBOUNCE_MS = 80
 // A commit or a rebase writes `.git/index` and the refs it moves several times in
@@ -69,70 +70,167 @@ export function dropSelfWrites(
   }
 }
 
-function statusSignature(snapshot: RepositorySnapshot): Map<string, string> {
+// One counter for every watcher and every publish in the process. Registry
+// refreshes once stamped `Date.now()` while ticks counted from zero per watcher,
+// so an event's revision said nothing about which came later, and two sessions
+// could hand the renderer the same number for different trees.
+let lastChangeRevision = 0
+
+function nextChangeRevision(): number {
+  lastChangeRevision += 1
+  return lastChangeRevision
+}
+
+type StatusSignature = Map<string, string>
+
+function statusSignature(snapshot: RepositorySnapshot): StatusSignature {
   return new Map(snapshot.statuses.map((status) => [
     status.path,
-    `${status.status}\0${status.previousPath ?? ''}`
+    `${status.status}\0${status.previousPath ?? ''}\0${status.staged ?? ''}`
   ]))
+}
+
+/** The part of a status signature that changes what the file's diff shows. */
+function contentSignature(signature: string | undefined): string | undefined {
+  return signature?.slice(0, signature.lastIndexOf('\0'))
 }
 
 function snapshotsMatch(left: RepositorySnapshot, right: RepositorySnapshot): boolean {
   if (left.root !== right.root || left.kind !== right.kind || left.branch !== right.branch || left.head !== right.head) return false
   if (left.paths.length !== right.paths.length || left.statuses.length !== right.statuses.length) return false
-  if (left.paths.some((path, index) => path !== right.paths[index])) return false
+  if (left.paths !== right.paths && left.paths.some((path, index) => path !== right.paths[index])) return false
   return left.statuses.every((status, index) => {
     const other = right.statuses[index]
     return other != null
       && status.path === other.path
       && status.status === other.status
       && status.previousPath === other.previousPath
+      && status.staged === other.staged
   })
+}
+
+/**
+ * Membership and prefix lookups over one snapshot's path list. Snapshot lists
+ * are sorted in byte order, so both are binary searches; the answer to "is it
+ * sorted" is kept per list identity, and an unchanged tick reuses the list. A
+ * Set of every path was built — twice per side — on every watcher flush, ~55 ms
+ * of blocked main process per tick at 100k paths.
+ */
+interface PathIndex {
+  has(path: string): boolean
+  forEachWithPrefix(prefix: string, visit: (path: string) => void): void
+}
+
+const pathIndexes = new WeakMap<readonly string[], PathIndex>()
+
+function pathIndex(paths: readonly string[]): PathIndex {
+  const cached = pathIndexes.get(paths)
+  if (cached != null) return cached
+  let sorted = true
+  for (let index = 1; index < paths.length && sorted; index += 1) {
+    if (paths[index - 1]! >= paths[index]!) sorted = false
+  }
+  const index: PathIndex = sorted ? sortedPathIndex(paths) : unsortedPathIndex(paths)
+  pathIndexes.set(paths, index)
+  return index
+}
+
+function lowerBound(paths: readonly string[], target: string): number {
+  let low = 0
+  let high = paths.length
+  while (low < high) {
+    const middle = (low + high) >>> 1
+    if (paths[middle]! < target) low = middle + 1
+    else high = middle
+  }
+  return low
+}
+
+function sortedPathIndex(paths: readonly string[]): PathIndex {
+  return {
+    has: (path) => paths[lowerBound(paths, path)] === path,
+    forEachWithPrefix(prefix, visit) {
+      for (let index = lowerBound(paths, prefix); index < paths.length; index += 1) {
+        const path = paths[index]!
+        if (!path.startsWith(prefix)) return
+        visit(path)
+      }
+    }
+  }
+}
+
+function unsortedPathIndex(paths: readonly string[]): PathIndex {
+  let set: Set<string> | null = null
+  return {
+    has: (path) => (set ??= new Set(paths)).has(path),
+    forEachWithPrefix(prefix, visit) {
+      for (const path of paths) if (path.startsWith(prefix)) visit(path)
+    }
+  }
+}
+
+/** Paths in one list and not the other. A tick differs in a short window, so the shared head and tail are skipped by identity first. */
+function differingPaths(previous: readonly string[], next: readonly string[], visit: (path: string) => void): void {
+  let head = 0
+  const shortest = Math.min(previous.length, next.length)
+  while (head < shortest && previous[head] === next[head]) head += 1
+  let previousEnd = previous.length
+  let nextEnd = next.length
+  while (previousEnd > head && nextEnd > head && previous[previousEnd - 1] === next[nextEnd - 1]) {
+    previousEnd -= 1
+    nextEnd -= 1
+  }
+  const before = new Set(previous.slice(head, previousEnd))
+  const after = new Set(next.slice(head, nextEnd))
+  for (const path of before) if (!after.has(path)) visit(path)
+  for (const path of after) if (!before.has(path)) visit(path)
 }
 
 export function collectChangedPaths(
   previous: RepositorySnapshot,
   next: RepositorySnapshot,
-  filesystemPaths: ReadonlySet<string>
+  filesystemPaths: ReadonlySet<string>,
+  signatures: { previous: StatusSignature; next: StatusSignature } = {
+    previous: statusSignature(previous),
+    next: statusSignature(next)
+  }
 ): string[] {
-  const previousPaths = new Set(previous.paths)
-  const nextPaths = new Set(next.paths)
-  const previousStatuses = statusSignature(previous)
-  const nextStatuses = statusSignature(next)
-  const visiblePaths = new Set([...previousPaths, ...nextPaths])
+  const samePaths = previous.paths === next.paths
+  const previousIndex = pathIndex(previous.paths)
+  const nextIndex = samePaths ? previousIndex : pathIndex(next.paths)
+  const previousStatuses = signatures.previous
+  const nextStatuses = signatures.next
   const statusPaths = new Set([...previousStatuses.keys(), ...nextStatuses.keys()])
   const changedPaths = new Set<string>()
+  const add = (path: string): void => { changedPaths.add(path) }
   const directoryPrefixes = new Set<string>()
 
   for (const path of filesystemPaths) {
     if (path === '*') {
-      const paths = previous.kind === 'git' ? statusPaths : visiblePaths
-      for (const visiblePath of paths) changedPaths.add(visiblePath)
-    } else if (!path.startsWith('.git/') && (previousPaths.has(path) || nextPaths.has(path))) {
+      if (previous.kind === 'git') {
+        for (const statusPath of statusPaths) changedPaths.add(statusPath)
+      } else {
+        for (const visiblePath of previous.paths) changedPaths.add(visiblePath)
+        if (!samePaths) for (const visiblePath of next.paths) changedPaths.add(visiblePath)
+      }
+    } else if (path.startsWith('.git/')) {
+      continue
+    } else if (previousIndex.has(path) || nextIndex.has(path)) {
       changedPaths.add(path)
-    } else if (!path.startsWith('.git/')) {
+    } else {
       directoryPrefixes.add(`${path.replace(/\/$/, '')}/`)
     }
   }
-  if (directoryPrefixes.size > 0) {
-    for (const visiblePath of visiblePaths) {
-      let slash = visiblePath.indexOf('/')
-      while (slash >= 0) {
-        if (directoryPrefixes.has(visiblePath.slice(0, slash + 1))) {
-          changedPaths.add(visiblePath)
-          break
-        }
-        slash = visiblePath.indexOf('/', slash + 1)
-      }
-    }
+  for (const prefix of directoryPrefixes) {
+    previousIndex.forEachWithPrefix(prefix, add)
+    if (!samePaths) nextIndex.forEachWithPrefix(prefix, add)
   }
-  for (const path of previousPaths) {
-    if (!nextPaths.has(path)) changedPaths.add(path)
-  }
-  for (const path of nextPaths) {
-    if (!previousPaths.has(path)) changedPaths.add(path)
-  }
+  if (!samePaths) differingPaths(previous.paths, next.paths, add)
+  // Staging flips `staged` and nothing the reader sees: the working-tree diff is
+  // the same bytes. Naming those paths made the review refetch, re-parse and
+  // re-highlight every staged file on every stage, unstage and Stage All.
   for (const path of statusPaths) {
-    if (previousStatuses.get(path) !== nextStatuses.get(path)) changedPaths.add(path)
+    if (contentSignature(previousStatuses.get(path)) !== contentSignature(nextStatuses.get(path))) changedPaths.add(path)
   }
   if (previous.head !== next.head || previous.branch !== next.branch) {
     for (const path of statusPaths) changedPaths.add(path)
@@ -156,7 +254,6 @@ export class RepositoryWatcher {
   #suspended = false
   #paused = false
   #generation = 0
-  #revision = 0
 
   constructor(
     private readonly refresh: () => Promise<RepositorySnapshot>,
@@ -187,13 +284,7 @@ export class RepositoryWatcher {
     }
     this.#paused = false
     const generation = this.#generation
-    const accept = (path: string | null): void => {
-      if (generation !== this.#generation || path == null) return
-      const alreadyPending = this.#pendingPaths.has(path)
-      this.#pendingPaths.add(path)
-      if (!alreadyPending && !path.startsWith('.git/')) this.#pendingContentCount += 1
-      this.#schedule(generation)
-    }
+    const accept = (path: string | null): void => this.#accept(generation, path)
     try {
       this.#watcher = watch(snapshot.root, { recursive: true }, (_eventType, filename) => {
         accept(normalizeChangedPath(filename))
@@ -214,6 +305,20 @@ export class RepositoryWatcher {
     } catch (error) {
       this.reportError(error)
     }
+  }
+
+  #accept(generation: number, path: string | null): void {
+    if (generation !== this.#generation || path == null) return
+    const alreadyPending = this.#pendingPaths.has(path)
+    this.#pendingPaths.add(path)
+    if (!alreadyPending && !path.startsWith('.git/')) this.#pendingContentCount += 1
+    this.#schedule(generation)
+  }
+
+  // `fs.watch` reports an unnamed event (the '*' path) only when the OS drops
+  // or coalesces events, which a test cannot arrange on demand.
+  acceptChangedPathForTests(path: string): void {
+    this.#accept(this.#generation, path)
   }
 
   // Called before the rename that completes a save: the app already knows what it
@@ -343,13 +448,13 @@ export class RepositoryWatcher {
     if (this.#pendingPaths.size === 0) return
 
     const filesystemPaths = new Set(this.#pendingPaths)
-    const previousPathSet = new Set(previous.paths)
+    const previousPathIndex = pathIndex(previous.paths)
     this.#pendingPaths.clear()
     this.#pendingContentCount = 0
     this.#refreshing = true
     try {
       const knownContentPaths = [...filesystemPaths].filter((path) =>
-        path !== '*' && !path.startsWith('.git/') && previousPathSet.has(path)
+        path !== '*' && !path.startsWith('.git/') && previousPathIndex.has(path)
       )
       const knownContentPathSet = new Set(knownContentPaths)
       if (knownContentPaths.length > 0) this.#publish(previous, knownContentPaths)
@@ -359,7 +464,17 @@ export class RepositoryWatcher {
       this.#snapshot = snapshot
       const previousStatus = statusSignature(previous)
       const nextStatus = statusSignature(snapshot)
-      const metadataPaths = collectChangedPaths(previous, snapshot, filesystemPaths)
+      // A folder has no statuses to narrow an unknown event with, so "something
+      // changed" names every path; the renderer is told to drop everything
+      // instead of receiving (and cloning, and indexing) the whole list again.
+      if (previous.kind !== 'git' && filesystemPaths.has('*')) {
+        this.#publish(snapshot, [], { invalidateAll: true })
+        return
+      }
+      const metadataPaths = collectChangedPaths(previous, snapshot, filesystemPaths, {
+        previous: previousStatus,
+        next: nextStatus
+      })
         .filter((path) =>
           !knownContentPathSet.has(path) || previousStatus.get(path) !== nextStatus.get(path)
         )
@@ -374,20 +489,35 @@ export class RepositoryWatcher {
     }
   }
 
-  #publish(snapshot: RepositorySnapshot, changedPaths: string[]): void {
-    this.#revision += 1
+  /**
+   * Publishes a refresh the registry ran on the reader's behalf — a tab
+   * activation, reopening a known root, waking from suspension. It goes
+   * through the same path-list check as a tick: those refreshes almost always
+   * keep the list, and shipping it anyway cost a full clone into every window
+   * on each tab switch.
+   */
+  announce(
+    snapshot: RepositorySnapshot,
+    changedPaths: string[],
+    options: { invalidateAll?: boolean } = {}
+  ): void {
+    if (this.#snapshot?.root === snapshot.root) this.#snapshot = snapshot
+    this.#publish(snapshot, changedPaths, options)
+  }
+
+  #publish(
+    snapshot: RepositorySnapshot,
+    changedPaths: string[],
+    options: { invalidateAll?: boolean } = {}
+  ): void {
     const pathsChanged = this.#publishedPaths !== snapshot.paths
     if (pathsChanged) this.#publishedPaths = snapshot.paths
-    const eventSnapshot = pathsChanged
-      ? snapshot
-      : {
-          root: snapshot.root,
-          name: snapshot.name,
-          kind: snapshot.kind,
-          branch: snapshot.branch,
-          head: snapshot.head,
-          statuses: snapshot.statuses
-        }
-    this.publish({ snapshot: eventSnapshot, changedPaths, revision: this.#revision })
+    const eventSnapshot = pathsChanged ? snapshot : snapshotWithoutPaths(snapshot)
+    this.publish({
+      snapshot: eventSnapshot,
+      changedPaths,
+      ...(options.invalidateAll === true ? { invalidateAll: true } : {}),
+      revision: nextChangeRevision()
+    })
   }
 }

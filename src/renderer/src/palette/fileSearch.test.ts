@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'bun:test'
 
-import { createFileSearchIndex, isNoisySearchPath, rankFilePaths } from './fileSearch'
+import {
+  createFileSearchIndex,
+  fileSearchEntriesScored,
+  isNoisySearchPath,
+  priorityPathSet,
+  rankFilePaths
+} from './fileSearch'
 
 function paths(index: ReturnType<typeof rankFilePaths>): string[] {
   return index.map((result) => result.path)
@@ -205,5 +211,129 @@ describe('rankFilePaths with an empty query', () => {
 
     expect(results[0]).toBe('src/app.ts')
     expect(results).not.toContain('src/deleted.ts')
+  })
+})
+
+// Deterministic, so a failure reproduces. The shape is a monorepo's: packages,
+// nested feature folders, and file names that share most of their letters.
+function monorepoPaths(count: number, seed = 7): string[] {
+  const words = ['components', 'service', 'utils', 'hooks', 'models', 'views', 'api', 'core',
+    'shared', 'feature', 'store', 'reducers', 'tests', 'fixtures', 'handlers', 'routes']
+  const suffixes = ['Button', 'Panel', 'Service', 'Store', 'Hook', 'Model', 'View']
+  const extensions = ['ts', 'tsx', 'py', 'md']
+  let state = seed
+  const random = (): number => {
+    state = (state * 1_103_515_245 + 12_345) & 0x7fffffff
+    return state / 0x7fffffff
+  }
+  const pick = <Value,>(values: readonly Value[]): Value => values[Math.floor(random() * values.length)]!
+  const generated: string[] = []
+  for (let index = 0; index < count; index += 1) {
+    const parts = [`packages/pkg-${index % 200}`]
+    const depth = 2 + Math.floor(random() * 4)
+    for (let level = 0; level < depth; level += 1) {
+      parts.push(level === 0 ? pick(words) : `${pick(words)}-${Math.floor(random() * 20)}`)
+    }
+    parts.push(`${pick(words)}${pick(suffixes)}${index}.${pick(extensions)}`)
+    generated.push(parts.join('/'))
+  }
+  return generated
+}
+
+describe('rankFilePaths narrowing', () => {
+  it('ranks an extended query from the previous match set, not the whole index', () => {
+    const index = createFileSearchIndex(monorepoPaths(100_000))
+    const scoredPerKeystroke: number[] = []
+    for (const query of ['h', 'ha', 'han', 'hand', 'handl', 'handle', 'handler', 'handlers/']) {
+      const before = fileSearchEntriesScored()
+      rankFilePaths(index, query, { limit: 32 })
+      scoredPerKeystroke.push(fileSearchEntriesScored() - before)
+    }
+
+    // The first character has nothing to narrow from; every later one does.
+    expect(scoredPerKeystroke[0]).toBe(index.length)
+    for (const [keystroke, scored] of scoredPerKeystroke.entries()) {
+      if (keystroke === 0) continue
+      expect(scored).toBeLessThanOrEqual(scoredPerKeystroke[keystroke - 1]!)
+    }
+    // By the fourth character the keystroke scores a fraction of the index.
+    expect(scoredPerKeystroke[3]!).toBeLessThan(index.length / 2)
+  })
+
+  it('re-ranks a changed review set without scanning past the current matches', () => {
+    const paths = monorepoPaths(100_000)
+    const index = createFileSearchIndex(paths)
+    rankFilePaths(index, 'store', { limit: 32 })
+    const matched = fileSearchEntriesScored()
+    rankFilePaths(index, 'storep', { limit: 32 })
+    const before = fileSearchEntriesScored()
+
+    rankFilePaths(index, 'storep', { limit: 32, priorityPaths: new Set([paths[5]!]) })
+
+    expect(fileSearchEntriesScored() - before).toBeLessThan(matched)
+  })
+
+  it('returns exactly what a full scan returns, for random typing and backspacing', () => {
+    const paths = monorepoPaths(10_000, 11)
+    const narrowed = createFileSearchIndex(paths)
+    const priorityPaths = new Set(paths.filter((_, order) => order % 499 === 0))
+    const alphabet = 'abcdefghiklmnoprstuvy-/._ AS0123456789'
+    let state = 3
+    const random = (): number => {
+      state = (state * 1_103_515_245 + 12_345) & 0x7fffffff
+      return state / 0x7fffffff
+    }
+    const sessions: string[][] = []
+    for (let session = 0; session < 25; session += 1) {
+      const typed: string[] = []
+      let query = ''
+      for (let keystroke = 0; keystroke < 12; keystroke += 1) {
+        if (query.length > 0 && random() < 0.2) query = query.slice(0, -1)
+        else if (random() < 0.5) {
+          // Mostly letters from a real path, so the queries keep matching things.
+          const source = paths[Math.floor(random() * paths.length)]!
+          query += source[Math.floor(random() * source.length)]!
+        } else query += alphabet[Math.floor(random() * alphabet.length)]!
+        typed.push(query)
+      }
+      sessions.push(typed)
+    }
+
+    // Ranking another index in between leaves nothing to narrow from, so every
+    // reference ranking is a scan of the whole index.
+    const full = createFileSearchIndex([...paths])
+    const elsewhere = createFileSearchIndex(['elsewhere.ts'])
+    const expected = sessions.map((typed) => typed.map((query) => {
+      rankFilePaths(elsewhere, 'e')
+      const before = fileSearchEntriesScored()
+      const results = [...rankFilePaths(full, query, { limit: 32, priorityPaths })]
+      const scored = fileSearchEntriesScored() - before
+      if (query.trim() !== '' && scored !== full.length) throw new Error('reference ranking narrowed')
+      return results
+    }))
+    const actual = sessions.map((typed) => typed.map((query) =>
+      [...rankFilePaths(narrowed, query, { limit: 32, priorityPaths })]))
+
+    expect(actual).toEqual(expected)
+    // The sessions exercise real narrowing, not a run of empty result lists.
+    expect(expected.flat().filter((results) => results.length > 0).length).toBeGreaterThan(100)
+  })
+
+  it('settles a keystroke on 100k paths well inside a frame budget', () => {
+    const index = createFileSearchIndex(monorepoPaths(100_000))
+    for (const query of ['s', 'se', 'ser', 'serv']) rankFilePaths(index, query, { limit: 32 })
+    const started = performance.now()
+    rankFilePaths(index, 'servi', { limit: 32 })
+    expect(performance.now() - started).toBeLessThan(30)
+  })
+})
+
+describe('priorityPathSet', () => {
+  it('keeps one instance while the contents are unchanged', () => {
+    const first = priorityPathSet(['src/a.ts', 'src/b.ts'])
+
+    expect(priorityPathSet(['src/b.ts', 'src/a.ts'])).toBe(first)
+    expect(priorityPathSet(['src/a.ts', 'src/c.ts'])).not.toBe(first)
+    expect(priorityPathSet([])).toBeUndefined()
   })
 })

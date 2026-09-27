@@ -8,6 +8,8 @@ import {
   type PostRenderPhase
 } from '@pierre/diffs'
 
+import { countKodiMetric } from '../perf/kodiCounters'
+
 // A patch-parsed diff only carries its hunks, and the viewer tokenizes each hunk
 // on its own. Any hunk that starts inside a block comment, docstring or template
 // literal is highlighted from the wrong grammar state: a closing `"""` reads as
@@ -33,9 +35,46 @@ export interface PartialDiffLoader {
 // ~35 ms for a 3,000-line file, a 60 ms long task at 4,000. Past this the patch
 // view stays as it was until the reader expands it.
 export const AUTO_HYDRATE_MAX_LINES = 3_000
-// Scrolling re-renders every visible item each frame, which restarts the wait:
-// hydration only starts once the view has been still this long.
+// An item that is already on screen does not re-render while the reader
+// scrolls, so its own settle timer says nothing about scrolling: every file a
+// fling passed over used to fetch both whole files and take a whole-file
+// highlight onto the main thread (a 35–60 ms message) mid-fling. Hydration now
+// waits until the item has been rendered this long *and* nothing anywhere has
+// scrolled for as long, and runs one file at a time.
 const AUTO_HYDRATE_SETTLE_MS = 150
+export const AUTO_HYDRATE_SCROLL_QUIET_MS = 400
+
+let lastScrollAt = Number.NEGATIVE_INFINITY
+let scrollListening = false
+
+function listenForScroll(): void {
+  if (scrollListening || typeof window === 'undefined') return
+  scrollListening = true
+  const note = (): void => { lastScrollAt = performance.now() }
+  // Scroll events do not bubble; capturing sees the review's own scroller.
+  window.addEventListener('scroll', note, { capture: true, passive: true })
+  window.addEventListener('wheel', note, { capture: true, passive: true })
+}
+
+/** Milliseconds until scrolling has been quiet long enough, 0 when it already has. */
+export function scrollQuietIn(now = performance.now()): number {
+  return Math.max(0, lastScrollAt + AUTO_HYDRATE_SCROLL_QUIET_MS - now)
+}
+
+/** For tests: pretend the reader scrolled at `at`. */
+export function noteScrollForTests(at: number): void {
+  lastScrollAt = at
+}
+
+// One hydration at a time: the reader stopped on a screen of several files,
+// and fetching and highlighting all of them at once was one burst of work.
+let hydrationQueue: Promise<unknown> = Promise.resolve()
+
+function queueHydration<Result>(run: () => Promise<Result>): Promise<Result> {
+  const next = hydrationQueue.then(run, run)
+  hydrationQueue = next.catch(() => {})
+  return next
+}
 
 function splitFileLines(contents: string): string[] {
   return contents === '' ? [] : contents.split(/(?<=\n)/)
@@ -182,12 +221,19 @@ async function hydrateWhenHighlighted(
 ): Promise<boolean> {
   const files = await loader.prefetch(fileDiff)
   if (exceedsLineLimit(files.oldFile?.contents) || exceedsLineLimit(files.newFile.contents)) return false
-  if (target.fileDiff !== fileDiff) return true
+  // The prefetch is keyed by the diff, which lives as long as the review does.
+  // Once nothing is going to consume it, both whole files would stay pinned
+  // behind a diff that is still partial; the next settle reads them again.
+  if (target.fileDiff !== fileDiff) {
+    loader.discard(fileDiff)
+    return true
+  }
   // The viewer only waits 300 ms for the full-file highlight before it swaps the
   // hydrated diff in, so a large file flashed as plain text. Highlighting the same
   // hydrated clone first (same cache key) makes the swap a cache hit.
   await target.primeHighlightCache?.(hydratePartialDiff('clone', fileDiff, files))
   if (target.fileDiff === fileDiff && fileDiff.isPartial) target.loadFilesIfNecessary?.()
+  else loader.discard(fileDiff)
   return true
 }
 
@@ -211,16 +257,34 @@ export function schedulePartialDiffHydration(
   if (phase === 'unmount' || loader == null || item.type !== 'diff') return
   const { fileDiff } = item
   if (!canAutoHydrate(fileDiff) || settledDiffs.has(fileDiff)) return
-  settleTimers.set(instance, setTimeout(() => {
-    settleTimers.delete(instance)
-    const target = instance as HydratableInstance
-    if (target.fileDiff !== fileDiff) return
-    const giveUp = (): void => {
-      settledDiffs.add(fileDiff)
-      loader.discard(fileDiff)
-    }
-    hydrateWhenHighlighted(target, fileDiff, loader).then((hydrating) => {
-      if (!hydrating) giveUp()
-    }, giveUp)
-  }, AUTO_HYDRATE_SETTLE_MS))
+  listenForScroll()
+  const attempt = (delay: number): void => {
+    settleTimers.set(instance, setTimeout(() => {
+      settleTimers.delete(instance)
+      const target = instance as HydratableInstance
+      if (target.fileDiff !== fileDiff) return
+      const wait = scrollQuietIn()
+      if (wait > 0) {
+        attempt(wait)
+        return
+      }
+      const giveUp = (): void => {
+        settledDiffs.add(fileDiff)
+        loader.discard(fileDiff)
+      }
+      void queueHydration(async () => {
+        // The reader may have scrolled on while this waited its turn.
+        if (target.fileDiff !== fileDiff || !fileDiff.isPartial) return true
+        if (scrollQuietIn() > 0) {
+          attempt(scrollQuietIn())
+          return true
+        }
+        countKodiMetric('autoHydrations')
+        return hydrateWhenHighlighted(target, fileDiff, loader)
+      }).then((hydrating) => {
+        if (!hydrating) giveUp()
+      }, giveUp)
+    }, delay))
+  }
+  attempt(AUTO_HYDRATE_SETTLE_MS)
 }

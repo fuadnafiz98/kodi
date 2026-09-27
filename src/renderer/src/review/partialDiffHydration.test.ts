@@ -14,6 +14,7 @@ import {
   loadPartialDiffFiles,
   patchMatchesFileLines,
   reconstructFileSide,
+  noteScrollForTests,
   schedulePartialDiffHydration,
   type DiffSideSource
 } from './partialDiffHydration'
@@ -177,6 +178,30 @@ test('a settled partial diff is highlighted in full before the viewer swaps it i
   expect(reads).toBe(1)
 })
 
+test('a prefetch nothing will consume is not pinned behind its diff', async () => {
+  const fileDiff = parsePartial(PY_PATCH)
+  let reads = 0
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  const loader = createPartialDiffLoader(async (diff) => {
+    reads += 1
+    await gate
+    return loadPartialDiffFiles(diff, [{ side: 'new', load: async () => file('q.py', NEW_PY) }])
+  })
+  const instance = fakeInstance(fileDiff)
+  schedulePartialDiffHydration(instance, 'mount', { id: 'review:q.py', type: 'diff', fileDiff }, loader)
+  await Bun.sleep(200)
+  expect(reads).toBe(1)
+  // The instance is recycled for another file while both versions are read.
+  instance.fileDiff = parsePartial(TXT_PATCH)
+  release()
+  await Bun.sleep(10)
+  expect(instance.events).toEqual([])
+  // Nothing holds the resolved files any more, so a later load reads again.
+  await loader.load(fileDiff)
+  expect(reads).toBe(2)
+})
+
 test('an unmounted or oversized diff is left as the patch', async () => {
   const unmounted = fakeInstance(parsePartial(PY_PATCH))
   const loader = createPartialDiffLoader((diff) =>
@@ -232,4 +257,26 @@ test('a docstring closing between hunks no longer swallows the code after it', a
   expect(hydrated.isPartial).toBe(false)
   expect(colorsOf(hydrated, 'tail = 9')).not.toEqual(docstringColor)
   expect(colorsOf(hydrated, 'doc line 12')).toEqual(docstringColor)
+})
+
+// An item already on screen does not re-render while the reader flings past,
+// so its own settle timer fired mid-scroll: whole files fetched and highlighted
+// under the reader's thumb. It now waits for scrolling to go quiet.
+test('hydration waits until scrolling has been quiet, however long the item has been on screen', async () => {
+  const fileDiff = parsePartial(PY_PATCH)
+  const loader = createPartialDiffLoader((diff) =>
+    loadPartialDiffFiles(diff, [{ side: 'new', load: async () => file('q.py', NEW_PY) }]))
+  const instance = fakeInstance(fileDiff)
+  schedulePartialDiffHydration(instance, 'mount', { id: 'review:q.py', type: 'diff', fileDiff }, loader)
+
+  // Keep "scrolling" for 600 ms: well past the 150 ms settle.
+  const scrollingUntil = performance.now() + 600
+  while (performance.now() < scrollingUntil) {
+    noteScrollForTests(performance.now())
+    await Bun.sleep(40)
+  }
+  expect(instance.events).toEqual([])
+
+  await Bun.sleep(700)
+  expect(instance.events).toEqual(['prime:hydrated', 'load'])
 })

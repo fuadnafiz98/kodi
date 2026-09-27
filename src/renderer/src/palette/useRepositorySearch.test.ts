@@ -2,6 +2,7 @@ import { afterEach, expect, test } from 'bun:test'
 import { act, cleanup, renderHook, waitFor } from '@testing-library/react'
 
 import type { ContentSearchResult, RepositoryApi, RepositorySnapshot } from '../../../shared/contracts'
+import { fileSearchEntriesScored } from './fileSearch'
 import { EMPTY_SEARCH_RESULTS, getSearchResults } from './searchResultsStore'
 import { useRepositorySearch } from './useRepositorySearch'
 
@@ -139,4 +140,29 @@ test('resets content results to one shared instance', () => {
 
   expect(result.current.contentResults).toBe(initial)
   expect(initial).toBe(EMPTY_SEARCH_RESULTS.results)
+})
+
+test('a watcher tick that changes nothing does not rank the index again', async () => {
+  stubRepositoryApi()
+  const changed: RepositorySnapshot = {
+    ...snapshot,
+    statuses: [{ path: 'src/App.tsx', status: 'modified' }]
+  }
+  const { result, rerender } = renderHook(
+    ({ current }: { current: RepositorySnapshot }) => useRepositorySearch(current, onError),
+    { initialProps: { current: changed } }
+  )
+  act(() => { result.current.changeQuery('app') })
+  await waitFor(() => {
+    expect(result.current.fileResults[0]?.path).toBe('src/App.tsx')
+  })
+  const results = result.current.fileResults
+  const scored = fileSearchEntriesScored()
+
+  // What the watcher hands over: a new snapshot and a new status list, the same
+  // paths array and the same statuses inside it.
+  rerender({ current: { ...changed, statuses: changed.statuses.map((status) => ({ ...status })) } })
+
+  expect(fileSearchEntriesScored()).toBe(scored)
+  expect(result.current.fileResults).toBe(results)
 })

@@ -131,3 +131,60 @@ test('multi-file mode retains the same file but releases a different selection',
   rerender({ selectedPath: 'b.ts', workspaceView: 'file' })
   await waitFor(() => expect(result.current.comparison?.path).toBe('b.ts'))
 })
+
+test('an invalidation that names no paths drops every cached comparison', async () => {
+  const getComparison = mock(async (path: string) => comparison(path))
+  window.repository = { getComparison } as unknown as RepositoryApi
+  const { result, rerender } = renderHook(
+    ({ selectedPath }: { selectedPath: string }) => useComparisonLoader({
+      snapshot,
+      selectedPath,
+      workspaceView: 'file',
+      repositoryReview: null,
+      onError: () => {}
+    }),
+    { initialProps: { selectedPath: 'a.ts' } }
+  )
+  const readsOf = (path: string): number =>
+    getComparison.mock.calls.filter(([requested]) => requested === path).length
+
+  await waitFor(() => expect(result.current.comparison?.path).toBe('a.ts'))
+  rerender({ selectedPath: 'b.ts' })
+  await waitFor(() => expect(result.current.comparison?.path).toBe('b.ts'))
+  const readsBefore = readsOf('a.ts')
+
+  result.current.invalidate([])
+  rerender({ selectedPath: 'a.ts' })
+  await waitFor(() => expect(result.current.comparison?.path).toBe('a.ts'))
+  expect(readsOf('a.ts')).toBe(readsBefore)
+
+  rerender({ selectedPath: 'b.ts' })
+  await waitFor(() => expect(result.current.comparison?.path).toBe('b.ts'))
+  result.current.invalidate('all')
+  rerender({ selectedPath: 'a.ts' })
+  await waitFor(() => expect(readsOf('a.ts')).toBeGreaterThan(readsBefore))
+})
+
+test('a file asked for before its session is ready is asked for again and shown', async () => {
+  let calls = 0
+  const getComparison = mock(async (path: string) => {
+    calls += 1
+    if (calls <= 2) throw new Error("Error invoking remote method 'repository.get-comparison': Error: Open a repository before using this action.")
+    return comparison(path)
+  })
+  window.repository = { getComparison } as unknown as RepositoryApi
+  // Stable, as in the app: a new callback per render re-ran the load by itself.
+  const onError = (): void => {}
+
+  const { result } = renderHook(() => useComparisonLoader({
+    snapshot,
+    selectedPath: 'a.ts',
+    workspaceView: 'file',
+    repositoryReview: null,
+    sessionReady: true,
+    onError
+  }))
+
+  await waitFor(() => expect(result.current.comparison?.path).toBe('a.ts'), { timeout: 3_000 })
+  expect(getComparison).toHaveBeenCalledTimes(3)
+})

@@ -18,6 +18,12 @@ export interface RepositoryStatusEntry {
   path: string
   status: RepositoryFileStatus
   previousPath?: string
+  /**
+   * How much of the change is in the index: `all` when the working tree matches
+   * it, `partial` when the file has further unstaged edits. Absent when nothing
+   * is staged.
+   */
+  staged?: 'all' | 'partial'
 }
 
 export interface RepositorySnapshot {
@@ -30,6 +36,22 @@ export interface RepositorySnapshot {
   statuses: RepositoryStatusEntry[]
   /** `skeleton` is the bounded directory listing shown until git answers; `live` is the git snapshot. */
   stage?: 'skeleton' | 'live'
+  /**
+   * Names `paths` exactly. The main process draws it from one counter for every
+   * repository and moves it only when the path array itself is replaced, so a
+   * process that holds a list under this number can be sent the snapshot
+   * without it. Absent on snapshots that did not come from a live session.
+   */
+  pathsRevision?: number
+}
+
+/** A snapshot sent without the path list its `pathsRevision` names. */
+export type RepositorySnapshotWithoutPaths = Omit<RepositorySnapshot, 'paths'> & { paths?: undefined }
+
+/** The path list a window already holds, sent along with a request so the reply can leave it out. */
+export interface HeldPathList {
+  root: string
+  pathsRevision: number
 }
 
 export interface RepositoryChangeEvent {
@@ -37,6 +59,12 @@ export interface RepositoryChangeEvent {
   // and serializing every path for a one-file content change.
   snapshot: Omit<RepositorySnapshot, 'paths'> & { paths?: string[] }
   changedPaths: string[]
+  /**
+   * Every file may have changed and nothing says which. A plain folder has no
+   * statuses to narrow a missed interval down, and listing all of its paths
+   * as changed shipped a second copy of the path list in the same event.
+   */
+  invalidateAll?: boolean
   revision: number
 }
 
@@ -416,6 +444,19 @@ export interface GitIntegrationSnapshot {
   githubMessage: string | null
 }
 
+export type RepositoryPullRequests = Pick<
+  GitIntegrationSnapshot,
+  'pullRequests' | 'githubAvailable' | 'githubMessage'
+>
+
+export interface CommitRequest {
+  message: string
+  /** Rewrite the last commit; an empty message keeps its existing one. */
+  amend?: boolean
+  /** Stage every change, untracked files included, before committing. */
+  all?: boolean
+}
+
 export type PullRequestReviewEvent = 'approve' | 'comment' | 'request-changes'
 
 export type PullRequestMergeStrategy = 'squash' | 'merge' | 'rebase'
@@ -683,7 +724,11 @@ export interface RepositoryApi {
   getRevisionFile(revision: string, path: string): Promise<DiffFileContents | null>
   hasRevision(revision: string): Promise<boolean>
   saveWorkingFile(request: WorkingFileSaveRequest): Promise<FileComparison>
-  getWorkingTreePatch(paths: string[], requestId?: string): Promise<WorkingTreePatch>
+  /**
+   * `root` names the repository the patch was asked for; without it main reads
+   * whichever one is active when the request lands, which a tab switch can move.
+   */
+  getWorkingTreePatch(paths: string[], requestId?: string, root?: string): Promise<WorkingTreePatch>
   /**
    * `forOpenPath` asks for a second, wider pass over that one file so the diff can
    * mark every hit in it; the repository-wide list stays short.
@@ -693,7 +738,8 @@ export interface RepositoryApi {
   getMarkdownMedia(url: string): Promise<MarkdownMediaPayload>
   /** Resolves to a `data:` URL, or null when the avatar is unavailable. */
   getAvatar(url: string): Promise<string | null>
-  getGitIntegration(): Promise<GitIntegrationSnapshot>
+  getGitIntegration(options?: { pullRequests?: boolean }): Promise<GitIntegrationSnapshot>
+  getRepositoryPullRequests(): Promise<RepositoryPullRequests>
   getPullRequestInbox(): Promise<PullRequestInboxSnapshot>
   /**
    * Sessionless inbox for the welcome screen. `repos` is an `owner/name`
@@ -702,13 +748,23 @@ export interface RepositoryApi {
    */
   getGlobalPullRequestInbox(repos?: readonly string[]): Promise<PullRequestInboxSnapshot>
   getClosedPullRequests(): Promise<PullRequestSummary[]>
-  switchBranch(name: string): Promise<RepositorySnapshot>
+  /**
+   * The Source Control writes below name the repository they act on. Each one
+   * can sit behind a confirmation, and whichever tab is active by the time the
+   * reader answers is not necessarily the one they were asked about.
+   */
+  switchBranch(root: string, name: string): Promise<RepositorySnapshot>
   getLocalBranchReview(baseRef: string, headRef: string, requestId?: string): Promise<LocalBranchReview>
   getLocalSnapshotReview(baseOid: string, headOid: string, baseRefName: string, headRefName: string): Promise<LocalBranchReview>
   getCommitReview(oid: string, requestId?: string): Promise<LocalBranchReview>
-  fetchRemote(): Promise<GitIntegrationSnapshot>
-  pullCurrentBranch(): Promise<RepositorySnapshot>
-  pushCurrentBranch(): Promise<GitIntegrationSnapshot>
+  fetchRemote(root: string): Promise<GitIntegrationSnapshot>
+  pullCurrentBranch(root: string): Promise<RepositorySnapshot>
+  pushCurrentBranch(root: string): Promise<GitIntegrationSnapshot>
+  stagePaths(root: string, paths: readonly string[]): Promise<RepositorySnapshot>
+  unstagePaths(root: string, paths: readonly string[]): Promise<RepositorySnapshot>
+  /** Drops working-tree edits; untracked files are deleted. */
+  discardPaths(root: string, paths: readonly string[]): Promise<RepositorySnapshot>
+  commitChanges(root: string, request: CommitRequest): Promise<RepositorySnapshot>
   /**
    * `refresh` skips the cached copy on disk. A reader adopting a head that was
    * pushed under them knows the cache is stale first hand; without this the
@@ -726,7 +782,7 @@ export interface RepositoryApi {
   setPullRequestThreadResolved(root: string, threadId: string, resolved: boolean): Promise<void>
   mergePullRequest(root: string, selector: number | string, strategy: PullRequestMergeStrategy): Promise<void>
   markPullRequestReady(root: string, selector: number | string): Promise<void>
-  checkoutPullRequest(number: number): Promise<RepositorySnapshot>
+  checkoutPullRequest(root: string, number: number): Promise<RepositorySnapshot>
   submitPullRequestReview(
     root: string,
     selector: number | string,
@@ -796,6 +852,7 @@ export const IPC_CHANNELS = {
   getMarkdownMedia: 'repository:get-markdown-media',
   getAvatar: 'repository:get-avatar',
   getGitIntegration: 'repository:get-git-integration',
+  getRepositoryPullRequests: 'repository:get-repository-pull-requests',
   getPullRequestInbox: 'repository:get-pull-request-inbox',
   getGlobalPullRequestInbox: 'repository:get-global-pull-request-inbox',
   getClosedPullRequests: 'repository:get-closed-pull-requests',
@@ -806,6 +863,10 @@ export const IPC_CHANNELS = {
   fetchRemote: 'repository:fetch-remote',
   pullCurrentBranch: 'repository:pull-current-branch',
   pushCurrentBranch: 'repository:push-current-branch',
+  stagePaths: 'repository:stage-paths',
+  unstagePaths: 'repository:unstage-paths',
+  discardPaths: 'repository:discard-paths',
+  commitChanges: 'repository:commit-changes',
   getPullRequestReview: 'repository:get-pull-request-review',
   cancelPullRequestReview: 'repository:cancel-pull-request-review',
   getPullRequestConversation: 'repository:get-pull-request-conversation',

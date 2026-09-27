@@ -16,6 +16,7 @@ afterEach(cleanup)
 
 const model = {
   getItem: () => null,
+  getVisibleCount: () => 0,
   subscribe: () => () => {},
   scrollToPath: () => {}
 } as unknown as FileTreeModel
@@ -55,7 +56,7 @@ test('filter chips report what they hide and carry their pressed state', async (
 
   const tests = screen.getByRole('button', { name: /Hide tests/ })
   expect(tests.getAttribute('aria-pressed')).toBe('false')
-  // Counted after the tree paints, so the number arrives a frame later.
+  // Counted in idle slices after the tree paints, so the number arrives later.
   await waitFor(() => {
     expect(tests.querySelector('.filter-chip-count')?.textContent).toBe('1')
   })

@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { constants as fileConstants } from 'node:fs'
-import { access, lstat, mkdir, readdir, readFile, readlink, realpath, rename, stat, unlink, writeFile } from 'node:fs/promises'
+import { access, lstat, mkdir, readdir, readFile, readlink, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { cpus, homedir } from 'node:os'
 import { basename, dirname, isAbsolute, resolve, sep } from 'node:path'
@@ -14,6 +14,7 @@ import type {
   ImagePreviewSide,
   GitCommit,
   GitIntegrationSnapshot,
+  RepositoryPullRequests,
   GitRemote,
   InboxPullRequest,
   LocalBranch,
@@ -43,6 +44,7 @@ import type {
 } from '../shared/contracts.js'
 import { createImagePreviewSide } from '../shared/imagePreview.js'
 import { inboxRepoScope } from '../shared/inboxRepos.js'
+import { parseDiffGitHeaderPaths } from '../shared/patchHeaders.js'
 import { normalizeGitHubPullRequestUrl } from '../shared/pullRequestUrl.js'
 import { MAX_CACHED_PATHS } from '../shared/workspaceCache.js'
 import {
@@ -79,8 +81,10 @@ import {
   type RawPullRequestFile
 } from './patchBuilder.js'
 import {
+  MAX_REMEMBERED_REVIEW_BYTES,
   prepareAgentReviewContext,
   rememberedAgentReviewFrom,
+  RememberedReviewStore,
   reviewKey,
   type RememberedAgentReview
 } from './agentReviewBundle.js'
@@ -140,6 +144,58 @@ export function pullRequestReviewReply(
     : review
 }
 
+/**
+ * Splits a cached review into the pages a fresh download would have streamed.
+ * The file list is not one entry per patch section — a file too large to diff
+ * is listed but has no section — so each page takes the files from its own first
+ * section up to the next page's, found by path. A page whose first path cannot
+ * be matched hands its files to the page before it, so every file is still
+ * delivered exactly once and in order.
+ */
+export function cachedPullRequestPages(entry: {
+  patch: string
+  files: PullRequestFile[]
+  omittedFiles: OmittedDiffFile[]
+}): Array<{ patch: string; files: PullRequestFile[]; omittedFiles: OmittedDiffFile[] }> {
+  const chunks = chunkPatchByFileCount(entry.patch)
+  if (chunks.length <= 1) {
+    return [{ patch: entry.patch, files: entry.files, omittedFiles: entry.omittedFiles }]
+  }
+  const starts: Array<number | null> = [0]
+  let cursor = 0
+  for (let index = 1; index < chunks.length; index += 1) {
+    const path = firstPatchSectionPath(chunks[index]!)
+    let found: number | null = null
+    for (let fileIndex = cursor; path != null && fileIndex < entry.files.length; fileIndex += 1) {
+      if (entry.files[fileIndex]!.path !== path) continue
+      found = fileIndex
+      break
+    }
+    starts.push(found)
+    if (found != null) cursor = found
+  }
+  return chunks.map((patch, index) => {
+    const start = starts[index]
+    let end = entry.files.length
+    for (let next = index + 1; next < starts.length; next += 1) {
+      const nextStart = starts[next]
+      if (nextStart == null) continue
+      end = nextStart
+      break
+    }
+    return {
+      patch,
+      files: start == null ? [] : entry.files.slice(start, end),
+      omittedFiles: index === 0 ? entry.omittedFiles : []
+    }
+  })
+}
+
+function firstPatchSectionPath(patch: string): string | null {
+  const newline = patch.indexOf('\n')
+  return parseDiffGitHeaderPaths(newline === -1 ? patch : patch.slice(0, newline))?.path ?? null
+}
+
 // The palette renders eight. Two hundred hits crossed IPC and were ranked for
 // nothing, and the last of them cost the whole scan.
 const MAX_SEARCH_RESULTS = 24
@@ -161,6 +217,7 @@ const MAX_HEAD_CACHE_BYTES = 64 * 1024 * 1024
 const MAX_WORKING_CACHE_ENTRIES = 256
 const MAX_WORKING_CACHE_BYTES = 64 * 1024 * 1024
 const MAX_PATCH_COMMAND_CONCURRENCY = 4
+const DISCARD_UNLINK_CONCURRENCY = 8
 const MAX_PULL_REQUEST_REVIEW_COMMENTS = 100
 const PULL_REQUEST_LIST_LIMIT = 30
 // A pull request's diff is immutable for a given head oid, so a reopen — after
@@ -393,6 +450,10 @@ const GH_EXECUTABLE_CANDIDATES = ['/opt/homebrew/bin/gh', '/usr/local/bin/gh', '
 // version, a racy stat) even with the optional locks off. The watcher is told the
 // write is ours so it does not answer our own read with another refresh.
 const GIT_INDEX_PATH = '.git/index'
+// The watcher forgets a self-write one second after it is announced
+// (`SELF_WRITE_WINDOW_MS`). An index write re-announces well inside that, so
+// its window never lapses however long the command runs.
+const SELF_WRITE_HEARTBEAT_MS = 400
 // The gitignored listing is the only part of a refresh that can outlive the
 // branch and the statuses, so it gets its own window: beat this and it joins the
 // snapshot, miss it and the snapshot ships without it and merges the set later.
@@ -533,6 +594,71 @@ function gitHubIntegrationErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+const COMMIT_EXECUTION_TIMEOUT_MS = 10 * 60_000
+const MAX_COMMIT_MESSAGE_LENGTH = 64 * 1024
+
+export function parseCommitRequest(value: unknown): { message: string; amend: boolean; all: boolean } {
+  if (typeof value !== 'object' || value == null) throw new Error('The commit request is invalid.')
+  const record = value as Record<string, unknown>
+  if (typeof record.message !== 'string' || record.message.length > MAX_COMMIT_MESSAGE_LENGTH) {
+    throw new Error('The commit message must be text under 64 KB.')
+  }
+  return {
+    message: record.message.trim(),
+    amend: record.amend === true,
+    all: record.all === true
+  }
+}
+
+export type IndexOperation = 'stage' | 'unstage' | 'discard'
+
+/**
+ * The paths one index operation names for the entries the reader picked. A
+ * staged rename has already dropped its original path from the index and the
+ * working tree, so handing it to `add` or `restore --worktree` fails the whole
+ * batch; unstaging needs both halves back, or the index keeps the deletion
+ * without the addition. An unstaged rename (an intent-to-add file) still has
+ * its original in the index, and staging or discarding it needs that path too.
+ * Discarding never restores an intent-to-add path itself: its index entry is an
+ * empty placeholder, so `restore --worktree` emptied the file and left it
+ * listed as added. `discardPaths` drops those entries and deletes the files.
+ * A fully staged entry has no working-tree side to stage or discard — a staged
+ * deletion would match nothing at all — and an untracked one has nothing to
+ * unstage.
+ */
+export function indexPathspecs(entries: readonly RepositoryStatusEntry[], operation: IndexOperation): string[] {
+  const pathspecs = new Set<string>()
+  for (const entry of entries) {
+    if (operation === 'unstage') {
+      if (entry.status === 'untracked') continue
+      pathspecs.add(entry.path)
+      if (entry.previousPath != null) pathspecs.add(entry.previousPath)
+      continue
+    }
+    if (entry.staged === 'all') continue
+    if (operation === 'stage' || !isIntentToAdd(entry)) pathspecs.add(entry.path)
+    if (entry.previousPath != null && entry.staged == null) pathspecs.add(entry.previousPath)
+  }
+  return [...pathspecs]
+}
+
+/**
+ * `git add -N`: the index holds a placeholder for the path and nothing else, so
+ * the whole file is working-tree work. Porcelain reports it as ` A`, or as ` R`
+ * when git pairs it with a deleted tracked file.
+ */
+export function isIntentToAdd(entry: RepositoryStatusEntry): boolean {
+  return entry.staged == null && (entry.status === 'added' || entry.status === 'renamed')
+}
+
+function discardFailure(path: string, error: unknown): Error {
+  const code = (error as NodeJS.ErrnoException | null)?.code
+  const reason = code === 'EACCES' || code === 'EPERM'
+    ? 'permission denied'
+    : code === 'EBUSY' ? 'it is in use' : 'it could not be removed'
+  return new Error(`Could not delete ${path}: ${reason}.`, { cause: error })
+}
+
 export function mapGitStatus(indexStatus: string, workingStatus: string): RepositoryFileStatus {
   if (indexStatus === '?' && workingStatus === '?') return 'untracked'
   // Unmerged combinations from git-status(1): DD, AU, UD, UA, DU, AA, UU.
@@ -545,6 +671,17 @@ export function mapGitStatus(indexStatus: string, workingStatus: string): Reposi
   if (indexStatus === 'A' || workingStatus === 'A') return 'added'
   if (indexStatus === 'D' || workingStatus === 'D') return 'deleted'
   return 'modified'
+}
+
+// The index half of an XY pair. A conflict is neither: it has to be resolved
+// before it can be staged, so it always lists with the working-tree changes.
+export function stagedState(
+  status: RepositoryFileStatus,
+  indexStatus: string,
+  workingStatus: string
+): RepositoryStatusEntry['staged'] {
+  if (status === 'conflicted' || status === 'untracked' || indexStatus === ' ') return undefined
+  return workingStatus === ' ' ? 'all' : 'partial'
 }
 
 // A full refresh rebuilds the snapshot from a whole-tree status walk. A save
@@ -591,6 +728,16 @@ export function parsePorcelainV2Status(buffer: Buffer): PorcelainV2Status {
 
   // v2 spells "unmodified" as '.' where v1 used a space.
   const statusChar = (value: string | undefined): string => (value === '.' ? ' ' : value ?? ' ')
+  const entryFor = (path: string, xy: string, previousPath?: string): RepositoryStatusEntry => {
+    const status = mapGitStatus(statusChar(xy[0]), statusChar(xy[1]))
+    const staged = stagedState(status, statusChar(xy[0]), statusChar(xy[1]))
+    return {
+      path,
+      ...(previousPath == null ? {} : { previousPath }),
+      status,
+      ...(staged == null ? {} : { staged })
+    }
+  }
 
   for (let index = 0; index < fields.length; index += 1) {
     const field = fields[index]
@@ -618,31 +765,18 @@ export function parsePorcelainV2Status(buffer: Buffer): PorcelainV2Status {
     const kind = parts[0]
     // Paths may contain spaces, so the remainder is rejoined rather than indexed.
     if (kind === '1' && parts.length > 8) {
-      const xy = parts[1] ?? '..'
-      statuses.push({
-        path: parts.slice(8).join(' '),
-        status: mapGitStatus(statusChar(xy[0]), statusChar(xy[1]))
-      })
+      statuses.push(entryFor(parts.slice(8).join(' '), parts[1] ?? '..'))
       continue
     }
     if (kind === '2' && parts.length > 9) {
-      const xy = parts[1] ?? '..'
       // A rename record is followed by its original path in the next NUL field.
       const previousPath = fields[index + 1]
       index += 1
-      statuses.push({
-        path: parts.slice(9).join(' '),
-        ...(previousPath == null ? {} : { previousPath }),
-        status: mapGitStatus(statusChar(xy[0]), statusChar(xy[1]))
-      })
+      statuses.push(entryFor(parts.slice(9).join(' '), parts[1] ?? '..', previousPath))
       continue
     }
     if (kind === 'u' && parts.length > 10) {
-      const xy = parts[1] ?? '..'
-      statuses.push({
-        path: parts.slice(10).join(' '),
-        status: mapGitStatus(statusChar(xy[0]), statusChar(xy[1]))
-      })
+      statuses.push(entryFor(parts.slice(10).join(' '), parts[1] ?? '..'))
     }
   }
 
@@ -745,16 +879,41 @@ export function mergeVisiblePaths(
   untrackedPaths: readonly string[],
   ignoredPaths: readonly string[] = []
 ): string[] {
-  const seen = new Set<string>(splitNullDelimited(trackedBuffer))
+  return mergeSortedUnique(sortedTrackedPaths(trackedBuffer), extraVisiblePaths(untrackedPaths, ignoredPaths))
+}
+
+function sortedTrackedPaths(trackedBuffer: Buffer): string[] {
+  return [...new Set(splitNullDelimited(trackedBuffer))].sort(comparePaths)
+}
+
+function extraVisiblePaths(untrackedPaths: readonly string[], ignoredPaths: readonly string[]): string[] {
+  const extra = new Set<string>()
   for (const rawPath of untrackedPaths) {
     const path = rawPath.replace(/^\.\//, '')
-    if (!isExcludedPath(path)) seen.add(path)
+    if (!isExcludedPath(path)) extra.add(path)
   }
   for (const rawPath of ignoredPaths) {
     const path = rawPath.replace(/^\.\//, '')
-    if (!isExcludedIgnoredPath(path)) seen.add(path)
+    if (!isExcludedIgnoredPath(path)) extra.add(path)
   }
-  return [...seen].sort(comparePaths)
+  return [...extra].sort(comparePaths)
+}
+
+/** Union of two sorted, individually duplicate-free lists, in one pass. */
+function mergeSortedUnique(left: readonly string[], right: readonly string[]): string[] {
+  if (right.length === 0) return [...left]
+  const merged: string[] = []
+  let leftIndex = 0
+  let rightIndex = 0
+  while (leftIndex < left.length && rightIndex < right.length) {
+    const order = comparePaths(left[leftIndex]!, right[rightIndex]!)
+    if (order <= 0) merged.push(left[leftIndex++]!)
+    else merged.push(right[rightIndex++]!)
+    if (order === 0) rightIndex += 1
+  }
+  while (leftIndex < left.length) merged.push(left[leftIndex++]!)
+  while (rightIndex < right.length) merged.push(right[rightIndex++]!)
+  return merged
 }
 
 
@@ -1504,6 +1663,27 @@ export class PullRequestReviewCache {
 
 type LocalReviewListener = (progress: LocalReviewProgress) => void
 
+/**
+ * A loaded local review whose patch is still in pages. Callers that were streamed
+ * those pages never need them joined, so the join waits until one does.
+ */
+interface LocalReviewResult {
+  /** Everything but the patch, which is left empty. */
+  review: LocalBranchReview
+  patchParts: readonly string[]
+}
+
+let lastPathsRevision = 0
+
+function nextPathsRevision(): number {
+  lastPathsRevision += 1
+  return lastPathsRevision
+}
+
+function joinedPatchLength(parts: readonly string[]): number {
+  return parts.reduce((total, part) => total + part.length, Math.max(0, parts.length - 1))
+}
+
 export class RepositoryService {
   #root: string | null = null
   #kind: RepositorySnapshot['kind'] = 'folder'
@@ -1520,6 +1700,8 @@ export class RepositoryService {
     // Held by reference: the listing owns the array and never mutates it, so an
     // unchanged ignored set is recognised without rescanning it.
     ignoredPaths: readonly string[]
+    /** `buffer` split, deduplicated and sorted: the costly part of a merge. */
+    trackedPaths: string[]
     paths: string[]
   } | null = null
   #ignoredPaths: string[] = []
@@ -1534,9 +1716,11 @@ export class RepositoryService {
   #workingFileCache = new Map<string, { read: WorkingFileRead; bytes: number }>()
   #workingFileCacheBytes = 0
   #pendingComparisons = new Map<string, Promise<FileComparison>>()
-  #pendingWorkingTreePatches = new Map<string, ReviewFlight<WorkingTreePatch, WorkingTreePatch>>()
-  #pendingLocalReviews = new Map<string, ReviewFlight<LocalReviewProgress, LocalBranchReview>>()
+  #pendingWorkingTreePatches = new Map<string, ReviewFlight<WorkingTreePatch, WorkingTreePatch[]>>()
+  #pendingLocalReviews = new Map<string, ReviewFlight<LocalReviewProgress, LocalReviewResult>>()
   #selfWriteObserver: ((path: string) => void) | null = null
+  #indexWritesInFlight = 0
+  #indexWriteHeartbeat: ReturnType<typeof setInterval> | null = null
   #snapshotObserver: ((snapshot: RepositorySnapshot) => void) | null = null
   #checkFieldsSupported = true
   // requestId -> the flight it is waiting on. Several requests share one flight, so
@@ -1559,7 +1743,7 @@ export class RepositoryService {
   // A pull request's owner, repository, and number never change, so the identity
   // lookup is resolved once instead of on every conversation poll.
   #pullRequestIdentities = new Map<string, { owner: string; name: string; number: number }>()
-  #rememberedReviews = new Map<string, RememberedAgentReview>()
+  #rememberedReviews = new RememberedReviewStore()
 
   getSessionSnapshot(): RepositorySnapshot | null {
     return this.#snapshot
@@ -1586,7 +1770,10 @@ export class RepositoryService {
 
   async prepareAgentReview(subject: AgentRequestSubject): Promise<string> {
     const remembered = this.#findRememberedReview(subject)
-    const index = remembered == null && subject.pullRequestUrl != null && subject.headOid != null
+    // A review remembered without its patch was too big to keep one in memory, so
+    // the copy on disk is read for it exactly as for a review never remembered.
+    const needsPatch = remembered == null || remembered.patch === ''
+    const index = needsPatch && subject.pullRequestUrl != null && subject.headOid != null
       ? await this.#pullRequestCache?.readIndex(subject.pullRequestUrl) ?? null
       : null
     const cached = index != null && index.headRefOid === subject.headOid
@@ -1602,17 +1789,12 @@ export class RepositoryService {
 
   #rememberAgentReview(review: PullRequestReview | LocalBranchReview): void {
     if (review.patch === '' && review.files.length === 0) return
-    const remembered = rememberedAgentReviewFrom(review)
-    this.#rememberedReviews.delete(remembered.key)
-    this.#rememberedReviews.set(remembered.key, remembered)
-    if (this.#rememberedReviews.size <= 8) return
-    const oldest = this.#rememberedReviews.keys().next().value
-    if (oldest != null) this.#rememberedReviews.delete(oldest)
+    this.#rememberedReviews.remember(rememberedAgentReviewFrom(review))
   }
 
   #findRememberedReview(subject: AgentRequestSubject): RememberedAgentReview | null {
     if (subject.baseOid == null || subject.headOid == null) return null
-    return this.#rememberedReviews.get(reviewKey(subject.baseOid, subject.headOid)) ?? null
+    return this.#rememberedReviews.get(reviewKey(subject.baseOid, subject.headOid))
   }
 
   getContentSearchMetricsForTests(): ContentSearchMetrics {
@@ -1620,6 +1802,10 @@ export class RepositoryService {
       ...this.#contentSearchMetrics,
       durationsMs: [...this.#contentSearchMetrics.durationsMs]
     }
+  }
+
+  getRememberedReviewStatsForTests(): { entries: number; bytes: number } {
+    return { entries: this.#rememberedReviews.size, bytes: this.#rememberedReviews.bytes }
   }
 
   resetContentSearchMetricsForTests(): void {
@@ -1654,6 +1840,9 @@ export class RepositoryService {
     for (const flight of this.#pendingLocalReviews.values()) flight.abort.abort()
     this.#pendingLocalReviews.clear()
     this.#pullRequestIdentities.clear()
+    // `open()` reuses this instance for whatever folder comes next, and a disposed
+    // session is kept around only to be reopened, so neither needs these patches.
+    this.#rememberedReviews.clear()
     this.#ignoredRun?.abort()
     this.#ignoredRun = null
     this.#ignoredPaths = []
@@ -1889,11 +2078,18 @@ export class RepositoryService {
     ) {
       return cached.paths
     }
-    const paths = mergeVisiblePaths(trackedBuffer, untrackedPaths, ignoredPaths)
+    // A new untracked file changes only the small side of the merge; the tracked
+    // side is reused and the two are merged in one pass instead of re-splitting
+    // and re-sorting every path (15 ms on Bun, 120 ms on V8 at 100k paths).
+    const trackedPaths = cached != null && cached.buffer.equals(trackedBuffer)
+      ? cached.trackedPaths
+      : sortedTrackedPaths(trackedBuffer)
+    const paths = mergeSortedUnique(trackedPaths, extraVisiblePaths(untrackedPaths, ignoredPaths))
     this.#trackedPathsCache = {
       buffer: trackedBuffer,
       untrackedPaths: [...untrackedPaths],
       ignoredPaths,
+      trackedPaths,
       paths
     }
     return paths
@@ -2098,7 +2294,11 @@ export class RepositoryService {
     }
     const next = entries[0] ?? null
     const previous = this.#statusByPath.get(path) ?? null
-    if (previous?.status === next?.status && previous?.previousPath === next?.previousPath) return true
+    if (
+      previous?.status === next?.status
+      && previous?.previousPath === next?.previousPath
+      && previous?.staged === next?.staged
+    ) return true
     this.#setSnapshot({ ...snapshot, statuses: replaceStatusEntry(snapshot.statuses, path, next) })
     return true
   }
@@ -2121,20 +2321,28 @@ export class RepositoryService {
     // path list stays the same. Include its revision so a newer edit aborts an
     // older same-path build instead of reusing a stale patch.
     const key = `${this.#snapshotRevision}\0${[...paths].sort().join('\0')}`
-    return this.#runKeyedFlight(
+    const pages = await this.#runKeyedFlight(
       this.#pendingWorkingTreePatches,
       key,
       (signal, emit) => this.#loadWorkingTreePatch(paths, signal, emit),
       onProgress
     )
+    if (onProgress == null) return this.#joinWorkingTreePages(pages)
+    // A listening caller has every page already: the flight replays what it
+    // emitted before they joined, and a page is only skipped when it carries
+    // nothing. The renderer keeps what it was streamed and waits for the
+    // stream's `done` before trusting this reply (a reply is not ordered against
+    // progress events) — joining the pages here cloned the whole diff over IPC a
+    // second time.
+    return { patch: '', omittedFiles: pages.flatMap((page) => page.omittedFiles) }
   }
 
   async #loadWorkingTreePatch(
     paths: string[],
     signal: AbortSignal,
     onProgress?: (page: WorkingTreePatch) => void
-  ): Promise<WorkingTreePatch> {
-    if (paths.length === 0) return { patch: '', omittedFiles: [] }
+  ): Promise<WorkingTreePatch[]> {
+    if (paths.length === 0) return []
 
     const root = this.#requireRoot()
     const snapshot = this.#requireSnapshot()
@@ -2148,7 +2356,7 @@ export class RepositoryService {
       this.#emitWorkingTreePage(firstPage, signal, onProgress)
       const restPage = await restWork
       this.#emitWorkingTreePage(restPage, signal, onProgress)
-      return this.#joinWorkingTreePages([firstPage, restPage])
+      return [firstPage, restPage]
     } catch (error) {
       await restWork.catch(() => {})
       throw error
@@ -2803,9 +3011,15 @@ export class RepositoryService {
     }
   }
 
-  async getGitIntegration(): Promise<GitIntegrationSnapshot> {
+  /**
+   * `pullRequests: false` answers from local git alone. The GitHub list is the
+   * slow half — seconds against a busy repository, next to tens of milliseconds
+   * for refs and log — so the panel asks for the two separately and paints
+   * branches, history and changes without waiting on the network.
+   */
+  async getGitIntegration(options: { pullRequests?: boolean } = {}): Promise<GitIntegrationSnapshot> {
     this.#requireGitRepository()
-    const ghExecutable = await getGhExecutable()
+    const includePullRequests = options.pullRequests !== false
     const branchesPromise = this.#git([
       'for-each-ref',
       '--sort=-committerdate',
@@ -2818,17 +3032,9 @@ export class RepositoryService {
     // same call without them 6.5 s, and `--state open --limit 30` 2.4 s. Nothing
     // in the panel renders check data; the review of a single pull request still
     // asks for it. Closed and merged rows load on demand instead.
-    const pullRequestsPromise = runGitHubReadCommand(
-      ghExecutable,
-      ['pr', 'list', '--state', 'open', '--limit', String(PULL_REQUEST_LIST_LIMIT), '--json', PULL_REQUEST_LIST_FIELDS],
-      this.#requireRoot()
-    ).then(
-      (result) => ({ pullRequests: parsePullRequestSummaries(result), message: null }),
-      (error: unknown) => ({
-        pullRequests: [] as PullRequestSummary[],
-        message: gitHubIntegrationErrorMessage(error)
-      })
-    )
+    const pullRequestsPromise = includePullRequests
+      ? this.getRepositoryPullRequests()
+      : Promise.resolve({ pullRequests: [] as PullRequestSummary[], githubAvailable: true, githubMessage: null })
 
     const [branchesResult, remoteBranchesResult, remotes, commitsResult, defaultBranchResult, aheadBehindResult, githubResult] = await Promise.all([
       branchesPromise,
@@ -2855,10 +3061,30 @@ export class RepositoryService {
       defaultBranch,
       ahead: counts.ahead,
       behind: counts.behind,
-      pullRequests: githubResult.pullRequests,
-      githubAvailable: githubResult.message == null,
-      githubMessage: githubResult.message
+      ...githubResult
     }
+  }
+
+  async getRepositoryPullRequests(): Promise<RepositoryPullRequests> {
+    this.#requireGitRepository()
+    const ghExecutable = await getGhExecutable()
+    return runGitHubReadCommand(
+      ghExecutable,
+      ['pr', 'list', '--state', 'open', '--limit', String(PULL_REQUEST_LIST_LIMIT), '--json', PULL_REQUEST_LIST_FIELDS],
+      this.#requireRoot()
+    ).then(
+      (result) => ({ pullRequests: parsePullRequestSummaries(result), githubAvailable: true, githubMessage: null }),
+      (error: unknown) => {
+        // A cancelled list says nothing about GitHub; answering "unavailable"
+        // for it replaced the rows the panel already had with an error.
+        if (error instanceof Error && error.message === COMMAND_ABORTED_MESSAGE) throw error
+        return {
+          pullRequests: [] as PullRequestSummary[],
+          githubAvailable: false,
+          githubMessage: gitHubIntegrationErrorMessage(error)
+        }
+      }
+    )
   }
 
   // Closed and merged pull requests are a deliberate second request: including
@@ -2882,7 +3108,9 @@ export class RepositoryService {
     ])
     const branches = new Set(branchesResult.stdout.toString('utf8').split('\n').filter(Boolean))
     if (!branches.has(name)) throw new Error('The selected local branch no longer exists.')
-    await this.#git(['switch', '--no-guess', name])
+    // A switch rewrites the index, and a post-checkout hook can hold it for
+    // longer than the one-second self-write window.
+    await this.#writingIndex(() => this.#git(['switch', '--no-guess', name]))
     this.#mutation += 1
     return this.refresh()
   }
@@ -2905,7 +3133,7 @@ export class RepositoryService {
     headRef: string,
     signal: AbortSignal,
     onProgress?: (progress: LocalReviewProgress) => void
-  ): Promise<LocalBranchReview> {
+  ): Promise<LocalReviewResult> {
     const branchResult = await this.#git(['for-each-ref', '--format=%(refname:short)', 'refs/heads'], signal)
     const branches = new Set(branchResult.stdout.toString('utf8').split('\n').filter(Boolean))
     if (!branches.has(baseRef) || !branches.has(headRef)) throw new Error('Both comparison refs must be local branches.')
@@ -2952,7 +3180,7 @@ export class RepositoryService {
     ])
     void baseExists
     void headExists
-    return this.#loadFileFirstReview({
+    const { review, patchParts } = await this.#loadFileFirstReview({
       churnEntries: parseNumstat(churnResult.stdout),
       patchArgs: ['diff', '--no-color', '--full-index', '--find-renames', comparison, '--'],
       signal: new AbortController().signal,
@@ -2963,6 +3191,7 @@ export class RepositoryService {
       baseOid,
       headOid
     })
+    return { ...review, patch: patchParts.join('\n') }
   }
 
   async getCommitReview(
@@ -2982,7 +3211,7 @@ export class RepositoryService {
     oid: string,
     signal: AbortSignal,
     onProgress?: (progress: LocalReviewProgress) => void
-  ): Promise<LocalBranchReview> {
+  ): Promise<LocalReviewResult> {
     await this.#git(['cat-file', '-e', `${oid}^{commit}`], signal)
     const commitResult = await this.#git(['rev-list', '--parents', '-n', '1', oid], signal)
     const [commitOid, firstParent] = commitResult.stdout.toString('utf8').trim().split(' ')
@@ -3033,7 +3262,7 @@ export class RepositoryService {
 
   #runLocalReview(
     key: string,
-    load: (signal: AbortSignal, emit: LocalReviewListener) => Promise<LocalBranchReview>,
+    load: (signal: AbortSignal, emit: LocalReviewListener) => Promise<LocalReviewResult>,
     onProgress?: LocalReviewListener
   ): Promise<LocalBranchReview> {
     return this.#runKeyedFlight(
@@ -3041,11 +3270,13 @@ export class RepositoryService {
       key,
       load,
       onProgress
-    ).then((review) => this.#localReviewReply(review, onProgress != null))
+    ).then((result) => this.#localReviewReply(result, onProgress != null))
   }
 
-  #mergeChurnPatchFiles(churnFiles: PullRequestFile[], patch: string): PullRequestFile[] {
-    const patchFiles = new Map(filesFromPatch(patch).map((file) => [file.path, file]))
+  #mergeChurnPatchFiles(
+    churnFiles: PullRequestFile[],
+    patchFiles: ReadonlyMap<string, PullRequestFile>
+  ): PullRequestFile[] {
     if (patchFiles.size === 0) return []
     return churnFiles.flatMap((file) => {
       const fromPatch = patchFiles.get(file.path)
@@ -3053,9 +3284,17 @@ export class RepositoryService {
     })
   }
 
-  #localReviewReply(review: LocalBranchReview, streamed: boolean): LocalBranchReview {
-    this.#rememberAgentReview(review)
-    return streamed ? { ...review, patch: '' } : review
+  // A streamed caller already holds every page, so the joined patch is built only
+  // for a caller that did not listen or for the agent's copy — and a patch over
+  // that copy's budget would be remembered without it anyway.
+  #localReviewReply({ review, patchParts }: LocalReviewResult, streamed: boolean): LocalBranchReview {
+    if (streamed && joinedPatchLength(patchParts) > MAX_REMEMBERED_REVIEW_BYTES) {
+      this.#rememberAgentReview(review)
+      return review
+    }
+    const complete = { ...review, patch: patchParts.join('\n') }
+    this.#rememberAgentReview(complete)
+    return streamed ? review : complete
   }
 
   async #diffPathspecPatch(
@@ -3078,7 +3317,7 @@ export class RepositoryService {
     headRefName: string
     baseOid: string
     headOid: string
-  }): Promise<LocalBranchReview> {
+  }): Promise<LocalReviewResult> {
     const { churnEntries, patchArgs, signal, onProgress, reviewId } = options
     const oversized = selectOversizedDiffFiles(churnEntries)
     const churnFiles = diffFilesFromChurn(churnEntries)
@@ -3112,7 +3351,16 @@ export class RepositoryService {
         onProgress({ kind: 'metadata', review })
         onProgress({ kind: 'done', selector: reviewId, fileCount: expectedFileCount })
       }
-      return review
+      return { review, patchParts: [] }
+    }
+    // Each page is parsed once and its files kept. Every page is already limited
+    // and the join only adds a newline between them, so re-scanning the joined
+    // patch found nothing new and cost as much again as all the pages together.
+    const patchFiles = new Map<string, PullRequestFile>()
+    const readPageFiles = (patch: string): PullRequestFile[] => {
+      const pageFiles = new Map(filesFromPatch(patch).map((file) => [file.path, file]))
+      for (const [path, file] of pageFiles) patchFiles.set(path, file)
+      return this.#mergeChurnPatchFiles(churnFiles, pageFiles)
     }
 
     const { first, rest } = isolateFirstPathspecGroup(includedGroups)
@@ -3126,10 +3374,7 @@ export class RepositoryService {
       const firstLimited = limitPatchFileSize(await firstWork, MAX_DIFF_FILE_BYTES)
       if (signal.aborted) throw new Error(COMMAND_ABORTED_MESSAGE)
       const firstOmitted = [...oversized.omittedFiles, ...firstLimited.omittedFiles]
-      const firstFiles = [
-        ...this.#mergeChurnPatchFiles(churnFiles, firstLimited.patch),
-        ...omittedFiles
-      ]
+      const firstFiles = [...readPageFiles(firstLimited.patch), ...omittedFiles]
       if (streamed) {
         onProgress({
           kind: 'metadata',
@@ -3146,28 +3391,25 @@ export class RepositoryService {
         restOmitted.push(...limited.omittedFiles)
         if (limited.patch === '' && limited.omittedFiles.length === 0) continue
         if (limited.patch !== '') restParts.push(limited.patch)
+        const pageFiles = readPageFiles(limited.patch)
         if (streamed) {
           onProgress({
             kind: 'files',
             selector: reviewId,
             patch: limited.patch,
-            files: this.#mergeChurnPatchFiles(churnFiles, limited.patch),
+            files: pageFiles,
             omittedFiles: limited.omittedFiles
           })
         }
       }
 
-      const joined = [firstLimited.patch, ...restParts].filter((part) => part !== '').join('\n')
-      const limited = limitPatchFileSize(joined, MAX_DIFF_FILE_BYTES)
-      const patchFiles = new Map(filesFromPatch(limited.patch).map((file) => [file.path, file]))
       const files = churnFiles.map((file) => ({ ...file, ...patchFiles.get(file.path) }))
-      const review = buildReview(files, limited.patch, [
-        ...firstOmitted,
-        ...restOmitted,
-        ...limited.omittedFiles
-      ])
+      const review = buildReview(files, '', [...firstOmitted, ...restOmitted])
       if (streamed) onProgress({ kind: 'done', selector: reviewId, fileCount: expectedFileCount })
-      return review
+      return {
+        review,
+        patchParts: [firstLimited.patch, ...restParts].filter((part) => part !== '')
+      }
     } catch (error) {
       await restWork.catch(() => {})
       throw error
@@ -3177,12 +3419,14 @@ export class RepositoryService {
   async fetchRemote(): Promise<GitIntegrationSnapshot> {
     this.#requireGitRepository()
     await this.#git(['fetch', '--all', '--prune'])
-    return this.getGitIntegration()
+    // The renderer keeps its pull request list and refreshes it on its own;
+    // waiting on `gh` here only delayed the ahead/behind the reader asked for.
+    return this.getGitIntegration({ pullRequests: false })
   }
 
   async pullCurrentBranch(): Promise<RepositorySnapshot> {
     this.#requireGitRepository()
-    await this.#git(['pull', '--ff-only'])
+    await this.#writingIndex(() => this.#git(['pull', '--ff-only']))
     this.#mutation += 1
     return this.refresh()
   }
@@ -3202,7 +3446,199 @@ export class RepositoryService {
     } else {
       await this.#git(['push'])
     }
-    return this.getGitIntegration()
+    return this.getGitIntegration({ pullRequests: false })
+  }
+
+  /**
+   * Stage, unstage and discard take repository paths the snapshot already lists
+   * as changed, and act on the status entries behind them: which paths each
+   * operation names is decided per entry by `indexPathspecs`. Pathspecs travel
+   * on stdin, NUL-separated and literal: a thousand-file "Stage All" stays one
+   * spawn, and a path that looks like a glob or an option is still only that path.
+   */
+  #changedEntries(pathsValue: unknown): RepositoryStatusEntry[] {
+    if (!Array.isArray(pathsValue) || pathsValue.length === 0 || pathsValue.length > this.#statusByPath.size) {
+      throw new Error('Select changed files to update.')
+    }
+    const entries = new Map<string, RepositoryStatusEntry>()
+    for (const path of pathsValue) {
+      const entry = typeof path === 'string' ? this.#statusByPath.get(path) : undefined
+      if (entry == null) throw new Error('A selected file is no longer changed. Refresh and try again.')
+      entries.set(entry.path, entry)
+    }
+    return [...entries.values()]
+  }
+
+  // The watcher's self-write window is one second. Arming it before and after a
+  // command still left the middle of anything slower — a commit hook, a pull, a
+  // checkout — unannounced, and each index write landing there refreshed the
+  // whole tree while the caller's own refresh was about to run. So the window
+  // is held open for as long as any index write is in flight, then re-armed
+  // once more for the event that lands just after it exits.
+  async #writingIndex<Result>(command: () => Promise<Result>): Promise<Result> {
+    this.#indexWritesInFlight += 1
+    this.#selfWriteObserver?.(GIT_INDEX_PATH)
+    if (this.#indexWriteHeartbeat == null) {
+      this.#indexWriteHeartbeat = setInterval(
+        () => this.#selfWriteObserver?.(GIT_INDEX_PATH),
+        SELF_WRITE_HEARTBEAT_MS
+      )
+      this.#indexWriteHeartbeat.unref?.()
+    }
+    try {
+      return await command()
+    } finally {
+      this.#indexWritesInFlight -= 1
+      if (this.#indexWritesInFlight === 0) this.#stopIndexWriteHeartbeat()
+      this.#selfWriteObserver?.(GIT_INDEX_PATH)
+    }
+  }
+
+  #stopIndexWriteHeartbeat(): void {
+    if (this.#indexWriteHeartbeat == null) return
+    clearInterval(this.#indexWriteHeartbeat)
+    this.#indexWriteHeartbeat = null
+  }
+
+  async #gitWithPathspecs(args: readonly string[], pathspecs: readonly string[]): Promise<void> {
+    // An empty pathspec file is no pathspec at all, which `add -A` reads as the
+    // whole tree.
+    if (pathspecs.length === 0) return
+    await this.#writingIndex(() => runCommand(
+      'git',
+      ['-C', this.#requireRoot(), '-c', 'core.quotePath=false', ...args, '--pathspec-from-file=-', '--pathspec-file-nul'],
+      undefined,
+      [],
+      pathspecs.map((path) => `:(literal)${path}`).join('\0')
+    ))
+  }
+
+  async stagePaths(pathsValue: unknown): Promise<RepositorySnapshot> {
+    this.#requireGitRepository()
+    const pathspecs = indexPathspecs(this.#changedEntries(pathsValue), 'stage')
+    // `-A` so a deleted file stages its removal instead of failing the batch.
+    await this.#gitWithPathspecs(['add', '-A'], pathspecs)
+    this.#mutation += 1
+    return this.refresh()
+  }
+
+  async unstagePaths(pathsValue: unknown): Promise<RepositorySnapshot> {
+    this.#requireGitRepository()
+    const pathspecs = indexPathspecs(this.#changedEntries(pathsValue), 'unstage')
+    if (this.#snapshot?.head == null) {
+      // Before the first commit there is no HEAD to restore the index from, so
+      // unstaging means dropping the entries; the files stay on disk.
+      await this.#gitWithPathspecs(['rm', '--cached', '-r', '-q', '--ignore-unmatch'], pathspecs)
+    } else {
+      await this.#gitWithPathspecs(['restore', '--staged'], pathspecs)
+    }
+    this.#mutation += 1
+    return this.refresh()
+  }
+
+  /**
+   * Throws away the working-tree side only, like VS Code's Discard: a tracked
+   * file goes back to what is staged (or HEAD), an untracked one is deleted.
+   * Staged work survives, so a partial file loses just its unstaged edits.
+   */
+  async discardPaths(pathsValue: unknown): Promise<RepositorySnapshot> {
+    this.#requireGitRepository()
+    const entries = this.#changedEntries(pathsValue)
+    const root = this.#requireRoot()
+    // Classified by the entry that was picked, not by looking every pathspec up
+    // again: a rename's original path can also be listed on its own as
+    // untracked, and the lookup deleted that file too.
+    const tracked = indexPathspecs(entries.filter((entry) => entry.status !== 'untracked'), 'discard')
+    // An intent-to-add file has nothing in the index to go back to, so it goes
+    // the way an untracked one does, once its placeholder entry is dropped.
+    const intentToAdd = entries.filter(isIntentToAdd).map((entry) => entry.path)
+    // Every target is checked before anything is touched, so a path that
+    // escapes the root, or a folder that cannot go, fails the whole discard
+    // instead of half of it.
+    const untrackedTargets = await Promise.all(entries
+      .filter((entry) => entry.status === 'untracked' || isIntentToAdd(entry))
+      .map((entry) => this.#untrackedDiscardTarget(root, entry.path)))
+    try {
+      await this.#gitWithPathspecs(['rm', '--cached', '-q', '--ignore-unmatch'], intentToAdd)
+      if (tracked.length > 0) await this.#gitWithPathspecs(['restore', '--worktree'], tracked)
+      // `git clean` takes no pathspec file, and these are plain files the status
+      // walk listed one by one, so they are removed directly. One `unlink` at a
+      // time spent 670 ms on 10k files; a few in flight halve it, and more only
+      // queue behind the same thread pool the comparison reads use.
+      await mapWithConcurrency(untrackedTargets, DISCARD_UNLINK_CONCURRENCY, async ({ path, target, directory }) => {
+        try {
+          // `rm` removes a symlink inside the folder rather than following it
+          // out of the repository.
+          if (directory) await rm(target, { recursive: true, force: true })
+          else await unlink(target)
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw discardFailure(path, error)
+        }
+      })
+    } finally {
+      this.#mutation += 1
+    }
+    return this.refresh()
+  }
+
+  /**
+   * The status walk lists untracked files one by one; a trailing slash is the
+   * one exception, a folder git would not descend into. Unlinking one failed
+   * with a bare EPERM after the tracked half of the discard had already run. A
+   * nested repository is refused the way `git clean` refuses it without `-ff`:
+   * its history is not this repository's to throw away.
+   */
+  async #untrackedDiscardTarget(
+    root: string,
+    path: string
+  ): Promise<{ path: string; target: string; directory: boolean }> {
+    const target = resolve(root, path)
+    if (target === root || !isWithinRoot(root, target)) throw new Error('Discard path must stay inside the repository.')
+    if (!path.endsWith('/')) return { path, target, directory: false }
+    const stats = await lstat(target).catch(() => null)
+    if (stats?.isDirectory() !== true) return { path, target, directory: false }
+    const nestedRepository = await access(resolve(target, '.git')).then(() => true, () => false)
+    if (nestedRepository) {
+      throw new Error(`${path} is a separate Git repository. Delete it yourself if you mean to lose its history.`)
+    }
+    return { path, target, directory: true }
+  }
+
+  /**
+   * `all` is the "nothing staged" commit: every change, untracked files included,
+   * is staged first, the way VS Code's smart commit behaves. The message travels
+   * on stdin so its quotes, newlines and leading dashes reach git untouched.
+   */
+  async commitChanges(request: unknown): Promise<RepositorySnapshot> {
+    this.#requireGitRepository()
+    const { message, amend, all } = parseCommitRequest(request)
+    const args = ['-C', this.#requireRoot(), 'commit', '--cleanup=strip']
+    if (amend) args.push('--amend')
+    if (message === '') {
+      // Refused before `all` stages anything, so a missing message changes nothing.
+      if (!amend) throw new Error('Write a commit message first.')
+      args.push('--no-edit')
+    } else {
+      args.push('-F', '-')
+    }
+    try {
+      if (all) await this.#writingIndex(() => this.#git(['add', '-A']))
+      // Hooks (lint-staged, lefthook, test runs) routinely outlast the default
+      // two minutes; a commit that is still working is not a hung command.
+      await this.#writingIndex(() => runCommand(
+        'git',
+        args,
+        undefined,
+        [],
+        message === '' ? undefined : message,
+        undefined,
+        'interactive',
+        { executionMs: COMMIT_EXECUTION_TIMEOUT_MS }
+      ))
+    } finally {
+      this.#mutation += 1
+    }
+    return this.refresh()
   }
 
   // Closing a big review left up to eight `gh api` children per wave running to
@@ -3357,13 +3793,11 @@ export class RepositoryService {
       snapshotIdentity: index.snapshotIdentity
     }
     emit({ kind: 'metadata', selector: normalizedSelector, review: base })
-    emit({
-      kind: 'files',
-      selector: normalizedSelector,
-      patch: entry.patch,
-      files: entry.files,
-      omittedFiles: entry.omittedFiles
-    })
+    // Paged like a fresh download. One event carrying a 3,000-file patch was a
+    // single structured clone and a single renderer task for all of it.
+    for (const page of cachedPullRequestPages(entry)) {
+      emit({ kind: 'files', selector: normalizedSelector, ...page })
+    }
     emit({ kind: 'done', selector: normalizedSelector, fileCount: entry.files.length })
     const review: PullRequestReview = {
       ...base,
@@ -3773,7 +4207,8 @@ export class RepositoryService {
   async checkoutPullRequest(number: number): Promise<RepositorySnapshot> {
     this.#requireGitRepository()
     requirePullRequestNumber(number)
-    await runCommand(await getGhExecutable(), ['pr', 'checkout', String(number)], this.#requireRoot())
+    const ghExecutable = await getGhExecutable()
+    await this.#writingIndex(() => runCommand(ghExecutable, ['pr', 'checkout', String(number)], this.#requireRoot()))
     this.#mutation += 1
     return this.refresh()
   }
@@ -4084,7 +4519,14 @@ export class RepositoryService {
     }
     // Rebuilding the set costs ~5 ms per refresh at 100k paths, and the watcher's
     // steady-state tick hands back the same array `#visiblePaths` already reused.
-    if (this.#snapshot?.paths !== snapshot.paths) this.#pathSet = new Set(snapshot.paths)
+    const samePaths = this.#snapshot?.paths === snapshot.paths
+    if (!samePaths) this.#pathSet = new Set(snapshot.paths)
+    // Stamped on the snapshot itself because every caller hands this exact
+    // object on — to the watcher, to IPC replies, to the renderer. One counter
+    // for the whole process, so a reopened session never reuses a number a
+    // window still holds under a different list.
+    const heldRevision = samePaths ? this.#snapshot?.pathsRevision : undefined
+    snapshot.pathsRevision = heldRevision ?? nextPathsRevision()
     this.#snapshot = snapshot
     this.#snapshotRevision += 1
     this.#statusByPath = new Map(snapshot.statuses.map((status) => [status.path, status]))

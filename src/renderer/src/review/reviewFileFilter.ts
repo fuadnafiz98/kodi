@@ -28,11 +28,24 @@ export function reviewFileFilterIsActive(filter: ReviewFileFilter): boolean {
   return filter.hideTests || filter.hideApi || filter.query.trim() !== ''
 }
 
-export function pathMatchesFilterQuery(path: string, query: string): boolean {
-  const patterns = query.split(',').map((part) => part.trim()).filter((part) => part !== '')
-  if (patterns.length === 0) return true
+type PathMatcher = (lowerPath: string, lowerName: string) => boolean
+
+// A query is parsed once per filter pass, not once per path: rebuilding every
+// glob's RegExp for each of 100k paths was most of the cost of a keystroke.
+function compileFilterQuery(query: string): PathMatcher[] {
+  return query.split(',').map((part) => part.trim()).filter((part) => part !== '')
+    .map((pattern) => compilePathPattern(pattern.toLowerCase()))
+}
+
+function matchesAny(matchers: readonly PathMatcher[], path: string): boolean {
+  if (matchers.length === 0) return true
   const haystack = path.toLowerCase()
-  return patterns.some((pattern) => matchPathPattern(haystack, pattern.toLowerCase()))
+  const name = haystack.slice(haystack.lastIndexOf('/') + 1)
+  return matchers.some((matcher) => matcher(haystack, name))
+}
+
+export function pathMatchesFilterQuery(path: string, query: string): boolean {
+  return matchesAny(compileFilterQuery(query), path)
 }
 
 export function applyReviewFileFilter(
@@ -40,23 +53,22 @@ export function applyReviewFileFilter(
   filter: ReviewFileFilter
 ): readonly string[] {
   if (!reviewFileFilterIsActive(filter)) return paths
+  const matchers = compileFilterQuery(filter.query)
   const next = paths.filter((path) => {
     if (filter.hideTests && isTestFilePath(path)) return false
     if (filter.hideApi && isApiFilePath(path)) return false
-    return pathMatchesFilterQuery(path, filter.query)
+    return matchesAny(matchers, path)
   })
-  return next.length === paths.length && next.every((path, index) => path === paths[index])
-    ? paths
-    : next
+  // Filtering only drops paths, so an unchanged length is an unchanged list.
+  return next.length === paths.length ? paths : next
 }
 
-function matchPathPattern(path: string, pattern: string): boolean {
+function compilePathPattern(pattern: string): PathMatcher {
   const trimmed = pattern.replace(/^\/+|\/+$/g, '')
-  if (trimmed === '') return true
-  if (!trimmed.includes('*') && !trimmed.includes('?')) return path.includes(trimmed)
-  const glob = normalizeGlob(trimmed)
-  const regex = globToRegExp(glob)
-  return regex.test(path) || regex.test(path.split('/').at(-1) ?? path)
+  if (trimmed === '') return () => true
+  if (!trimmed.includes('*') && !trimmed.includes('?')) return (path) => path.includes(trimmed)
+  const regex = globToRegExp(normalizeGlob(trimmed))
+  return (path, name) => regex.test(path) || regex.test(name)
 }
 
 function normalizeGlob(pattern: string): string {

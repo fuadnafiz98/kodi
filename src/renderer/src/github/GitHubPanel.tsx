@@ -6,8 +6,10 @@ import type {
   GitIntegrationSnapshot,
   PullRequestMergeStrategy,
   PullRequestInboxSnapshot,
-  PullRequestSummary
+  PullRequestSummary,
+  RepositoryStatusEntry
 } from '../../../shared/contracts'
+import { GitChangesTab } from '../git/GitChangesTab'
 import { GitPanelBody } from '../git/GitPanelBody'
 import { visiblePullRequestsFor } from '../git/gitPanelInbox'
 import { GitPanelTabs } from '../git/GitPanelTabs'
@@ -15,13 +17,24 @@ import { FRESHNESS_TICK_MS, isMutatingAction } from '../git/gitPanelModel'
 import { GitSyncBar } from '../git/GitSyncBar'
 import { parsePullRequestSelector } from './pullRequestSelector'
 import { useClosedPullRequests } from './useClosedPullRequests'
-import type { RepositoryPanelTab } from '../git/useGitWorkflow'
+import type { CommitOptions, RepositoryPanelTab } from '../git/useGitWorkflow'
 
 export { formatUpdatedAgo } from '../git/gitPanelModel'
 
 interface RepositoryPanelProps {
   open: boolean
   initialTab: RepositoryPanelTab
+  root: string
+  repositoryName: string
+  branch: string | null
+  statuses: readonly RepositoryStatusEntry[]
+  onTabChange(tab: RepositoryPanelTab): void
+  onConfirmStage(paths: readonly string[]): Promise<boolean>
+  onStage(paths: readonly string[]): Promise<boolean>
+  onUnstage(paths: readonly string[]): Promise<boolean>
+  onDiscard(paths: readonly string[], untrackedCount: number): Promise<boolean>
+  onCommit(options: CommitOptions): Promise<boolean>
+  onOpenChangedFile(path: string): void
   integration: GitIntegrationSnapshot | null
   loading: boolean
   inbox: PullRequestInboxSnapshot | null
@@ -46,6 +59,17 @@ interface RepositoryPanelProps {
 export function RepositoryPanel({
   open,
   initialTab,
+  root,
+  repositoryName,
+  branch,
+  statuses,
+  onTabChange,
+  onConfirmStage,
+  onStage,
+  onUnstage,
+  onDiscard,
+  onCommit,
+  onOpenChangedFile,
   integration,
   loading,
   inbox,
@@ -68,6 +92,16 @@ export function RepositoryPanel({
 }: RepositoryPanelProps): React.JSX.Element {
   const dialogRef = useRef<HTMLDialogElement>(null)
   const [tab, setTab] = useState<RepositoryPanelTab>(initialTab)
+  const [requestedTab, setRequestedTab] = useState(initialTab)
+  // The panel stays mounted while it is open and for its closing transition, so
+  // a tab asked for from outside — the titlebar's Source Control while Branches
+  // is showing, or a reopen inside the exit window — has to win over the tab in
+  // use. Adjusted during render so the old tab never paints for a frame.
+  // https://react.dev/learn/you-might-not-need-an-effect#adjusting-some-state-when-a-prop-changes
+  if (requestedTab !== initialTab) {
+    setRequestedTab(initialTab)
+    setTab(initialTab)
+  }
   const [selectedBaseBranch, setSelectedBaseBranch] = useState('')
   const [pullRequestQuery, setPullRequestQuery] = useState('')
   const [pullRequestQueryError, setPullRequestQueryError] = useState<string | null>(null)
@@ -129,7 +163,12 @@ export function RepositoryPanel({
         <header className="git-panel-header">
           <div>
             <IconBranch />
-            <span><strong id="git-panel-title">Repository</strong><small>Local Git · GitHub optional</small></span>
+            <span>
+              <strong id="git-panel-title">{repositoryName}</strong>
+              {/* A live snapshot always names a branch or a short oid; null only means
+                  git status has not answered yet. */}
+              <small>{branch == null ? 'Reading status…' : <>On <code>{branch}</code></>}</small>
+            </span>
           </div>
           <div>
             <button type="button" onClick={onClose} aria-label="Close repository panel" title="Close Repository Panel"><IconX /></button>
@@ -154,12 +193,35 @@ export function RepositoryPanel({
         <GitPanelTabs
           tab={tab}
           integration={integration}
+          changeCount={statuses.length}
           pullRequestCount={pullRequests.visible.length}
-          onTabChange={setTab}
+          onTabChange={(next) => {
+            setTab(next)
+            onTabChange(next)
+          }}
         />
 
-        <div className="git-panel-content">
-          <GitPanelBody
+        <div className="git-panel-content" data-tab={tab}>
+          {tab === 'changes' ? (
+            // Keyed by repository: pending stages, the selection, collapsed
+            // sections and revealed rows all name paths in one repository, and
+            // an in-flight stage for A showed as staged on B's same-named row.
+            <GitChangesTab
+              key={root}
+              root={root}
+              branch={branch}
+              statuses={statuses}
+              lastCommitSubject={integration?.commits[0]?.subject ?? null}
+              committing={actionKey === 'scm:commit'}
+              blocked={mutating && actionKey !== 'scm:commit'}
+              onConfirmStage={onConfirmStage}
+              onStage={onStage}
+              onUnstage={onUnstage}
+              onDiscard={onDiscard}
+              onCommit={onCommit}
+              onOpenFile={onOpenChangedFile}
+            />
+          ) : <GitPanelBody
             tab={tab}
             integration={integration}
             loading={loading}
@@ -188,7 +250,7 @@ export function RepositoryPanel({
             onMarkReady={onMarkReady}
             onOpenPullRequest={onOpenPullRequest}
             onCheckout={onCheckout}
-          />
+          />}
         </div>
       </aside>
     </dialog>

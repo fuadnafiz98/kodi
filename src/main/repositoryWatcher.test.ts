@@ -62,6 +62,50 @@ describe('collectChangedPaths', () => {
     expect(collectChangedPaths(previous, next, new Set(['docs', 'src/'])))
       .toEqual(['docs/guide.md', 'src/existing.ts', 'src/new.ts'])
   })
+
+  it('does not name a path whose only change is being staged', () => {
+    const previous = snapshot({ statuses: [{ path: 'src/existing.ts', status: 'modified' }] })
+    const next = snapshot({ statuses: [{ path: 'src/existing.ts', status: 'modified', staged: 'all' }] })
+    expect(collectChangedPaths(previous, next, new Set(['.git/index']))).toEqual([])
+    // A status that does change what the diff shows is still named.
+    const deleted = snapshot({ statuses: [{ path: 'src/existing.ts', status: 'deleted', staged: 'all' }] })
+    expect(collectChangedPaths(previous, deleted, new Set(['.git/index']))).toEqual(['src/existing.ts'])
+  })
+
+  it('answers the same for an unsorted path list, which gets no binary search', () => {
+    const previous = snapshot({ paths: ['z.txt', 'src/b.ts', 'src/a.ts', 'docs/x.md'], statuses: [] })
+    const next = snapshot({ paths: ['z.txt', 'src/b.ts', 'docs/x.md', 'src/c.ts'], statuses: [] })
+    expect(collectChangedPaths(previous, next, new Set(['src', 'z.txt'])))
+      .toEqual(['src/a.ts', 'src/b.ts', 'src/c.ts', 'z.txt'])
+  })
+
+  it('does not match a sibling that only shares a name prefix', () => {
+    const current = snapshot({ paths: ['src/a.ts', 'src-old/a.ts', 'srcx.ts'], statuses: [] })
+    expect(collectChangedPaths(current, current, new Set(['src']))).toEqual(['src/a.ts'])
+  })
+
+  // The watcher tick that froze the main process: 100k paths, one save. Every
+  // flush built four Sets of every path; on this list that was ~30–45 ms.
+  it('costs next to nothing on a large unchanged path list', () => {
+    const paths: string[] = []
+    for (let a = 0; a < 250; a += 1) {
+      for (let b = 0; b < 25; b += 1) {
+        for (let c = 0; c < 16; c += 1) paths.push(`imux/m${a}/s${b}/f${c}.ts`)
+      }
+    }
+    paths.sort()
+    const statuses = paths.slice(0, 2_000).map((path) => ({ path, status: 'untracked' as const }))
+    const previous = snapshot({ paths, statuses })
+    const next = snapshot({ paths, statuses: statuses.map((status, index) => index === 5 ? { ...status, status: 'modified' as const } : status) })
+    collectChangedPaths(previous, next, new Set(['build/cache']))
+
+    const started = performance.now()
+    const changed = collectChangedPaths(previous, next, new Set(['imux/m3/s2/f1.ts', 'build/cache']))
+    const elapsed = performance.now() - started
+
+    expect(changed).toEqual([paths[5]!, 'imux/m3/s2/f1.ts'].sort())
+    expect(elapsed).toBeLessThan(10)
+  })
 })
 
 describe('normalizeChangedPath', () => {
@@ -221,6 +265,25 @@ describe('RepositoryWatcher', () => {
     }
   }, WATCH_TEST_TIMEOUT_MS)
 
+  it('tells the renderer to drop everything when a folder reports an unnamed change', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'kodi-watcher-'))
+    const paths = Array.from({ length: 5_000 }, (_unused, index) => `src/file-${index}.ts`)
+    const current = snapshot({ root, kind: 'folder', branch: null, head: null, statuses: [], paths })
+    const events: RepositoryChangeEvent[] = []
+    const watcher = new RepositoryWatcher(async () => current, (event) => events.push(event), () => {})
+    try {
+      watcher.start(current)
+      watcher.acceptChangedPathForTests('*')
+      expect(await waitFor(() => events.some((event) => event.invalidateAll === true))).toBe(true)
+      const event = events.find((candidate) => candidate.invalidateAll === true)!
+      // Every path used to be listed here — a second copy of the whole list.
+      expect(event.changedPaths).toEqual([])
+    } finally {
+      watcher.stop()
+      await rm(root, { recursive: true, force: true })
+    }
+  }, WATCH_TEST_TIMEOUT_MS)
+
   it('coalesces file changes while suspended and publishes after resume', async () => {
     const root = await mkdtemp(join(tmpdir(), 'kodi-watcher-'))
     const current = snapshot({ root, kind: 'folder', branch: null, head: null, statuses: [] })
@@ -356,6 +419,35 @@ describe('RepositoryWatcher', () => {
       expect(errors).toEqual([])
     } finally {
       watcher.stop()
+      await rm(root, { recursive: true, force: true })
+    }
+  }, WATCH_TEST_TIMEOUT_MS)
+})
+
+describe('RepositoryWatcher revisions', () => {
+  it('numbers ticks and announcements from one counter across every watcher', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'kodi-watcher-revision-'))
+    const current = snapshot({ root })
+    const events: RepositoryChangeEvent[] = []
+    const first = new RepositoryWatcher(async () => current, (event) => events.push(event), () => {})
+    const second = new RepositoryWatcher(async () => current, (event) => events.push(event), () => {})
+    try {
+      first.start(current)
+      first.announce(current, [])
+      // A tick publishes the path it names before the refresh even returns.
+      first.acceptChangedPathForTests('src/existing.ts')
+      expect(await waitFor(() => events.length >= 2)).toBe(true)
+      second.announce(snapshot({ root: `${root}-other` }), [])
+      first.announce(current, [], { invalidateAll: true })
+
+      const revisions = events.map((event) => event.revision)
+      // Registry refreshes used to stamp `Date.now()` next to per-watcher
+      // counters, so a later event could carry a smaller number.
+      expect(revisions.every((revision, index) => index === 0 || revision > revisions[index - 1]!)).toBe(true)
+      expect(revisions.every((revision) => revision < 1e12)).toBe(true)
+    } finally {
+      first.stop()
+      second.stop()
       await rm(root, { recursive: true, force: true })
     }
   }, WATCH_TEST_TIMEOUT_MS)

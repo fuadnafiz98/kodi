@@ -1,26 +1,26 @@
 import { useEffect, useMemo, useState } from 'react'
 
-import type { FileImagePreview, RepositoryReview } from '../../../shared/contracts'
+import type { FileImagePreview, RepositoryApi, RepositoryReview } from '../../../shared/contracts'
 import { createPartialDiffLoader, loadPartialDiffFiles, type PartialDiffLoader } from './partialDiffHydration'
 import { markReviewFileHydrated } from './reviewMetrics'
 
 /**
- * A pull request's head commit is only local once someone fetched it. Without
- * it no side can be read, so the viewer keeps the patch as it arrived rather
- * than offering expand buttons that would fail.
+ * A pull request's head commit is only local once someone fetched it, and
+ * without it no side can be read. The answer is asked once per loader, on the
+ * first load, and every load waits for it. Answering it before handing the
+ * viewer a loader made `loadDiffFiles` appear a beat after the review did, and
+ * the viewer counts that as a layout change for every item: a pull request
+ * rendered twice as it opened.
  */
-function usePullRequestHeadReadable(headOid: string | null): boolean {
-  const [readable, setReadable] = useState<{ oid: string; readable: boolean } | null>(null)
-  useEffect(() => {
-    const repository = window.repository
-    if (headOid == null || repository == null) return
-    let cancelled = false
-    repository.hasRevision(headOid).then((value) => {
-      if (!cancelled) setReadable({ oid: headOid, readable: value })
-    }, () => {})
-    return () => { cancelled = true }
-  }, [headOid])
-  return headOid != null && readable?.oid === headOid && readable.readable
+function revisionReadability(
+  repository: Pick<RepositoryApi, 'hasRevision'>,
+  headOid: string
+): () => Promise<boolean> {
+  let readable: Promise<boolean> | null = null
+  return () => {
+    readable ??= repository.hasRevision(headOid).catch(() => false)
+    return readable
+  }
 }
 
 export function useReviewDiffLoader(
@@ -30,7 +30,26 @@ export function useReviewDiffLoader(
   const kind = repositoryReview?.kind ?? null
   const baseOid = repositoryReview?.baseOid ?? null
   const headOid = repositoryReview?.headOid ?? null
-  const headReadable = usePullRequestHeadReadable(kind === 'github' ? headOid : null)
+  const headReadable = useMemo(() => {
+    const repository = window.repository
+    return repository == null || kind !== 'github' || headOid == null
+      ? null
+      : revisionReadability(repository, headOid)
+  }, [headOid, kind])
+  // The common answer is "readable", and it changes nothing. Only a head that
+  // is not local takes the loader away, so the viewer stops offering expand
+  // controls that could never load — one extra render, for the rare fork that
+  // was never fetched.
+  const [unreadableHead, setUnreadableHead] = useState<string | null>(null)
+  useEffect(() => {
+    if (headReadable == null || headOid == null) return
+    let cancelled = false
+    void headReadable().then((readable) => {
+      if (!cancelled && !readable) setUnreadableHead(headOid)
+    })
+    return () => { cancelled = true }
+  }, [headOid, headReadable])
+  const headUnavailable = headOid != null && unreadableHead === headOid
 
   return useMemo(() => {
     const repository = window.repository
@@ -50,10 +69,17 @@ export function useReviewDiffLoader(
         ])
       })
     }
-    if (baseOid == null || headOid == null || (kind === 'github' && !headReadable)) return undefined
-    return createPartialDiffLoader((fileDiff) => loadPartialDiffFiles(fileDiff, [
-      { side: 'new', load: () => repository.getRevisionFile(headOid, fileDiff.name) },
-      { side: 'old', load: () => repository.getRevisionFile(baseOid, fileDiff.prevName ?? fileDiff.name) }
-    ]))
-  }, [baseOid, headOid, headReadable, kind, onImagePreview])
+    if (baseOid == null || headOid == null || headUnavailable) return undefined
+    // An unreadable head rejects: the viewer logs it and keeps the patch as it
+    // arrived, and auto-hydration stops asking about that file.
+    return createPartialDiffLoader(async (fileDiff) => {
+      if (headReadable != null && !(await headReadable())) {
+        throw new Error(`The pull request head ${headOid} is not available locally.`)
+      }
+      return loadPartialDiffFiles(fileDiff, [
+        { side: 'new', load: () => repository.getRevisionFile(headOid, fileDiff.name) },
+        { side: 'old', load: () => repository.getRevisionFile(baseOid, fileDiff.prevName ?? fileDiff.name) }
+      ])
+    })
+  }, [baseOid, headOid, headReadable, headUnavailable, kind, onImagePreview])
 }

@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test'
 import type { CodeViewItem } from '@pierre/diffs'
 
-import { createPatchReviewItems, pathFromReviewItemId } from './reviewItems'
+import { createPatchReviewItems, mergeReviewItems, pathFromReviewItemId } from './reviewItems'
 
 // The viewer looks a diff up by cacheKey alone — no content comparison — so a
 // positional key served one file's highlighted lines against another file's
@@ -35,4 +35,34 @@ test('a file whose content changed takes a new cache key', () => {
 
   expect(keyOf(before)).toBeTruthy()
   expect(keyOf(before)).not.toBe(keyOf(after))
+})
+
+const twoFilePatch = (secondLine: string): string => [
+  'diff --git a/a.ts b/a.ts',
+  'index 1111111..2222222 100644',
+  '--- a/a.ts',
+  '+++ b/a.ts',
+  '@@ -1 +1 @@',
+  '-old a',
+  '+new a',
+  'diff --git a/b.ts b/b.ts',
+  '--- a/b.ts',
+  '+++ b/b.ts',
+  '@@ -1 +1 @@',
+  '-old b',
+  `+${secondLine}`,
+  ''
+].join('\n')
+
+// Every working-tree reload has its own version, so its cache keys never match
+// the last load's. Replacing an unchanged file's item anyway made the viewer
+// re-highlight the whole review on every save anywhere in the repository.
+test('a reload keeps the item on screen for every file whose diff did not change', () => {
+  const first = createPatchReviewItems(twoFilePatch('new b'), 'working-tree-1')
+  const reload = createPatchReviewItems(twoFilePatch('newer b'), 'working-tree-2')
+  const merged = mergeReviewItems(first, reload)
+
+  expect(merged[0]).toBe(first[0])
+  expect(merged[1]).toBe(reload[1])
+  expect(merged[1]).not.toBe(first[1])
 })

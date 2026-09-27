@@ -1,4 +1,4 @@
-import type { CodeViewItem } from '@pierre/diffs'
+import type { CodeViewItem, FileDiffMetadata } from '@pierre/diffs'
 
 import type { PullRequestConversation } from '../../../shared/contracts'
 import type { AnnotatedReviewItemCache } from './annotatedReviewItems'
@@ -43,12 +43,52 @@ export interface WorldViewCacheEntry {
   collapsedItemIds: ReadonlySet<string>
   conversation: PullRequestConversation | null
   annotated: WorldViewAnnotatedSeed | null
-  graphBytes: number
+  /**
+   * Conversation and viewer bytes, which only move when the entry does. The
+   * parsed items are charged when asked, because hydration grows them in place.
+   */
+  fixedBytes: number
 }
 
-export function estimateParsedGraphBytes(items: readonly { id: string }[]): number {
+interface HydratedLineBytes {
+  deletionLines: readonly string[]
+  additionLines: readonly string[]
+  bytes: number
+}
+
+const hydratedLineBytes = new WeakMap<FileDiffMetadata, HydratedLineBytes>()
+
+function lineArrayBytes(lines: readonly string[]): number {
+  let length = 0
+  for (const line of lines) length += line.length
+  return length * 2
+}
+
+/**
+ * A patch-parsed diff holds only its hunk lines, and those are slices of the
+ * patch the world already charges. Hydration merges both whole files into the
+ * same object the seed keeps, so a diff that is no longer partial carries two
+ * files the patch length never counted. Lines are charged at two bytes a
+ * character, like item ids, which leaves room for each line's string header.
+ */
+export function estimateHydratedDiffBytes(fileDiff: FileDiffMetadata): number {
+  if (fileDiff.isPartial) return 0
+  const { deletionLines, additionLines } = fileDiff
+  const cached = hydratedLineBytes.get(fileDiff)
+  if (cached?.deletionLines === deletionLines && cached.additionLines === additionLines) return cached.bytes
+  // A pure rename hydrates both sides from the one file.
+  const bytes = lineArrayBytes(deletionLines)
+    + (additionLines === deletionLines ? 0 : lineArrayBytes(additionLines))
+  hydratedLineBytes.set(fileDiff, { deletionLines, additionLines, bytes })
+  return bytes
+}
+
+export function estimateParsedGraphBytes(items: readonly { id: string; fileDiff?: FileDiffMetadata }[]): number {
   let bytes = 0
-  for (const item of items) bytes += item.id.length * 2 + PARSED_ITEM_OVERHEAD_BYTES
+  for (const item of items) {
+    bytes += item.id.length * 2 + PARSED_ITEM_OVERHEAD_BYTES
+    if (item.fileDiff != null) bytes += estimateHydratedDiffBytes(item.fileDiff)
+  }
   return bytes
 }
 
@@ -125,20 +165,19 @@ function emptyEntry(): WorldViewCacheEntry {
     collapsedItemIds: new Set(),
     conversation: null,
     annotated: null,
-    graphBytes: 0
+    fixedBytes: 0
   }
 }
 
 function withGraphBytes(
   worldId: string,
-  entry: Omit<WorldViewCacheEntry, 'graphBytes'>,
+  entry: Omit<WorldViewCacheEntry, 'fixedBytes'>,
   mountedViewers: ReadonlySet<string>
 ): WorldViewCacheEntry {
   const items = entry.parsed?.items ?? []
   return {
     ...entry,
-    graphBytes: estimateParsedGraphBytes(items)
-      + estimateConversationBytes(entry.conversation)
+    fixedBytes: estimateConversationBytes(entry.conversation)
       + (mountedViewers.has(worldId) ? estimateViewerBytes(items.length) : 0)
   }
 }
@@ -152,11 +191,25 @@ export class WorldViewCache {
   }
 
   graphBytes(worldId: string): number {
-    return this.#entries.get(worldId)?.graphBytes ?? 0
+    const entry = this.#entries.get(worldId)
+    if (entry == null) return 0
+    return estimateParsedGraphBytes(entry.parsed?.items ?? []) + entry.fixedBytes
   }
 
   viewerMounted(worldId: string): boolean {
     return this.#mountedViewers.has(worldId)
+  }
+
+  /**
+   * Only the world in front has a live viewer: hiding an `<Activity>` detaches
+   * the viewer's host ref, and Pierre's CodeView cleans its instance up then.
+   * The registry calls this as focus moves, before it charges the world that
+   * just went behind, so that world is not billed for a viewer it lost.
+   */
+  retainFrontViewer(activeWorldId: string | null): void {
+    this.retainMountedViewers(activeWorldId != null && this.#mountedViewers.has(activeWorldId)
+      ? [activeWorldId]
+      : [])
   }
 
   retainMountedViewers(worldIds: readonly string[]): void {

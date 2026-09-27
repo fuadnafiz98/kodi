@@ -30,6 +30,10 @@ import { useViewerSuspension } from './useViewerSuspension'
 import { formatKeybinding, type ReviewCommand } from '../settings/keybindings'
 import { useReviewShortcuts } from '../review/useReviewShortcuts'
 import {
+  applyTreePathDelta,
+  diffTreePaths,
+  expandDirectories,
+  expandedDirectoryPaths,
   getDirectoryPaths,
   getTreeFollowBehavior,
   orderPathsForTree,
@@ -38,8 +42,9 @@ import {
 } from '../explorer/treeExpansion'
 import { FindBar } from '../review/FindBar'
 import { WorkspaceCodeSkeleton } from './WorkspaceSkeleton'
-import { setExplorerRevealHandler } from '../explorer/explorerReveal'
+import { setExplorerRevealHandler, setWorkspaceFileOpener } from '../explorer/explorerReveal'
 import { markWorkspaceRender } from '../perf/workspaceRenderMetric'
+import { countKodiMetric } from '../perf/kodiCounters'
 import { useCodeZoomGesture } from '../diff/useCodeZoomGesture'
 import { useFileEditing } from '../diff/useFileEditing'
 import { EditorStatusBar } from '../editor/EditorStatusBar'
@@ -48,6 +53,7 @@ import { retainReviewItems } from '../review/reviewItems'
 import { applyReviewFileFilter, EMPTY_REVIEW_FILE_FILTER } from '../review/reviewFileFilter'
 import { useReviewDraft } from '../review/useReviewDraft'
 import { reviewPathsForSnapshot, workspaceViewForTreePath } from '../explorer/workspaceMode'
+import { samePathList } from '../explorer/snapshotPaths'
 import { copyWorkingFileContents } from '../diff/copyFilePath'
 import {
   getLoadedDiffSurface,
@@ -66,6 +72,16 @@ function selectOnlyTreePath(model: FileTreeModel, path: string): void {
     if (selectedPath !== path) model.getItem(selectedPath)?.deselect()
   }
   if (!selectedPaths.includes(path)) model.getItem(path)?.select()
+}
+
+/** Whether the row for `path` is rendered and wholly inside the tree's viewport. */
+function treeRowInView(model: FileTreeModel, path: string): boolean {
+  const container = model.getFileTreeContainer()
+  const row = container?.shadowRoot?.querySelector(`[data-item-path="${CSS.escape(path)}"]`)
+  if (container == null || row == null) return false
+  const bounds = container.getBoundingClientRect()
+  const rect = row.getBoundingClientRect()
+  return rect.height > 0 && rect.top >= bounds.top && rect.bottom <= bounds.bottom
 }
 
 // The file tree has no conflicted state, so conflicts ride along as modified there.
@@ -356,12 +372,30 @@ function RepositoryReviewHeader({
 function useReviewPaths(
   snapshot: RepositorySnapshot,
   repositoryReview: RepositoryReview | null
-): string[] {
-  const unorderedReviewPaths = useMemo(
-    () => reviewPathsForSnapshot(snapshot, repositoryReview),
-    [repositoryReview, snapshot]
-  )
-  return useMemo(() => orderPathsForTree(unorderedReviewPaths), [unorderedReviewPaths])
+): readonly string[] {
+  const { kind, statuses } = snapshot
+  // Retained before ordering: a status tick on a very dirty repository (tens of
+  // thousands of untracked files) changes a status, not the set, and sorting
+  // every path with the natural comparator again was the bulk of that tick.
+  const unorderedReviewPaths = useRetainedPathList(useMemo(
+    () => reviewPathsForSnapshot({ kind, statuses }, repositoryReview),
+    [kind, repositoryReview, statuses]
+  ))
+  const ordered = useMemo(() => orderPathsForTree(unorderedReviewPaths), [unorderedReviewPaths])
+  return useRetainedPathList(ordered)
+}
+
+/**
+ * The same paths keep the same array. A `git add` changes a status but not
+ * which files are in the review, and a new array identity there re-ran the
+ * review's loader: fifty comparisons refetched, re-parsed and re-highlighted.
+ */
+function useRetainedPathList(paths: readonly string[]): readonly string[] {
+  const [retained, setRetained] = useState(paths)
+  if (retained === paths) return paths
+  if (samePathList(retained, paths)) return retained
+  setRetained(paths)
+  return paths
 }
 
 function useReviewTreeData(
@@ -506,34 +540,66 @@ function useTreeContentSync(
     const applied = appliedTreeContentRef.current
     const mode = treeContentSyncMode(applied, root, treePaths, treeStatuses)
     if (mode === 'skip') return
-    appliedTreeContentRef.current = { root, paths: treePaths, statuses: treeStatuses }
-    if (mode !== 'status') model.resetPaths(treePaths)
-    model.setGitStatus(treeStatuses)
+    // A changed folder opens once, when it becomes changed. Opening every
+    // changed folder on every tick undid the reader's collapse on each save, and
+    // past a handful of them rebuilt the whole tree to do it.
+    const openedBefore = mode === 'adopt' ? null : applied?.changedDirectories
+    const newlyChanged = !isGitRepository
+      ? []
+      : openedBefore == null
+        ? changedDirectoryPaths
+        : changedDirectoryPaths.filter((directoryPath) => !openedBefore.has(directoryPath))
+    appliedTreeContentRef.current = {
+      root,
+      paths: treePaths,
+      statuses: treeStatuses,
+      directories: directoryPaths,
+      changedDirectories: new Set(changedDirectoryPaths)
+    }
     if (mode === 'status') {
-      for (const directoryPath of changedDirectoryPaths) {
-        const item = model.getItem(directoryPath)
-        if (item != null && 'expand' in item) item.expand()
-      }
+      model.setGitStatus(treeStatuses)
+      // A burst of new files (a build folder, a vendored package) can dirty
+      // thousands of folders in one watcher tick; opening them one call at a
+      // time froze the window, so past a handful this is one rebuild.
+      expandDirectories(model, treePaths, directoryPaths, newlyChanged)
       return
     }
-    if (isGitRepository) {
-      if (mode === 'reset') {
-        for (const directoryPath of [...directoryPaths].reverse()) {
-          const item = model.getItem(directoryPath)
-          if (item != null && 'collapse' in item) item.collapse()
+    if (mode === 'reset' && applied != null) {
+      // A save, a new file, a deleted one: the lists differ in a short window,
+      // and one batch keeps every folder the reader opened. A reset re-sorted
+      // every path and closed them all.
+      const delta = diffTreePaths(applied.paths, treePaths)
+      if (delta != null) {
+        try {
+          applyTreePathDelta(model, delta, directoryPaths)
+          countKodiMetric('treeBatches')
+          model.setGitStatus(treeStatuses)
+          expandDirectories(model, treePaths, directoryPaths, newlyChanged)
+          return
+        } catch {
+          // The store refused an operation (a file became a folder); rebuild.
         }
       }
-      for (const directoryPath of changedDirectoryPaths) {
-        const item = model.getItem(directoryPath)
-        if (item != null && 'expand' in item) item.expand()
-      }
+      model.resetPaths(treePaths, {
+        initialExpandedPaths: [
+          ...expandedDirectoryPaths(model, applied.directories ?? []),
+          ...newlyChanged
+        ]
+      })
+      countKodiMetric('treeResets')
+      model.setGitStatus(treeStatuses)
       return
     }
-    for (const directoryPath of directoryPaths) {
-      if (directoryPath.includes('/')) continue
-      const item = model.getItem(directoryPath)
-      if (item != null && 'expand' in item) item.expand()
-    }
+    // A reset rebuilds the store, so its expansion is whatever it is built with:
+    // the changed folders on a repository, the top level of a plain folder. The
+    // old collapse-everything-then-expand passes notified once per folder.
+    model.resetPaths(treePaths, {
+      initialExpandedPaths: isGitRepository
+        ? changedDirectoryPaths
+        : directoryPaths.filter((directoryPath) => !directoryPath.includes('/'))
+    })
+    countKodiMetric('treeResets')
+    model.setGitStatus(treeStatuses)
   }, [changedDirectoryPaths, directoryPaths, isGitRepository, model, root, treePaths, treeStatuses])
 
 }
@@ -604,6 +670,7 @@ interface RepositoryDiffPanelProps {
   reviewScrollRevision: number
   selectedPath: string | null
   multiFileNavigationRevision: number
+  handledNavigationRevisionRef: { current: number }
   getInitialScrollTop(): number
   onScrollPositionChange(scrollTop: number): void
   onVisiblePathChange(path: string): void
@@ -783,6 +850,7 @@ const RepositoryDiffPanel = memo(function RepositoryDiffPanel({
   reviewScrollRevision,
   selectedPath,
   multiFileNavigationRevision,
+  handledNavigationRevisionRef,
   getInitialScrollTop,
   onScrollPositionChange,
   onVisiblePathChange,
@@ -850,6 +918,7 @@ const RepositoryDiffPanel = memo(function RepositoryDiffPanel({
               scrollToReviewRevision={reviewScrollRevision}
               navigationPath={selectedPath}
               navigationRevision={multiFileNavigationRevision}
+              handledNavigationRevisionRef={handledNavigationRevisionRef}
               getInitialScrollTop={getInitialScrollTop}
               onScrollPositionChange={onScrollPositionChange}
               onVisiblePathChange={onVisiblePathChange}
@@ -977,7 +1046,8 @@ function useRepositoryReviewSession({
     stablePaths: activePaths,
     repositoryReview: active ? repositoryReview : null,
     repositoryChange: active ? repositoryChange : null,
-    worldId: reviewWorldId
+    worldId: reviewWorldId,
+    root
   })
   const session = useReviewSession(root, reviewIdentity, {
     items: load.loadState.items,
@@ -990,6 +1060,7 @@ function useRepositoryReviewSession({
 function useReviewNavigation({
   paths,
   workspaceView,
+  worldId,
   initialScrollTop,
   markInstantTreeFollowTarget,
   onSelectPath,
@@ -998,6 +1069,7 @@ function useReviewNavigation({
 }: {
   paths: readonly string[]
   workspaceView: WorkspaceView
+  worldId: string
   initialScrollTop: number
   markInstantTreeFollowTarget(path: string): void
   onSelectPath(path: string): void
@@ -1012,17 +1084,36 @@ function useReviewNavigation({
   const [scrollRevision, setScrollRevision] = useState(0)
   const [navigationRevision, setNavigationRevision] = useState(0)
   const visiblePathRef = useRef<string | null>(null)
-  const scrollTopRef = useRef(initialScrollTop)
+  // The workspace outlives its review worlds, and one scroll position served
+  // them all: a commit review opened from a Desk scrolled to its fortieth file
+  // started at that same offset, on whatever file sat there. The position is
+  // remembered with the world it belongs to, and a world seen for the first time
+  // starts where that world was left (`initialScrollTop` is per world), captured
+  // once per switch — the prop moves on every scroll and must not re-seed.
+  const [seed, setSeed] = useState({ worldId, scrollTop: initialScrollTop })
+  if (seed.worldId !== worldId) setSeed({ worldId, scrollTop: initialScrollTop })
+  const seedScrollTop = seed.worldId === worldId ? seed.scrollTop : initialScrollTop
+  const scrollTopRef = useRef<{ worldId: string; scrollTop: number }>({ worldId, scrollTop: initialScrollTop })
+  const getInitialScrollTop = useCallback(() => {
+    const remembered = scrollTopRef.current
+    return remembered.worldId === worldId ? remembered.scrollTop : seedScrollTop
+  }, [seedScrollTop, worldId])
+  // Which request the review has acted on. It lives here, not in the review: a
+  // click on a review file from the single-file view mounts the review in the
+  // same update that asks it to move, and a review seeding "handled" from the
+  // revision it mounted with took that request as already done — it reopened
+  // where it was left instead of on the file.
+  const handledNavigationRevisionRef = useRef(0)
   const advance = useCallback(() => setNavigationRevision((revision) => revision + 1), [])
   const openSummary = useCallback(() => {
-    scrollTopRef.current = 0
+    scrollTopRef.current = { worldId, scrollTop: 0 }
     onWorkspaceViewChange('multi')
     setScrollRevision((revision) => revision + 1)
-  }, [onWorkspaceViewChange])
+  }, [onWorkspaceViewChange, worldId])
   const rememberScroll = useCallback((scrollTop: number) => {
-    scrollTopRef.current = scrollTop
+    scrollTopRef.current = { worldId, scrollTop }
     onScrollPositionChange(scrollTop)
-  }, [onScrollPositionChange])
+  }, [onScrollPositionChange, worldId])
   const navigate = useCallback((path: string) => {
     markInstantTreeFollowTarget(path)
     onSelectPath(path)
@@ -1042,18 +1133,25 @@ function useReviewNavigation({
 
   return {
     advance,
+    getInitialScrollTop,
+    handledNavigationRevisionRef,
     navigationRevision,
     openSummary,
     rememberScroll,
     reviewCommand,
     scrollRevision,
-    scrollTopRef,
     visiblePathRef
   }
 }
 
+// Visibility reports this soon after a selection belong to the jump landing,
+// not to the reader scrolling (see useRepositoryExplorer).
+const NAVIGATION_SETTLE_MS = 1_000
+
 function useRepositoryExplorer({
   snapshot,
+  reviewWorldId,
+  initialReviewScrollTop,
   reviewWorldSource,
   treePaths,
   treeStatuses,
@@ -1070,6 +1168,8 @@ function useRepositoryExplorer({
   visibleMultiFilePathRef
 }: {
   snapshot: RepositorySnapshot
+  reviewWorldId: string
+  initialReviewScrollTop: number
   reviewWorldSource: RepositoryWorkspaceProps['reviewWorldSource']
   treePaths: readonly string[]
   treeStatuses: readonly { path: string; status: TreeFileStatus }[]
@@ -1100,10 +1200,16 @@ function useRepositoryExplorer({
   const explorerStatuses = liveTree ? treeStatuses : deferredTreeContent.treeStatuses
   const pathSet = useMemo(() => new Set(explorerPaths), [explorerPaths])
   const directoryPaths = useMemo(() => getDirectoryPaths(explorerPaths), [explorerPaths])
+  // Which files changed moves far less often than how: staging flips a status
+  // and keeps the set, so the folder walk keys on the retained set.
+  const changedPaths = useRetainedPathList(useMemo(
+    () => explorerStatuses.map((status) => status.path),
+    [explorerStatuses]
+  ))
   const changedDirectoryPaths = useMemo(() => {
-    const changed = collectDirectoryPaths(explorerStatuses.map((status) => status.path))
+    const changed = collectDirectoryPaths(changedPaths)
     return directoryPaths.filter((directoryPath) => changed.has(directoryPath))
-  }, [directoryPaths, explorerStatuses])
+  }, [changedPaths, directoryPaths])
   const activateTreeRow = useCallback((path: string) => {
     if (!pathSet.has(path)) return
     markInstantTreeFollowTarget(path)
@@ -1114,11 +1220,69 @@ function useRepositoryExplorer({
   }, [advanceMultiFileNavigation, hasFileSession, markInstantTreeFollowTarget, onSelectPath,
     onWorkspaceViewChange, pathSet, reviewPathSet, workspaceView])
 
+  // The palette's way in (see openInWorkspace). A path that is already
+  // selected leaves the effect below with nothing to react to, so this moves the
+  // review itself; a new path is handled there too, and a second bump of the
+  // navigation revision in the same commit is one jump.
   const navigatedSelectionRef = useRef(selectedPath)
+  const openFromPalette = useCallback((path: string) => {
+    onSelectPath(path)
+    // A new path moves through the effect below; only the one it will not see
+    // changing is moved here. Doing both left a second instant-follow mark that
+    // turned a later scroll's tree follow into a jump.
+    if (path !== navigatedSelectionRef.current) return
+    if (workspaceView !== 'multi' || !reviewPathSet.has(path) || !pathSet.has(path)) return
+    markInstantTreeFollowTarget(path)
+    advanceMultiFileNavigation()
+  }, [advanceMultiFileNavigation, markInstantTreeFollowTarget, onSelectPath, pathSet, reviewPathSet,
+    workspaceView])
+  useEffect(() => setWorkspaceFileOpener(openFromPalette), [openFromPalette])
+
+  // A file's changes can go away while it is open: committed (here or from a
+  // terminal), reverted, stashed. The review then has nothing for it, and the
+  // reader was left on "No files to review" — or on another file — with the file
+  // they were reading still selected and no way to see it. The file itself is
+  // what there is to show. Only a file that was in the review and left it
+  // counts: while a folder opens, the review is empty before its statuses land.
+  const reviewedSelectionRef = useRef<string | null>(null)
+  // Whether the reader has scrolled on to another file since selecting this one;
+  // a reader who has keeps reading what they scrolled to. Set by the review's
+  // visibility reports (see handleVisibleMultiFilePathChange), reset by every
+  // selection.
+  const scrolledAwayRef = useRef({ path: null as string | null, since: 0, away: false })
+  const selectionStateRef = useRef({ selectedPath, reviewPathSet })
+  useLayoutEffect(() => {
+    selectionStateRef.current = { selectedPath, reviewPathSet }
+    if (scrolledAwayRef.current.path !== selectedPath) {
+      scrolledAwayRef.current = { path: selectedPath, since: performance.now(), away: false }
+    }
+  }, [reviewPathSet, selectedPath])
+  useEffect(() => {
+    if (selectedPath == null) return
+    if (reviewPathSet.has(selectedPath)) {
+      reviewedSelectionRef.current = selectedPath
+      return
+    }
+    if (reviewedSelectionRef.current !== selectedPath) return
+    reviewedSelectionRef.current = null
+    if (workspaceView !== 'multi' || reviewWorldSource !== 'desk' || !pathSet.has(selectedPath)) return
+    if (reviewPathSet.size > 0 && scrolledAwayRef.current.path === selectedPath && scrolledAwayRef.current.away) return
+    onWorkspaceViewChange('file')
+  }, [onWorkspaceViewChange, pathSet, reviewPathSet, reviewWorldSource, selectedPath, workspaceView])
+
+  // Coming back to a review tab hands the workspace that tab's selection, which
+  // is a restore, not a request to move: the tab's viewer puts its own scroll
+  // back. Navigating here jumped every returning tab to its selected file. A tab
+  // that arrives with no scroll of its own — a new review, or Source Control
+  // opening a file on the Desk — does go to its selected file.
+  const navigatedWorldIdRef = useRef(reviewWorldId)
   useEffect(() => {
     const previous = navigatedSelectionRef.current
     navigatedSelectionRef.current = selectedPath
-    if (selectedPath == null || selectedPath === previous) return
+    const worldChanged = navigatedWorldIdRef.current !== reviewWorldId
+    navigatedWorldIdRef.current = reviewWorldId
+    if (worldChanged && initialReviewScrollTop > 0) return
+    if (selectedPath == null || (!worldChanged && selectedPath === previous)) return
     if (workspaceView !== 'multi') return
     if (!reviewPathSet.has(selectedPath)) {
       // A patch world that was released, or is still streaming its pages, has no
@@ -1133,7 +1297,8 @@ function useRepositoryExplorer({
     markInstantTreeFollowTarget(selectedPath)
     advanceMultiFileNavigation()
   }, [advanceMultiFileNavigation, markInstantTreeFollowTarget, onWorkspaceViewChange, pathSet,
-    reviewPathSet, reviewWorldSource, selectedPath, visibleMultiFilePathRef, workspaceView])
+    initialReviewScrollTop, reviewPathSet, reviewWorldId, reviewWorldSource, selectedPath, visibleMultiFilePathRef,
+    workspaceView])
 
   /**
    * The two effects below mirror app state into the tree's selection, and
@@ -1226,9 +1391,12 @@ function useRepositoryExplorer({
     scrollTreeToPath(selectedPath, 'nearest')
   }, [explorerPaths, mirrorTreeSelection, scrollTreeToPath, selectedPath])
 
-  const handleVisibleMultiFilePathChange = useCallback((path: string) => {
-    if (!pathSet.has(path)) return
-    visibleMultiFilePathRef.current = path
+  // A fling through the review crosses a file every few milliseconds, and each
+  // report used to cost the tree three notifications (deselect, select,
+  // scroll) and a render each. The latest report of a frame is the only one
+  // anybody sees, so the tree follows once per frame.
+  const pendingFollowRef = useRef<{ path: string; frame: number } | null>(null)
+  const followVisiblePath = useCallback((path: string) => {
     for (const directoryPath of collectDirectoryPaths([path])) {
       const item = model.getItem(directoryPath)
       if (item != null && 'expand' in item) item.expand()
@@ -1236,9 +1404,39 @@ function useRepositoryExplorer({
     mirrorTreeSelection(path)
     const instantTarget = consumeInstantTreeFollowTarget(path)
     const followBehavior = getTreeFollowBehavior(instantTarget == null ? 'review-scroll' : 'direct-navigation')
-    scrollTreeToPath(path, followBehavior.offset)
-  }, [consumeInstantTreeFollowTarget, mirrorTreeSelection, model, pathSet, scrollTreeToPath,
-    visibleMultiFilePathRef])
+    // A row already on screen needs no scroll, and a scroll request is one more
+    // notification and render of the tree.
+    if (!treeRowInView(model, path)) scrollTreeToPath(path, followBehavior.offset)
+  }, [consumeInstantTreeFollowTarget, mirrorTreeSelection, model, scrollTreeToPath])
+  const handleVisibleMultiFilePathChange = useCallback((path: string) => {
+    if (!pathSet.has(path)) return
+    // A report of another file counts as the reader moving on only while the
+    // selected file is still in the review (once it has left, the list moved,
+    // not the reader) and once the jump to it has settled.
+    const { selectedPath: selected, reviewPathSet: reviewing } = selectionStateRef.current
+    const scrolled = scrolledAwayRef.current
+    if (selected != null && path !== selected && scrolled.path === selected && reviewing.has(selected)
+      && performance.now() - scrolled.since > NAVIGATION_SETTLE_MS) {
+      scrolled.away = true
+    }
+    visibleMultiFilePathRef.current = path
+    const pending = pendingFollowRef.current
+    if (pending != null) {
+      pending.path = path
+      return
+    }
+    const next = { path, frame: 0 }
+    next.frame = window.requestAnimationFrame(() => {
+      pendingFollowRef.current = null
+      followVisiblePath(next.path)
+    })
+    pendingFollowRef.current = next
+  }, [followVisiblePath, pathSet, visibleMultiFilePathRef])
+  useEffect(() => () => {
+    const pending = pendingFollowRef.current
+    if (pending != null) window.cancelAnimationFrame(pending.frame)
+    pendingFollowRef.current = null
+  }, [])
 
   // ⌘P offers directories as rows; choosing one has to move the explorer to it,
   // which means opening every ancestor first — the tree cannot scroll to a row
@@ -1284,13 +1482,16 @@ const RepositoryWorkspace = memo(function RepositoryWorkspace({
   const treeSourcePaths = reviewWorldSource === 'desk' && repositoryReview == null
     ? snapshot.paths
     : reviewPaths
+  // The field stays on the urgent value; the scan over every path (and the tree
+  // rebuild behind it) runs on the deferred one, so typing is never behind it.
+  const deferredFileFilter = useDeferredValue(fileFilter)
   const visibleTreePaths = useMemo(
-    () => applyReviewFileFilter(treeSourcePaths, fileFilter),
-    [fileFilter, treeSourcePaths]
+    () => applyReviewFileFilter(treeSourcePaths, deferredFileFilter),
+    [deferredFileFilter, treeSourcePaths]
   )
   const visibleReviewPaths = useMemo(
-    () => applyReviewFileFilter(reviewPaths, fileFilter),
-    [fileFilter, reviewPaths]
+    () => applyReviewFileFilter(reviewPaths, deferredFileFilter),
+    [deferredFileFilter, reviewPaths]
   )
   const { threadsByPath, setThreadsByPath, viewedFiles, setViewedFiles, load: reviewLoad } =
     useRepositoryReviewSession({
@@ -1315,21 +1516,19 @@ const RepositoryWorkspace = memo(function RepositoryWorkspace({
     rememberScroll: handleMultiFileScrollPositionChange,
     reviewCommand,
     scrollRevision: reviewScrollRevision,
-    scrollTopRef: multiFileScrollTopRef,
+    getInitialScrollTop: getInitialMultiFileScrollTop,
+    handledNavigationRevisionRef,
     visiblePathRef: visibleMultiFilePathRef
   } = useReviewNavigation({
     paths: visibleReviewPaths,
     workspaceView,
+    worldId: reviewWorldId,
     initialScrollTop: initialReviewScrollTop,
     markInstantTreeFollowTarget,
     onSelectPath,
     onWorkspaceViewChange,
     onScrollPositionChange: onReviewScrollPositionChange
   })
-  const getInitialMultiFileScrollTop = useCallback(
-    () => multiFileScrollTopRef.current,
-    [multiFileScrollTopRef]
-  )
   const collisionPathsRef = useRef(collisionPaths)
   useLayoutEffect(() => {
     collisionPathsRef.current = collisionPaths
@@ -1355,9 +1554,15 @@ const RepositoryWorkspace = memo(function RepositoryWorkspace({
       ? reviewLoad.loadState
       : { ...reviewLoad.loadState, items }
   }, [reviewLoad.loadState, visibleReviewPaths])
+  // Navigating to a file the filter hides clears the filter, so the file shows.
+  // Only a new selection asks that: typing a query that happens to hide the
+  // current file used to wipe the field mid-word.
+  const filterCheckedSelectionRef = useRef<string | null>(null)
   useEffect(() => {
-    if (selectedPath == null) return
-    if (visibleReviewPaths.includes(selectedPath) || !reviewPaths.includes(selectedPath)) return
+    if (selectedPath == null || filterCheckedSelectionRef.current === selectedPath) return
+    if (!reviewPaths.includes(selectedPath)) return
+    filterCheckedSelectionRef.current = selectedPath
+    if (visibleReviewPaths.includes(selectedPath)) return
     setFileFilter(EMPTY_REVIEW_FILE_FILTER)
   }, [reviewPaths, selectedPath, setFileFilter, visibleReviewPaths])
   const fileExtension = selectedPath?.split('.').at(-1)?.toUpperCase()
@@ -1403,6 +1608,8 @@ const RepositoryWorkspace = memo(function RepositoryWorkspace({
   const { model, explorerPaths, activateTreeRow, handleVisibleMultiFilePathChange } =
     useRepositoryExplorer({
       snapshot,
+      reviewWorldId,
+      initialReviewScrollTop,
       reviewWorldSource,
       treePaths,
       treeStatuses,
@@ -1508,6 +1715,7 @@ const RepositoryWorkspace = memo(function RepositoryWorkspace({
         reviewScrollRevision={reviewScrollRevision}
         selectedPath={selectedPath}
         multiFileNavigationRevision={multiFileNavigationRevision}
+        handledNavigationRevisionRef={handledNavigationRevisionRef}
         getInitialScrollTop={getInitialMultiFileScrollTop}
         onScrollPositionChange={handleMultiFileScrollPositionChange}
         onVisiblePathChange={handleVisibleMultiFilePathChange}
@@ -1538,6 +1746,16 @@ const RepositoryWorkspace = memo(function RepositoryWorkspace({
       />
     </>
   )
-})
+}, sameWorkspaceProps)
+
+// `initialReviewScrollTop` is read only when the review world changes — a
+// change that arrives with a new `reviewWorldId` anyway — but it moves after every scroll — so any render above (a
+// watcher tick, each agent stream batch) re-rendered the whole workspace while
+// the reader was scrolled anywhere but the top.
+function sameWorkspaceProps(previous: RepositoryWorkspaceProps, next: RepositoryWorkspaceProps): boolean {
+  const previousKeys = Object.keys(previous) as (keyof RepositoryWorkspaceProps)[]
+  if (previousKeys.length !== Object.keys(next).length) return false
+  return previousKeys.every((key) => key === 'initialReviewScrollTop' || Object.is(previous[key], next[key]))
+}
 
 export default RepositoryWorkspace

@@ -8,7 +8,7 @@ import {
 } from 'react'
 
 import type { ContentSearchResult, RepositoryReview, RepositorySnapshot } from '../../../shared/contracts'
-import { createFileSearchIndex, rankFilePaths, type RankedPath } from './fileSearch'
+import { createFileSearchIndex, priorityPathSet, rankFilePaths, type RankedPath } from './fileSearch'
 import { getErrorMessage, requireRepositoryApi } from '../explorer/repositoryApi'
 import {
   CONTENT_SEARCH_MIN_QUERY_LENGTH,
@@ -73,7 +73,7 @@ export function useRepositorySearch(
       { kind: snapshotKind, statuses: snapshotStatuses ?? [] },
       repositoryReview
     )
-    return reviewPaths.length === 0 ? undefined : new Set(reviewPaths)
+    return priorityPathSet(reviewPaths)
   }, [repositoryReview, snapshotKind, snapshotStatuses])
   const fileResults = useMemo(
     () => hasSnapshot

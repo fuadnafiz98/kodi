@@ -113,6 +113,49 @@ describe('RepositorySessionRegistry', () => {
     expect(registry.require(second.root).getSessionSnapshot()?.root).toBe(second.root)
   })
 
+  it('falls back to the folder in front most recently when the active tab closes', async () => {
+    const parent = await realpath(await mkdtemp(join(tmpdir(), 'kodi-session-last-active-')))
+    directories.push(parent)
+    const [firstRoot, secondRoot, backgroundRoot] = ['first', 'second', 'background'].map((name) => join(parent, name))
+    await Promise.all([mkdir(firstRoot!), mkdir(secondRoot!), mkdir(backgroundRoot!)])
+
+    const registry = new RepositorySessionRegistry(() => {}, () => {})
+    registries.push(registry)
+    const first = await registry.open(firstRoot!)
+    const second = await registry.open(secondRoot!)
+    const background = await registry.open(backgroundRoot!, false)
+    expect(registry.lastActiveRoot()).toBe(second.root)
+
+    // Closing the tab in front can focus a new-tab page, which activates
+    // nothing; the restore must not fall to the dashboard while a folder is open.
+    registry.release(second.root)
+    expect(registry.activeRoot).toBeNull()
+    expect(registry.lastActiveRoot()).toBe(first.root)
+
+    // A session that only ever ran in the background is not a folder the
+    // reader has open.
+    registry.release(first.root)
+    expect(registry.roots).toEqual([background.root])
+    expect(registry.lastActiveRoot()).toBeNull()
+  })
+
+  it('counts the folder a launch restores from its cache as one the reader was in front of', async () => {
+    const parent = await realpath(await mkdtemp(join(tmpdir(), 'kodi-session-restored-')))
+    directories.push(parent)
+    const [restoredRoot, reviewRoot, laterRoot] = ['restored', 'review', 'later'].map((name) => join(parent, name))
+    await Promise.all([mkdir(restoredRoot!), mkdir(reviewRoot!), mkdir(laterRoot!)])
+
+    const registry = new RepositorySessionRegistry(() => {}, () => {})
+    registries.push(registry)
+    // The launch paints the cached snapshot through `hydrate`, not `open`.
+    registry.hydrate({ root: restoredRoot!, name: 'restored', kind: 'folder', branch: null, head: null, paths: [], statuses: [] })
+    await registry.open(reviewRoot!, false)
+    const later = await registry.open(laterRoot!)
+
+    registry.release(later.root)
+    expect(registry.lastActiveRoot()).toBe(restoredRoot!)
+  })
+
   it('trims the caches of repositories that become inactive', async () => {
     const parent = await mkdtemp(join(tmpdir(), 'kodi-repository-trim-'))
     directories.push(parent)
@@ -448,4 +491,53 @@ describe('RepositorySessionRegistry', () => {
     expect(reopened.paths).toContain('app.ts')
     expect(registry.getActiveSnapshot()?.root).toBe(reopened.root)
   })
+  it('leaves an unchanged path list out of the refresh a tab activation publishes', async () => {
+    const parent = await realpath(await mkdtemp(join(tmpdir(), 'kodi-session-activate-paths-')))
+    directories.push(parent)
+    const firstRoot = join(parent, 'first')
+    const secondRoot = join(parent, 'second')
+    await Promise.all([mkdir(firstRoot), mkdir(secondRoot)])
+    await runCommand('git', ['-C', firstRoot, '-c', 'init.defaultBranch=main', 'init', '--quiet'])
+    await writeFile(join(firstRoot, 'app.ts'), 'export {}\n', 'utf8')
+    const events: RepositoryChangeEvent[] = []
+    const registry = new RepositorySessionRegistry((event) => events.push(event), () => {})
+    registries.push(registry)
+    const first = await registry.open(firstRoot)
+    await registry.open(secondRoot)
+    // The watcher is armed on the tick after the open.
+    await sleep(50)
+    events.length = 0
+
+    await registry.activate(first.root)
+    expect(await waitFor(() => events.some((event) => event.snapshot.root === first.root))).toBe(true)
+
+    const published = events.find((event) => event.snapshot.root === first.root)!
+    expect(published.snapshot.paths).toBeUndefined()
+    expect(published.snapshot.pathsRevision).toBe(first.pathsRevision)
+    expect(published.snapshot.statuses).toEqual([{ path: 'app.ts', status: 'untracked' }])
+  }, 30_000)
+
+  it('invalidates a whole folder instead of naming every path when a folder tab returns', async () => {
+    const parent = await realpath(await mkdtemp(join(tmpdir(), 'kodi-session-folder-invalidate-')))
+    directories.push(parent)
+    const folderRoot = join(parent, 'folder')
+    const otherRoot = join(parent, 'other')
+    await Promise.all([mkdir(folderRoot), mkdir(otherRoot)])
+    await Promise.all(['a.ts', 'b.ts', 'c.ts'].map((name) => writeFile(join(folderRoot, name), 'export {}\n', 'utf8')))
+    const events: RepositoryChangeEvent[] = []
+    const registry = new RepositorySessionRegistry((event) => events.push(event), () => {})
+    registries.push(registry)
+    const folder = await registry.open(folderRoot)
+    await registry.open(otherRoot)
+    await sleep(50)
+    events.length = 0
+
+    await registry.activate(folder.root)
+    expect(await waitFor(() => events.some((event) => event.snapshot.root === folder.root))).toBe(true)
+
+    const published = events.find((event) => event.snapshot.root === folder.root)!
+    expect(published.invalidateAll).toBe(true)
+    expect(published.changedPaths).toEqual([])
+    expect(published.snapshot.paths).toBeUndefined()
+  }, 30_000)
 })

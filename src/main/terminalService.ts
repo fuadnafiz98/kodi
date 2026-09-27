@@ -295,7 +295,11 @@ export class TerminalService {
     session.pendingOutput += data
     if (!session.ready) return
     if (!session.visible) {
-      if (session.pendingOutput.length > MAX_HIDDEN_OUTPUT) {
+      // Trimming to the cap on every read copied the whole 512 KB tail per pty
+      // chunk: 250 ms of main-process time per 40 MB of `yes` behind a closed
+      // dock. Letting the buffer reach twice the cap first means each byte is
+      // copied about once; the flush cuts the replay to the cap.
+      if (session.pendingOutput.length > MAX_HIDDEN_OUTPUT * 2) {
         session.pendingOutput = session.pendingOutput.slice(-MAX_HIDDEN_OUTPUT)
       }
       return
@@ -313,7 +317,11 @@ export class TerminalService {
 
   private flushOutput(session: ManagedTerminal): void {
     if (!session.ready || session.pendingOutput === '') return
-    const data = session.pendingOutput
+    // Only a hidden buffer ever gets past the cap: a visible one is sent every
+    // 64 KB. Showing the dock or the shell exiting replays at most the cap.
+    const data = session.pendingOutput.length > MAX_HIDDEN_OUTPUT
+      ? session.pendingOutput.slice(-MAX_HIDDEN_OUTPUT)
+      : session.pendingOutput
     session.pendingOutput = ''
     if (!session.owner.isDestroyed()) {
       session.owner.send(IPC_CHANNELS.terminalData, { sessionId: session.id, data })

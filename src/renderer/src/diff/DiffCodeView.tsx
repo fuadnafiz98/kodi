@@ -175,6 +175,7 @@ export function DiffCodeView({
     return (
       <Virtualizer className="diff-scroll editor-scroll" contentClassName="diff-content editor-content">
         <File<ReviewAnnotationMetadata>
+          key={comparison.path}
           file={comparison.newFile}
           edit={editing}
           editorOptions={editorOptions}
@@ -206,10 +207,14 @@ export function DiffCodeView({
     className: 'pierre-diff',
     style: codeStyle
   }
+  // Keyed on the path: Pierre's instance updates the body for another file but
+  // kept the previous file's header — its name and line counts — so a ⌘P jump
+  // read as having opened the wrong file. A save of the same file still updates
+  // in place.
   const diff = comparison.oldFile != null && comparison.newFile != null
-    ? <MultiFileDiff<ReviewAnnotationMetadata> oldFile={comparison.oldFile} newFile={comparison.newFile} {...sharedDiffProps} />
+    ? <MultiFileDiff<ReviewAnnotationMetadata> key={comparison.path} oldFile={comparison.oldFile} newFile={comparison.newFile} {...sharedDiffProps} />
     : comparison.oldFile != null
-      ? <MultiFileDiff<ReviewAnnotationMetadata> oldFile={comparison.oldFile} newFile={null} {...sharedDiffProps} />
-      : <MultiFileDiff<ReviewAnnotationMetadata> oldFile={null} newFile={comparison.newFile!} {...sharedDiffProps} />
+      ? <MultiFileDiff<ReviewAnnotationMetadata> key={comparison.path} oldFile={comparison.oldFile} newFile={null} {...sharedDiffProps} />
+      : <MultiFileDiff<ReviewAnnotationMetadata> key={comparison.path} oldFile={null} newFile={comparison.newFile!} {...sharedDiffProps} />
   return <Virtualizer className="diff-scroll" contentClassName="diff-content">{diff}<VirtualizedBackToTop /></Virtualizer>
 }

@@ -9,7 +9,7 @@ import {
   IconX
 } from '@pierre/icons'
 
-import { getDirectoryPaths } from './treeExpansion'
+import { getDirectoryPaths, setAllDirectoriesExpanded } from './treeExpansion'
 import { getEditorThemeType, type EditorTheme } from '../settings/preferences'
 import {
   EMPTY_REVIEW_FILE_FILTER,
@@ -18,6 +18,20 @@ import {
   reviewFileFilterIsActive,
   type ReviewFileFilter
 } from '../review/reviewFileFilter'
+
+// ~5 ms of regular expressions per idle slice.
+const HIDDEN_COUNT_SLICE = 8_000
+
+function scheduleIdle(callback: () => void): number {
+  return typeof window.requestIdleCallback === 'function'
+    ? window.requestIdleCallback(callback, { timeout: 1_000 })
+    : window.setTimeout(callback, 0)
+}
+
+function cancelIdle(handle: number): void {
+  if (typeof window.cancelIdleCallback === 'function') window.cancelIdleCallback(handle)
+  else window.clearTimeout(handle)
+}
 
 interface ExplorerProps {
   filePaths: readonly string[]
@@ -74,25 +88,28 @@ export const Explorer = memo(function Explorer({
   // A chip that hides nothing is a control with no effect, so it says how many
   // it would take and goes quiet when that is none. Counting is four regular
   // expressions per path and a repository opens with forty thousand of them, so
-  // it happens after the tree has painted rather than in front of it; until it
-  // lands the chips show no number and stay live, which is the honest reading of
-  // "not counted yet".
+  // it runs in idle slices after the tree has painted rather than as one long
+  // task in front of it — at 100k paths that task was up to 150 ms on every new
+  // file. Until it lands the chips show no number and stay live, which is the
+  // honest reading of "not counted yet".
   const [hiddenCounts, setHiddenCounts] = useState<{ tests: number; api: number } | null>(null)
   useEffect(() => {
-    let cancelled = false
-    const frame = window.requestAnimationFrame(() => {
-      let tests = 0
-      let api = 0
-      for (const path of unfilteredFilePaths) {
+    let tests = 0
+    let api = 0
+    let index = 0
+    let handle = 0
+    const slice = (): void => {
+      const end = Math.min(unfilteredFilePaths.length, index + HIDDEN_COUNT_SLICE)
+      for (; index < end; index += 1) {
+        const path = unfilteredFilePaths[index]!
         if (isTestFilePath(path)) tests += 1
         if (isApiFilePath(path)) api += 1
       }
-      if (!cancelled) setHiddenCounts({ tests, api })
-    })
-    return () => {
-      cancelled = true
-      window.cancelAnimationFrame(frame)
+      if (index < unfilteredFilePaths.length) handle = scheduleIdle(slice)
+      else setHiddenCounts({ tests, api })
     }
+    handle = scheduleIdle(slice)
+    return () => cancelIdle(handle)
   }, [unfilteredFilePaths])
 
   // Whichever of expand-all and collapse-all matches the tree in front of you is
@@ -114,23 +131,24 @@ export const Explorer = memo(function Explorer({
     return known > 0
   }, [directoryPaths, model])
 
+  // The tree notifies on every selection and scroll as well; only a change in
+  // how many rows it shows can mean a folder opened or closed, and reading every
+  // folder back on each of those cost ~10 ms at 6k folders while scrolling a review.
   useEffect(() => {
-    const sync = (): void => { setAllFoldersExpanded(readAllExpanded()) }
+    let visibleCount = -1
+    const sync = (): void => {
+      const nextVisibleCount = model.getVisibleCount()
+      if (nextVisibleCount === visibleCount) return
+      visibleCount = nextVisibleCount
+      setAllFoldersExpanded(readAllExpanded())
+    }
     sync()
     return model.subscribe(sync)
   }, [model, readAllExpanded])
 
   const toggleAllFolders = useCallback(() => {
-    const expand = !readAllExpanded()
-    // Collapsing walks deepest-first so a parent never hides the children that
-    // still have to be told.
-    for (const directoryPath of expand ? directoryPaths : [...directoryPaths].reverse()) {
-      const item = model.getItem(directoryPath)
-      if (item == null || !('expand' in item)) continue
-      if (expand) item.expand()
-      else item.collapse()
-    }
-  }, [directoryPaths, model, readAllExpanded])
+    setAllDirectoriesExpanded(model, filePaths, directoryPaths, !readAllExpanded())
+  }, [directoryPaths, filePaths, model, readAllExpanded])
 
   // The tree reports selection *changes*, so clicking the row that is already
   // selected reports nothing. Rows are read straight off the click instead, which

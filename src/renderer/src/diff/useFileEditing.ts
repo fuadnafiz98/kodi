@@ -125,7 +125,11 @@ export function useFileEditing({
   const [documentView, setDocumentView] = useState<DocumentView>('split')
   const [saving, setSaving] = useState(false)
   const [history, setHistory] = useState({ canUndo: false, canRedo: false })
-  const [drafts, setDrafts] = useState<DraftMap>(() => readDrafts(root, browserDraftStorage()))
+  const [initialDrafts] = useState<DraftMap>(() => readDrafts(root, browserDraftStorage()))
+  // Only which files have drafts is state; their text changes on every keystroke
+  // and lives in `draftsRef`. Holding the map in state re-rendered the whole
+  // workspace per character typed.
+  const [dirtyPaths, setDirtyPaths] = useState<readonly string[]>(() => draftPaths(initialDrafts))
   const editorRef = useRef<Editor<ReviewAnnotationMetadata> | null>(null)
   const savingRef = useRef(false)
   const editRequestRef = useRef(0)
@@ -133,7 +137,7 @@ export function useFileEditing({
   // Keyed by the cacheKey the draft was typed against, so a draft that predates
   // an external write is never replayed over the newer file.
   const [draftContents] = useState(() => new Map<string, DraftText>(
-    Object.values(drafts).map((draft) => [draft.path, {
+    Object.values(initialDrafts).map((draft) => [draft.path, {
       baseCacheKey: draft.sourceCacheKey,
       contents: draft.contents
     }])
@@ -222,12 +226,13 @@ export function useFileEditing({
 
   // React can replay a state updater, so the next map is computed from a mirror
   // ref and the storage write happens outside the setter.
-  const draftsRef = useRef(drafts)
+  const draftsRef = useRef(initialDrafts)
   const applyDrafts = useCallback((update: (current: DraftMap) => DraftMap) => {
     const next = update(draftsRef.current)
     if (next === draftsRef.current) return
     draftsRef.current = next
-    setDrafts(next)
+    const nextPaths = draftPaths(next)
+    setDirtyPaths((current) => samePaths(current, nextPaths) ? current : nextPaths)
     if (persistTimerRef.current != null) window.clearTimeout(persistTimerRef.current)
     persistTimerRef.current = window.setTimeout(() => {
       persistTimerRef.current = null
@@ -426,8 +431,6 @@ export function useFileEditing({
     return () => window.removeEventListener('keydown', handleKeyDown, { capture: true })
   }, [activeSession, save])
 
-  const dirtyPaths = useMemo(() => draftPaths(drafts), [drafts])
-
   useEffect(() => {
     if (dirtyPaths.length === 0 || restoredDraftRoots.has(root)) return
     restoredDraftRoots.add(root)
@@ -490,4 +493,8 @@ export function useFileEditing({
     handleEditorBlur,
     getEditor
   }
+}
+
+function samePaths(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((path, index) => path === right[index])
 }

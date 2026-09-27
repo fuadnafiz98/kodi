@@ -112,3 +112,24 @@ test('Escape closes the notes overlay', () => {
   fireEvent.keyDown(window, { key: 'Escape' })
   expect(document.getElementById('review-notes-list')?.hidden).toBe(true)
 })
+
+// The list sits in the viewer's header, which re-renders on every thread edit and
+// conversation poll. A closed list is display:none, so its rows cost a rebuild
+// each time and showed nothing.
+test('mounts the note rows only while the list is open', () => {
+  const entries = Array.from({ length: 200 }, (_, index) => note(`thread-${index}`, `src/file${index}.ts`))
+  render(<ReviewSummary entries={entries} reattachingThreadId={null}
+    onBeginReattach={() => {}} onCancelReattach={() => {}}
+    onDrop={() => {}} onDropAll={() => {}} />)
+
+  const list = document.getElementById('review-notes-list')
+  expect(list?.hidden).toBe(true)
+  expect(list?.querySelectorAll('li').length).toBe(0)
+
+  openNotes()
+  expect(list?.querySelectorAll('li').length).toBe(200)
+
+  fireEvent.keyDown(window, { key: 'Escape' })
+  expect(list?.hidden).toBe(true)
+  expect(list?.querySelectorAll('li').length).toBe(0)
+})

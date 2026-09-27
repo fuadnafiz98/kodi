@@ -1,11 +1,15 @@
-import { describe, expect, test } from 'bun:test'
+import { describe, expect, it, test } from 'bun:test'
+
+import { COMMAND_ABORTED_MESSAGE } from '../../../shared/contracts'
 
 import {
+  appendOmittedFiles,
   canAppendPatch,
   canAppendPatchPages,
   FOLDER_REVIEW_PAGE_SIZE,
   parsePatchPageBatch,
   reviewLoadStateFromExternalItems,
+  requestWorkingTreePatch,
   reviewProgress,
   type ReviewProgressInput
 } from './useReviewLoadState'
@@ -150,5 +154,64 @@ describe('paged patch parsing', () => {
     expect(canAppendPatchPages(initial, 'pr-7', [replacement, secondPage])).toBe(false)
     expect(reparsed.items.map((item) => item.id)).toEqual(['review:c.ts', 'review:b.ts'])
     expect(reparsed.items).not.toContain(initial.items[0])
+  })
+})
+
+describe('requestWorkingTreePatch', () => {
+  const aborted = new Error(`Error invoking remote method 'repository:get-working-tree-patch': Error: ${COMMAND_ABORTED_MESSAGE}`)
+  const patch = { patch: 'diff --git a/x b/x\n', omittedFiles: [] }
+  const noWait = async (): Promise<void> => {}
+
+  // A save while the review loads aborts the build for the older snapshot. The
+  // loader used to read that as "plain folder" and fetch fifty files one by one.
+  it('asks again when a newer snapshot superseded the build', async () => {
+    let calls = 0
+    const repository = {
+      getWorkingTreePatch: async () => {
+        calls += 1
+        if (calls < 3) throw aborted
+        return patch
+      }
+    }
+    expect(await requestWorkingTreePatch(repository, ['x'], 'r', () => false, noWait)).toEqual(patch)
+    expect(calls).toBe(3)
+  })
+
+  it('passes any other failure straight through, which is what a plain folder answers', async () => {
+    let calls = 0
+    const repository = {
+      getWorkingTreePatch: async () => {
+        calls += 1
+        throw new Error('The open folder is not a Git repository.')
+      }
+    }
+    await expect(requestWorkingTreePatch(repository, ['x'], 'r', () => false, noWait)).rejects.toThrow('not a Git repository')
+    expect(calls).toBe(1)
+  })
+
+  it('stops asking once the load it belongs to was abandoned', async () => {
+    let calls = 0
+    const repository = { getWorkingTreePatch: async () => { calls += 1; throw aborted } }
+    await expect(requestWorkingTreePatch(repository, ['x'], 'r', () => calls >= 1, noWait)).rejects.toThrow(COMMAND_ABORTED_MESSAGE)
+    expect(calls).toBe(1)
+  })
+
+  it('gives up after a few supersessions in a row', async () => {
+    let calls = 0
+    const repository = { getWorkingTreePatch: async () => { calls += 1; throw aborted } }
+    await expect(requestWorkingTreePatch(repository, ['x'], 'r', () => false, noWait)).rejects.toThrow(COMMAND_ABORTED_MESSAGE)
+    expect(calls).toBe(4)
+  })
+})
+
+describe('appendOmittedFiles', () => {
+  const file = (path: string) => ({ path, reason: 'too-large' as const, additions: 1, deletions: 0 })
+  test('an omission streamed again by a retry is kept once', () => {
+    expect(appendOmittedFiles([file('a.bin')], [file('a.bin'), file('b.bin')]).map((entry) => entry.path))
+      .toEqual(['a.bin', 'b.bin'])
+  })
+  test('nothing new keeps the same list', () => {
+    const current = [file('a.bin')]
+    expect(appendOmittedFiles(current, [])).toBe(current)
   })
 })

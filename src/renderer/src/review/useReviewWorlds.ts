@@ -548,6 +548,7 @@ export function useReviewWorlds({
 
   const dispatch = useCallback((action: WorldRegistryAction) => {
     const next = reduceWorldRegistry(stateRef.current, action)
+    worldViewCache.retainFrontViewer(next.activeWorldId)
     const bounded = actionMayChangeInactivePatchBudget(action.type)
       ? boundInactivePatchPayloads(next, MAX_INACTIVE_PATCH_BYTES, (worldId) =>
         worldViewCache.graphBytes(worldId))
@@ -864,14 +865,21 @@ export function useReviewWorlds({
   }, [dispatch, onActivateSnapshot])
 
   const activeWorld = state.worlds.find((world) => world.worldId === state.activeWorldId) ?? null
+  // Keyed on what the review is built from, not on the world: a repository sync
+  // or a status change replaces the world object, and a new review here
+  // re-rendered the viewer and rebuilt its load state for nothing.
+  const activePatchWorld = activeWorld?.source === 'patch' ? activeWorld : null
+  const activePatchReview = activePatchWorld?.review ?? null
+  const activePatchPages = activePatchWorld?.patchPages ?? null
+  const activePatchLength = activePatchWorld?.patchLength ?? 0
   const activeReview = useMemo<RepositoryReview | null>(() => {
-    if (activeWorld == null || activeWorld.source === 'desk' || activeWorld.source === 'new') return null
+    if (activePatchReview == null || activePatchPages == null) return null
     return {
-      ...activeWorld.review,
-      patchPages: activeWorld.patchPages,
-      patchLength: activeWorld.patchLength
+      ...activePatchReview,
+      patchPages: activePatchPages,
+      patchLength: activePatchLength
     }
-  }, [activeWorld])
+  }, [activePatchLength, activePatchPages, activePatchReview])
   const activeNavigation = state.activeWorldId == null
     ? null
     : navigationRef.current.get(state.activeWorldId) ?? null

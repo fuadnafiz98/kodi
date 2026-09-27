@@ -146,8 +146,13 @@ export function ReviewSummary({
           </button>
         </div>
       </header>
+      {/* The rows only mount while the list is open. Hidden, they were still
+          rebuilt on every header re-render — a thread edit, a conversation poll —
+          at about 11 DOM nodes a note, and in-page find cannot reach a
+          display:none list anyway. Nothing in a row holds state to lose. The
+          empty list stays so `aria-controls` keeps its target. */}
       <ol id="review-notes-list" role="list" hidden={!open}>
-        {entries.map((entry) => {
+        {open ? entries.map((entry) => {
           const { path, thread } = entry
           const reattaching = reattachingThreadId === thread.id
           const fileName = fileNameFromReviewPath(path)
@@ -183,7 +188,7 @@ export function ReviewSummary({
               ) : null}
             </li>
           )
-        })}
+        }) : null}
       </ol>
     </section>
   )

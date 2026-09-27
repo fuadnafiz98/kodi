@@ -210,7 +210,7 @@
 /* The generated boxes the rule above cannot reach. */
 .performance-live > span::before,
 .performance-chart-tooltip dt::before,
-.file-edit-state::before { corner-shape: squircle; }
+.file-edit-state.dirty::before { corner-shape: squircle; }
 /* index.html no longer declares a color-scheme, and the theme tokens are scoped
    to the shell, so the document element has to follow it or the native
    scrollbars and form controls stay dark under a light theme. The background
@@ -468,6 +468,10 @@ kbd { border: 1px solid var(--border-strong); border-radius: var(--corner-compac
 }
 .icon-button { width: var(--control-height); height: var(--control-height); display: grid; place-items: center; padding: 0; border: 0; border-radius: var(--corner-control); background: transparent; color: var(--muted); cursor: pointer; }
 .app-chrome .icon-button { width: var(--chrome-control); height: var(--chrome-control); border-radius: var(--corner-compact); }
+.source-control-titlebar-button { position: relative; }
+/* Sits on the icon's corner rather than beside it so the cluster keeps its
+   rhythm; tabular so 9 → 10 does not nudge the glyph. */
+.source-control-badge { min-width: 14px; height: 14px; position: absolute; top: 1px; right: 0; border-radius: 7px; padding: 0 3px; background: var(--accent); color: var(--accent-contrast); font-size: 9px; font-weight: var(--weight-bold); line-height: 14px; text-align: center; font-variant-numeric: tabular-nums; pointer-events: none; }
 .icon-button.sm { width: var(--control-height-sm); height: var(--control-height-sm); border-radius: var(--corner-compact); }
 .icon-button:hover:not(:disabled) { background: var(--control-fill-hover); color: var(--text); }
 .agent-titlebar-button.active, .terminal-titlebar-button.active { box-shadow: inset 0 0 0 1px var(--active-ring); background: var(--accent-soft); color: var(--accent); }
@@ -927,9 +931,10 @@ kbd { border: 1px solid var(--border-strong); border-radius: var(--corner-compac
 .review-state-pill.state-closed { color: var(--status-danger-text); }
 /* Pressing Edit swaps one button for the whole action row, which used to drag the
    file title sideways mid-interaction. The reservation is the measured width of
-   the widest state (Unsaved · undo/redo · Edit/Preview · Revert · Close · Save ⌘S),
-   and the selector matches exactly the state that can grow: an enabled Edit button. */
-.diff-controls:has(.file-edit-start:not(:disabled)) { min-inline-size: 380px; justify-content: flex-end; }
+   the widest state (Unsaved · undo/redo/preview/discard · Save ⌘S · close, 280px,
+   plus a diff's three view toggles), and the selector matches exactly the state
+   that can grow: an enabled Edit button. */
+.diff-controls:has(.file-edit-start:not(:disabled)) { min-inline-size: 360px; justify-content: flex-end; }
 .diff-display-controls { height: 24px; display: flex; align-items: center; gap: 1px; padding: 0; border: 0; border-radius: 0; background: transparent; }
 .diff-display-controls > .editor-option-controls { height: 24px; gap: 1px; padding: 0; border: 0; border-radius: var(--corner-compact); background: transparent; }
 .diff-display-controls > .editor-option-controls button { width: 24px; height: 24px; border-radius: var(--corner-compact); }
@@ -967,63 +972,74 @@ kbd { border: 1px solid var(--border-strong); border-radius: var(--corner-compac
 @starting-style {
   .file-edit-actions > * { opacity: 0; transform: translateX(6px); }
 }
-.file-edit-actions .file-history-controls {
-  height: 24px;
-  gap: 1px;
-  padding: 0;
-  border: 0;
-  background: transparent;
-}
-.file-edit-actions .file-history-controls button {
-  width: 24px;
-  height: 24px;
-  border-radius: var(--corner-compact);
-}
-.file-edit-actions .file-edit-mode {
-  height: 24px;
-  padding: 2px;
-  border: 0;
-  border-radius: var(--corner-compact);
-}
-.file-edit-actions .file-edit-mode::before { border-radius: var(--corner-inline); corner-shape: squircle; }
-.file-edit-actions .file-edit-mode button {
-  height: 20px;
-  border-radius: var(--corner-inline);
-  padding: 0 7px;
-  font-size: var(--text-xs);
-}
-.file-edit-save-label { min-width: 6ch; text-align: left; }
-.file-edit-start,
-.file-edit-cancel { height: 24px; display: inline-flex; align-items: center; gap: 5px; border: 0; border-radius: var(--corner-compact); padding: 0 8px 0 6px; background: transparent; color: var(--text-secondary); font-size: var(--text-xs); font-weight: var(--weight-strong); cursor: pointer; }
-.file-edit-start:hover,
-.file-edit-cancel:hover { background: var(--control-fill-hover); color: var(--text); }
+/* One row of 24px ghost icons, the same buttons as the view toggles beside it,
+   so the only thing in the bar with a fill is Save — and only when it would
+   save something. */
+.file-edit-tools { height: 24px; display: flex; align-items: center; gap: 1px; }
+.file-edit-tools button { width: 24px; height: 24px; position: relative; display: grid; place-items: center; border: 0; border-radius: var(--corner-compact); padding: 0; background: transparent; color: var(--muted); cursor: pointer; transition: background-color var(--duration-fast) ease, color var(--duration-fast) ease, scale var(--duration-fast) var(--ease-out); }
+.file-edit-tools button:hover:not(:disabled):not(.active) { background: var(--control-fill-hover); color: var(--text-secondary); }
+.file-edit-tools button.active { background: var(--control-fill-selected); color: var(--text); }
+.file-edit-tools svg { width: 14px; height: 14px; flex: none; }
+.file-edit-start { height: 24px; display: inline-flex; align-items: center; gap: 5px; border: 0; border-radius: var(--corner-compact); padding: 0 8px 0 6px; background: transparent; color: var(--text-secondary); font-size: var(--text-xs); font-weight: var(--weight-strong); cursor: pointer; }
+.file-edit-start:hover { background: var(--control-fill-hover); color: var(--text); }
 .diff-display-controls > .file-edit-start { height: 24px; border: 0; border-radius: var(--corner-compact); padding: 0 7px 0 5px; background: transparent; color: var(--muted); }
 .diff-display-controls > .file-edit-start:hover:not(:disabled) { background: var(--control-fill-hover); color: var(--text); }
 .diff-display-controls > .file-edit-start:disabled { opacity: var(--disabled-opacity); cursor: default; }
 .file-edit-start svg,
-.file-edit-cancel svg,
 .file-edit-save svg { width: var(--icon-md); height: var(--icon-md); flex: none; }
-.file-edit-save { height: 24px; display: inline-flex; align-items: center; gap: 5px; border: 0; border-radius: var(--corner-compact); padding: 0 5px 0 6px; background: var(--accent-soft); color: var(--text); font-size: var(--text-xs); font-weight: var(--weight-strong); cursor: pointer; }
-.file-edit-save:hover:not(:disabled) { background: var(--control-fill-selected); }
+/* Clean, Save is a quiet label beside its shortcut; dirty, it takes the fill.
+   The fill fades rather than snaps so the first keystroke doesn't flash the bar. */
+.file-edit-save { height: 24px; display: inline-flex; align-items: center; gap: 5px; border: 0; border-radius: var(--corner-compact); padding: 0 3px 0 7px; background: transparent; color: var(--muted); font-size: var(--text-xs); font-weight: var(--weight-strong); cursor: pointer; transition: opacity var(--duration-base) var(--ease-out), transform var(--duration-base) var(--ease-out), background-color var(--duration-base) ease, color var(--duration-base) ease, scale var(--duration-fast) var(--ease-out); }
+.file-edit-save[data-dirty] { background: var(--accent-soft); color: var(--text); }
+.file-edit-save[data-dirty]:hover:not(:disabled) { background: color-mix(in srgb, var(--accent-soft), var(--accent) 12%); }
 .file-edit-save .shortcut-hint {
   min-width: 0;
   height: 16px;
   border: 0;
   border-radius: var(--corner-inline);
-  padding: 0 5px;
-  background: color-mix(in srgb, var(--text) 8%, transparent);
+  padding: 0 4px;
+  background: transparent;
   color: var(--faint);
+  transition: background-color var(--duration-base) ease;
   font-size: var(--text-2xs);
-  font-weight: var(--weight-strong);
+  font-weight: var(--weight-medium);
   line-height: 16px;
 }
-.file-edit-actions button:disabled { opacity: var(--disabled-opacity); cursor: default; }
-.file-edit-state { min-width: 50px; color: var(--faint); font-size: var(--text-2xs); font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
-.file-edit-state::before { content: ""; width: 6px; height: 6px; display: inline-block; margin-right: 5px; border-radius: 50%; background: var(--status-success-text); }
+.file-edit-save[data-dirty] .shortcut-hint { background: color-mix(in srgb, var(--text) 8%, transparent); }
+/* Disabled Save and Discard keep full opacity for the label's own colour to do
+   the work; a half-transparent filled button reads as broken, not idle. */
+.file-edit-actions button:disabled { cursor: default; }
+.file-edit-tools button:disabled { opacity: var(--disabled-opacity); }
+.file-edit-save:disabled:not([data-dirty]) { color: var(--faint); }
+.file-edit-save:disabled[data-dirty] { opacity: var(--disabled-opacity); }
+.file-edit-state { min-width: 50px; display: inline-flex; align-items: center; justify-content: flex-end; gap: 5px; color: var(--faint); font-size: var(--text-2xs); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .file-edit-state.dirty { color: var(--status-warning-text); }
-.file-edit-state.dirty::before { background: currentColor; }
-.file-history-controls button:disabled { opacity: var(--disabled-opacity); }
-.file-edit-mode { margin-right: 1px; }
+.file-edit-state.dirty::before { content: ""; width: 6px; height: 6px; flex: none; border-radius: 50%; background: currentColor; }
+.file-edit-actions > .diff-control-divider { margin: 0 2px 0 3px; }
+.file-edit-actions .file-edit-tools button[data-tooltip]::after {
+  content: attr(data-tooltip);
+  width: max-content;
+  position: absolute;
+  z-index: var(--z-overlay);
+  top: calc(100% + 8px);
+  right: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--corner-compact); corner-shape: squircle;
+  padding: 5px 7px;
+  background: var(--floating-surface);
+  color: var(--text-secondary);
+  font-family: var(--font-ui);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-strong);
+  line-height: 1;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(-2px);
+  transition: opacity var(--duration-fast) var(--ease-out), transform var(--duration-fast) var(--ease-out);
+}
+.file-edit-actions .file-edit-tools button[data-tooltip]:hover::after,
+.file-edit-actions .file-edit-tools button[data-tooltip]:focus-visible::after { opacity: 1; transform: translateY(0); }
 .review-bar { min-height: var(--bar-height); flex: none; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 0 var(--gutter); border-bottom: 1px solid var(--border); background: var(--panel-subtle); color: var(--muted); font-size: var(--text-xs); }
 .bar-button { min-height: var(--control-height-sm); display: inline-flex; align-items: center; gap: 5px; border: 1px solid var(--border); border-radius: var(--corner-compact); padding: 0 9px; background: var(--control-fill); color: var(--text-secondary); font-size: var(--text-xs); font-weight: var(--weight-medium); cursor: pointer; transition: background-color var(--duration-fast) var(--ease-out), border-color var(--duration-fast) var(--ease-out), color var(--duration-fast) var(--ease-out); }
 .bar-button svg { width: var(--icon-sm); height: var(--icon-sm); }
@@ -1755,11 +1771,8 @@ button[data-review-markdown-toggle][data-state="preview"] { background: var(--co
 }
 
 @media (max-width: 900px) {
-  .file-edit-mode button,
-  .file-edit-cancel,
-  .file-edit-save { width: 24px; padding: 0; }
-  .file-edit-mode button span,
-  .file-edit-cancel span,
+  .file-edit-save { width: 24px; justify-content: center; padding: 0; }
+  .file-edit-save .icon-swap { display: grid; }
   .file-edit-save-label,
   .file-edit-save .shortcut-hint { display: none; }
 }

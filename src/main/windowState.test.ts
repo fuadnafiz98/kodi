@@ -8,6 +8,7 @@ import {
   loadWindowState,
   parseWindowState,
   saveWindowState,
+  saveWindowStateAsync,
   type ScreenArea,
   type WindowState
 } from './windowState.js'
@@ -74,6 +75,24 @@ describe('loadWindowState', () => {
     const directory = await mkdtemp(join(tmpdir(), 'kodi-window-'))
     try {
       expect(loadWindowState(directory, [LAPTOP])).toBeNull()
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('saveWindowStateAsync', () => {
+  it('saves off the main thread and yields to the synchronous save on close', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'kodi-window-async-'))
+    try {
+      await saveWindowStateAsync(directory, state({ x: 10 }))
+      expect(loadWindowState(directory, [LAPTOP])?.x).toBe(10)
+
+      // The debounced write is still in flight when the window closes.
+      const debounced = saveWindowStateAsync(directory, state({ x: 200 }))
+      saveWindowState(directory, state({ x: 300 }))
+      await debounced
+      expect(loadWindowState(directory, [LAPTOP])?.x).toBe(300)
     } finally {
       await rm(directory, { recursive: true, force: true })
     }

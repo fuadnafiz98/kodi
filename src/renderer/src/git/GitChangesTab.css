@@ -1,0 +1,165 @@
+/* Source control: the commit composer and the staged / unstaged file lists.
+   Loaded with the repository panel chunk, never on a cold start. */
+.scm { display: flex; flex-direction: column; padding-bottom: 18px; }
+
+.scm-composer { position: sticky; top: 0; z-index: var(--z-sticky); display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; border-bottom: 1px solid var(--border); background: var(--panel); }
+.scm-message {
+  width: 100%;
+  min-height: 34px;
+  max-height: 184px;
+  field-sizing: content;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--corner-control);
+  padding: 8px 10px;
+  resize: none;
+  background: var(--surface-input);
+  color: var(--text);
+  font-size: var(--text-md);
+  line-height: 1.45;
+}
+.scm-message::placeholder { color: var(--faint); }
+.scm-message:focus-visible { border-color: var(--focus); box-shadow: var(--focus-glow); outline: 0; }
+.scm-message[aria-invalid="true"] { border-color: color-mix(in srgb, var(--status-danger-text) 60%, transparent); }
+.scm-message-hint { margin: -2px 0 0; color: var(--status-danger-text); font-size: var(--text-xs); }
+
+.scm-amend-note { min-height: 24px; display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: var(--text-xs); }
+.scm-amend-note > span { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.scm-amend-note strong { color: var(--text-secondary); font-weight: var(--weight-medium); }
+.scm-amend-note button { flex: none; border: 0; padding: 2px 4px; background: transparent; color: var(--accent); font-size: var(--text-xs); cursor: pointer; }
+.scm-amend-note button:hover { text-decoration: underline; }
+
+/* One primary control in the panel, split so the rarer commits sit one click
+   away without a second full-width button competing with it. */
+.scm-commit-split { position: relative; display: flex; transition: scale var(--duration-fast) var(--ease-out); }
+.scm-commit-split > button { height: var(--control-height); display: inline-flex; align-items: center; justify-content: center; border: 1px solid var(--primary-border); background: var(--primary-fill); color: var(--primary-text); font-size: var(--text-sm); font-weight: var(--weight-strong); cursor: pointer; }
+.scm-commit-split > button:hover:not(:disabled) { border-color: var(--primary-fill-hover); background: var(--primary-fill-hover); }
+.scm-commit-split > button:disabled { opacity: var(--disabled-opacity); cursor: default; }
+/* Both halves dim together, or a live chevron beside a greyed button reads as
+   two unrelated controls. The chevron stays usable: amending needs no changes. */
+.scm-commit-split:has(> .scm-commit-button:disabled) > .scm-commit-more:not(:disabled) { opacity: var(--disabled-opacity); }
+.scm-commit-button { min-width: 0; flex: 1; gap: 6px; border-radius: var(--corner-control) 0 0 var(--corner-control); padding: 0 12px 0 10px; }
+.scm-commit-button svg { width: var(--icon-sm); height: var(--icon-sm); }
+.scm-commit-more { width: 30px; flex: none; border-radius: 0 var(--corner-control) var(--corner-control) 0; padding: 0; }
+.scm-commit-split > .scm-commit-more,
+.scm-commit-split > .scm-commit-more:hover:not(:disabled) { border-left-color: color-mix(in srgb, var(--primary-text) 18%, transparent); }
+.scm-commit-more svg { width: var(--icon-md); height: var(--icon-md); transition: rotate var(--duration-fast) var(--ease-out); }
+.scm-commit-more[aria-expanded="true"] svg { rotate: 180deg; }
+/* A split button is one control: pressing either half squeezes both halves as
+   one, instead of the 30px chevron shrinking on its own. */
+.scm-commit-split:has(> button:active:not(:disabled)) { scale: 0.985; }
+.scm-commit-split > button:active:not(:disabled) { scale: 1; }
+
+.scm-commit-menu {
+  min-width: 212px;
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: var(--z-popover);
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--corner-card);
+  padding: 4px;
+  background: var(--popover);
+  box-shadow: 0 12px 32px var(--shadow-color);
+  transform-origin: top right;
+  transition: opacity var(--duration-base) var(--ease-out), scale var(--duration-base) var(--ease-out);
+}
+@starting-style {
+  .scm-commit-menu { opacity: 0; scale: 0.97; }
+}
+.scm-commit-menu button { min-height: 28px; display: flex; align-items: center; justify-content: space-between; gap: 16px; border: 0; border-radius: var(--corner-compact); padding: 0 8px; background: transparent; color: var(--text-secondary); font-size: var(--text-sm); text-align: start; cursor: pointer; }
+.scm-commit-menu button:hover:not(:disabled) { background: var(--control-fill-hover); color: var(--text); }
+.scm-commit-menu button:disabled { opacity: var(--disabled-opacity); cursor: default; }
+.scm-commit-menu button:active:not(:disabled) { scale: 1; background: var(--control-fill-selected); }
+.scm-commit-menu kbd { color: var(--faint); font-family: var(--font-ui); font-size: var(--text-xs); }
+.scm-commit-menu svg { width: var(--icon-md); height: var(--icon-md); color: var(--accent); }
+
+.scm-empty { min-height: 160px; }
+
+.scm-section { display: flex; flex-direction: column; }
+.scm-section-header { height: 32px; position: relative; display: flex; align-items: center; padding: 0 14px 0 10px; }
+.scm-section + .scm-section .scm-section-header { margin-top: 6px; }
+.scm-section-toggle { min-width: 0; height: 100%; flex: 1; display: flex; align-items: center; gap: 5px; border: 0; padding: 0 4px; background: transparent; color: var(--text-secondary); font-size: var(--text-xs); font-weight: var(--weight-bold); letter-spacing: var(--track-caps-11); text-transform: uppercase; cursor: pointer; }
+.scm-section-toggle:hover { color: var(--text); }
+.scm-section-toggle:active:not(:disabled) { scale: 1; }
+.scm-section-toggle:focus-visible { outline-offset: -2px; }
+.scm-section-chevron { width: 9px; height: 9px; color: var(--faint); transition: rotate var(--duration-fast) var(--ease-out); }
+.scm-section-toggle[aria-expanded="false"] .scm-section-chevron { rotate: -90deg; }
+.scm-count { min-width: 18px; border-radius: var(--corner-compact); padding: 0 5px; background: var(--control-fill-hover); color: var(--muted); font-family: var(--font-mono); font-size: var(--text-2xs); font-weight: var(--weight-medium); letter-spacing: 0; line-height: 16px; text-align: center; font-variant-numeric: tabular-nums; }
+.scm-section-actions { display: flex; align-items: center; gap: 4px; }
+/* The bulk actions are the ones people look for first, so they are always on
+   screen and say what they do; per-row actions can wait for the pointer. */
+.scm-section-button { height: 22px; display: inline-flex; flex: none; align-items: center; gap: 4px; border: 1px solid var(--border-strong); border-radius: var(--corner-compact); padding: 0 8px 0 5px; background: transparent; color: var(--text-secondary); font-size: var(--text-xs); font-weight: var(--weight-medium); font-variant-numeric: tabular-nums; white-space: nowrap; cursor: pointer; }
+.scm-section-button:hover:not(:disabled) { background: var(--control-fill-hover); color: var(--text); }
+.scm-section-button svg { width: var(--icon-sm); height: var(--icon-sm); }
+.scm-section-button.suggested { border-color: color-mix(in srgb, var(--accent) 38%, transparent); background: var(--accent-soft); color: var(--accent); }
+.scm-section-button.suggested:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 20%, transparent); color: var(--accent); }
+
+.scm-icon-button { width: 22px; height: 22px; display: grid; flex: none; place-items: center; border: 0; border-radius: var(--corner-compact); padding: 0; background: transparent; color: var(--muted); cursor: pointer; }
+.scm-icon-button:hover:not(:disabled) { background: var(--control-fill-hover); color: var(--text); }
+.scm-icon-button svg { width: var(--icon-md); height: var(--icon-md); }
+/* Greyed while a commit, push, pull or branch switch holds the index. */
+.scm-section-button:disabled,
+.scm-icon-button:disabled { opacity: var(--disabled-opacity); cursor: default; }
+
+.scm-list { margin: 0; padding: 0 6px; list-style: none; }
+/* A few thousand rows are cheap to keep in the DOM but not to lay out; off-screen
+   ones skip layout and paint until they scroll into view. */
+.scm-row {
+  height: 26px;
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  border-radius: var(--corner-compact);
+  padding-right: 8px;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 26px;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.scm-row:hover { background: var(--control-fill); }
+.scm-row:has(.scm-row-open:focus-visible) { background: var(--control-fill-hover); box-shadow: inset 0 0 0 1px var(--focus); }
+.scm-row[aria-selected="true"] { background: var(--accent-soft); }
+.scm-row[aria-selected="true"] .scm-row-name { color: var(--accent); }
+/* A run of selected rows reads as one block: only its outer corners round. */
+.scm-row[aria-selected="true"]:has(+ .scm-row[aria-selected="true"]) { border-end-start-radius: 0; border-end-end-radius: 0; }
+.scm-row[aria-selected="true"] + .scm-row[aria-selected="true"] { border-start-start-radius: 0; border-start-end-radius: 0; }
+/* A row that just changed lists slides in from the side it came from: staged
+   rows arrive from below, unstaged ones from above. */
+.scm-list[data-settled] .scm-row { transition: opacity var(--duration-base) var(--ease-out), translate var(--duration-base) var(--ease-out); }
+@starting-style {
+  .scm-list[data-settled] .scm-row { opacity: 0; translate: 0 4px; }
+  [data-section="unstaged"] .scm-list[data-settled] .scm-row { translate: 0 -4px; }
+}
+.scm-row-open { min-width: 0; height: 100%; flex: 1; display: flex; align-items: baseline; gap: 6px; border: 0; padding: 0 0 0 8px; background: transparent; color: var(--text-secondary); font-size: var(--text-sm); text-align: start; cursor: pointer; line-height: 26px; }
+.scm-row-open:active:not(:disabled) { scale: 1; }
+.scm-row-open:focus-visible { outline: 0; }
+.scm-row-name { flex: none; max-width: 70%; overflow: hidden; color: var(--text); text-overflow: ellipsis; white-space: nowrap; }
+.scm-row-directory { min-width: 0; flex: 1; overflow: hidden; color: var(--faint); font-size: var(--text-xs); text-overflow: ellipsis; white-space: nowrap; }
+.scm-row[data-status="deleted"] .scm-row-name { color: var(--muted); text-decoration: line-through; text-decoration-color: color-mix(in srgb, currentColor 55%, transparent); }
+.scm-row-actions { display: flex; gap: 1px; opacity: 0; }
+.scm-row:hover .scm-row-actions,
+.scm-row:focus-within .scm-row-actions { opacity: 1; }
+.scm-row-status { width: 14px; flex: none; font-family: var(--font-mono); font-size: var(--text-xs); font-weight: var(--weight-strong); text-align: center; }
+.scm-row[data-status="modified"] .scm-row-status { color: var(--status-warning-text); }
+.scm-row[data-status="added"] .scm-row-status,
+.scm-row[data-status="untracked"] .scm-row-status { color: var(--status-success-text); }
+.scm-row[data-status="deleted"] .scm-row-status,
+.scm-row[data-status="conflicted"] .scm-row-status { color: var(--status-danger-text); }
+.scm-row[data-status="renamed"] .scm-row-status { color: var(--status-info-text); }
+
+.scm-hint { margin: 10px 0 0; padding: 0 16px; color: var(--faint); font-size: var(--text-xs); }
+.scm-more { padding: 4px 8px; }
+.scm-more button { border: 0; padding: 2px 0; background: transparent; color: var(--accent); font-size: var(--text-xs); cursor: pointer; }
+.scm-more button:hover { text-decoration: underline; }
+
+@media (hover: none) {
+  .scm-row-actions { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .scm-list[data-settled] .scm-row { translate: none !important; transition-property: opacity !important; transition-duration: var(--duration-base) !important; }
+  .scm-commit-menu { transition-property: opacity !important; transition-duration: var(--duration-fast) !important; }
+}

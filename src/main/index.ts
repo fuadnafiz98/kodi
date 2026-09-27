@@ -13,9 +13,11 @@ import {
   type LocalReviewProgress,
   type PullRequestFolderPreview,
   type RendererTermination,
-  type RepositorySnapshot
+  type RepositorySnapshot,
+  type RepositorySnapshotWithoutPaths
 } from '../shared/contracts.js'
 import { displayUserPath, folderNameFromPath } from '../shared/folderPath.js'
+import { omitHeldPaths } from '../shared/heldPaths.js'
 import {
   findKodiFolderRequest,
   findKodiReviewRequest,
@@ -57,6 +59,7 @@ import {
   parseCachedFileText,
   parseWorkspaceUi,
   rememberWorkspaceCacheEntry,
+  withLastWorkspaceRoot,
   workspaceCacheForRoot,
   type WorkspaceCache,
   type WorkspaceCacheStore,
@@ -81,7 +84,7 @@ import {
   shouldHoldWindowHidden,
   shouldRevealForReview
 } from './windowReveal.js'
-import { loadWindowState, saveWindowState } from './windowState.js'
+import { loadWindowState, saveWindowState, saveWindowStateAsync, type WindowState } from './windowState.js'
 
 process.on('uncaughtException', (error) => {
   console.error('Uncaught exception in main:', error)
@@ -495,10 +498,26 @@ function trackSnapshot(snapshot: RepositorySnapshot): RepositorySnapshot {
   return snapshot
 }
 
+// A stage, a commit or a branch switch answers with the whole snapshot, and
+// the path list is nearly all of it: ~6.9 MB to serialize and clone at 100k
+// paths for a click that changed a status. The preload names the list it holds
+// (`held`) and puts it back into a reply that left it out.
+function replyWithSnapshot(
+  snapshot: RepositorySnapshot,
+  held: unknown
+): RepositorySnapshot | RepositorySnapshotWithoutPaths {
+  return omitHeldPaths(trackSnapshot(snapshot), held)
+}
+
 // Nothing here touches the disk: the write is debounced so a burst of publishes
 // costs one file, and it never runs on the tick that produced the snapshot.
 function rememberWorkspaceCache(next: WorkspaceCache): void {
-  workspaceCacheStore = rememberWorkspaceCacheEntry(workspaceCacheStore, next)
+  saveWorkspaceCacheStore(rememberWorkspaceCacheEntry(workspaceCacheStore, next))
+}
+
+function saveWorkspaceCacheStore(next: WorkspaceCacheStore): void {
+  if (next === workspaceCacheStore) return
+  workspaceCacheStore = next
   if (userDataPath === '') return
   if (persistWorkspaceTimer != null) clearTimeout(persistWorkspaceTimer)
   persistWorkspaceTimer = setTimeout(() => {
@@ -525,14 +544,19 @@ function flushPendingWorkspaceCache(): void {
 function persistWindowGeometry(window: BrowserWindow): void {
   let timer: ReturnType<typeof setTimeout> | null = null
 
+  const bounds = (): WindowState => ({ ...window.getNormalBounds(), maximized: window.isMaximized() })
+
   const write = (): void => {
     if (window.isDestroyed()) return
-    saveWindowState(userDataPath, { ...window.getNormalBounds(), maximized: window.isMaximized() })
+    saveWindowState(userDataPath, bounds())
   }
 
   const schedule = (): void => {
     if (timer != null) clearTimeout(timer)
-    timer = setTimeout(write, GEOMETRY_SAVE_DEBOUNCE_MS)
+    timer = setTimeout(() => {
+      timer = null
+      if (!window.isDestroyed()) void saveWindowStateAsync(userDataPath, bounds())
+    }, GEOMETRY_SAVE_DEBOUNCE_MS)
   }
 
   window.on('resize', schedule)
@@ -1018,10 +1042,16 @@ function registerIpcHandlers(): void {
     }
     return openRepository(folderPath)
   })
-  ipcMain.handle(IPC_CHANNELS.activateRepository, (_event, root: unknown) =>
-    repositorySessions.activate(requireRepositoryRoot(root)))
-  ipcMain.handle(IPC_CHANNELS.releaseRepository, (_event, root: unknown) =>
-    repositorySessions.release(requireRepositoryRoot(root)))
+  ipcMain.handle(IPC_CHANNELS.activateRepository, async (_event, root: unknown) => {
+    const snapshot = await repositorySessions.activate(requireRepositoryRoot(root))
+    rememberActiveRoot(snapshot.root)
+    return snapshot
+  })
+  ipcMain.handle(IPC_CHANNELS.releaseRepository, (_event, root: unknown) => {
+    const released = requireRepositoryRoot(root)
+    repositorySessions.release(released)
+    forgetClosedRoot(released)
+  })
   ipcMain.handle(IPC_CHANNELS.previewPullRequestFolder, (_event, pullRequestUrl: unknown) =>
     previewPullRequestFolder(pullRequestUrl))
   ipcMain.handle(IPC_CHANNELS.resolvePullRequestRepository, (_event, pullRequestUrl: unknown, preferredRoot: unknown) =>
@@ -1057,7 +1087,8 @@ function registerIpcHandlers(): void {
     }
     shell.showItemInFolder(candidate)
   })
-  ipcMain.handle(IPC_CHANNELS.refresh, () => repositorySessions.requireActive().refresh().then(trackSnapshot))
+  ipcMain.handle(IPC_CHANNELS.refresh, (_event, held: unknown) =>
+    repositorySessions.requireActive().refresh().then((snapshot) => replyWithSnapshot(snapshot, held)))
   ipcMain.handle(IPC_CHANNELS.getComparison, (_event, path: string) => {
     const repository = repositorySessions.tryGetActive()
     if (repository == null) {
@@ -1080,9 +1111,19 @@ function registerIpcHandlers(): void {
     if (snapshot != null) trackSnapshot(snapshot)
     return comparison
   })
-  ipcMain.handle(IPC_CHANNELS.getWorkingTreePatch, (event, paths: unknown, requestId: unknown) => {
+  ipcMain.handle(IPC_CHANNELS.getWorkingTreePatch, async (
+    event,
+    paths: unknown,
+    requestId: unknown,
+    root: unknown
+  ) => {
     const send = localReviewProgressSender(event.sender, requestId)
-    return repositorySessions.requireActive().getWorkingTreePatch(
+    // A caller that names its root gets that repository's patch even when the
+    // active tab moved while the request was in flight.
+    const repository = root == null
+      ? repositorySessions.requireActive()
+      : repositorySessions.require(requireRepositoryRoot(root))
+    const reply = await repository.getWorkingTreePatch(
       paths,
       send == null
         ? undefined
@@ -1096,6 +1137,11 @@ function registerIpcHandlers(): void {
           })
         }
     )
+    // A streamed caller's reply carries no patch, and it can reach the renderer
+    // before the pages sent ahead of it. `done` travels on the pages' channel, so
+    // it lands after every one of them.
+    send?.({ kind: 'done', selector: 'working-tree', fileCount: 0 })
+    return reply
   })
   ipcMain.handle(IPC_CHANNELS.searchContent, (_event, query: string, forOpenPath: unknown) =>
     repositorySessions.requireActive().searchContent(
@@ -1106,7 +1152,12 @@ function registerIpcHandlers(): void {
   ipcMain.on(IPC_CHANNELS.cancelContentSearch, () => repositorySessions.cancelActiveContentSearch())
   ipcMain.handle(IPC_CHANNELS.getMarkdownMedia, (_event, url: unknown) => loadMarkdownMedia(url))
   ipcMain.handle(IPC_CHANNELS.getAvatar, (_event, url: unknown) => getAvatarDataUrl(url))
-  ipcMain.handle(IPC_CHANNELS.getGitIntegration, () => repositorySessions.requireActive().getGitIntegration())
+  ipcMain.handle(IPC_CHANNELS.getGitIntegration, (_event, options: unknown) =>
+    repositorySessions.requireActive().getGitIntegration({
+      pullRequests: (options as { pullRequests?: unknown } | null)?.pullRequests !== false
+    }))
+  ipcMain.handle(IPC_CHANNELS.getRepositoryPullRequests, () =>
+    repositorySessions.requireActive().getRepositoryPullRequests())
   ipcMain.handle(IPC_CHANNELS.getPullRequestInbox, () => repositorySessions.requireActive().getPullRequestInbox())
   ipcMain.handle(IPC_CHANNELS.getGlobalPullRequestInbox, (_event, repos: unknown) => loadGlobalPullRequestInbox(normalizeInboxRepos(repos)))
   ipcMain.handle(IPC_CHANNELS.getClosedPullRequests, () => repositorySessions.requireActive().getClosedPullRequests())
@@ -1190,8 +1241,12 @@ function registerIpcHandlers(): void {
     repositorySessions.require(requireRepositoryRoot(root)).mergePullRequest(selector, strategy))
   ipcMain.handle(IPC_CHANNELS.markPullRequestReady, (_event, root: unknown, selector: number | string) =>
     repositorySessions.require(requireRepositoryRoot(root)).markPullRequestReady(selector))
-  ipcMain.handle(IPC_CHANNELS.switchBranch, (_event, name: string) =>
-    repositorySessions.requireActive().switchBranch(name).then(trackSnapshot)
+  // Source Control writes name their repository rather than trusting the active
+  // one: each can wait on a confirmation, and a tab switched in the meantime
+  // used to receive the discard, commit or branch switch meant for another.
+  ipcMain.handle(IPC_CHANNELS.switchBranch, (_event, root: unknown, name: string, held: unknown) =>
+    repositorySessions.require(requireRepositoryRoot(root)).switchBranch(name)
+      .then((snapshot) => replyWithSnapshot(snapshot, held))
   )
   ipcMain.handle(IPC_CHANNELS.getLocalBranchReview, (event, baseRef: string, headRef: string, requestId: unknown) =>
     repositorySessions.requireActive().getLocalBranchReview(
@@ -1213,11 +1268,26 @@ function registerIpcHandlers(): void {
       localReviewProgressSender(event.sender, requestId)
     )
   )
-  ipcMain.handle(IPC_CHANNELS.fetchRemote, () => repositorySessions.requireActive().fetchRemote())
-  ipcMain.handle(IPC_CHANNELS.pullCurrentBranch, () =>
-    repositorySessions.requireActive().pullCurrentBranch().then(trackSnapshot)
+  ipcMain.handle(IPC_CHANNELS.fetchRemote, (_event, root: unknown) =>
+    repositorySessions.require(requireRepositoryRoot(root)).fetchRemote())
+  ipcMain.handle(IPC_CHANNELS.pullCurrentBranch, (_event, root: unknown, held: unknown) =>
+    repositorySessions.require(requireRepositoryRoot(root)).pullCurrentBranch()
+      .then((snapshot) => replyWithSnapshot(snapshot, held))
   )
-  ipcMain.handle(IPC_CHANNELS.pushCurrentBranch, () => repositorySessions.requireActive().pushCurrentBranch())
+  ipcMain.handle(IPC_CHANNELS.pushCurrentBranch, (_event, root: unknown) =>
+    repositorySessions.require(requireRepositoryRoot(root)).pushCurrentBranch())
+  ipcMain.handle(IPC_CHANNELS.stagePaths, (_event, root: unknown, paths: unknown, held: unknown) =>
+    repositorySessions.require(requireRepositoryRoot(root)).stagePaths(paths)
+      .then((snapshot) => replyWithSnapshot(snapshot, held)))
+  ipcMain.handle(IPC_CHANNELS.unstagePaths, (_event, root: unknown, paths: unknown, held: unknown) =>
+    repositorySessions.require(requireRepositoryRoot(root)).unstagePaths(paths)
+      .then((snapshot) => replyWithSnapshot(snapshot, held)))
+  ipcMain.handle(IPC_CHANNELS.discardPaths, (_event, root: unknown, paths: unknown, held: unknown) =>
+    repositorySessions.require(requireRepositoryRoot(root)).discardPaths(paths)
+      .then((snapshot) => replyWithSnapshot(snapshot, held)))
+  ipcMain.handle(IPC_CHANNELS.commitChanges, (_event, root: unknown, request: unknown, held: unknown) =>
+    repositorySessions.require(requireRepositoryRoot(root)).commitChanges(request)
+      .then((snapshot) => replyWithSnapshot(snapshot, held)))
   ipcMain.handle(IPC_CHANNELS.getPullRequestReview, (
     event,
     root: unknown,
@@ -1241,8 +1311,9 @@ function registerIpcHandlers(): void {
       }
     }, requestId, 'foreground', refresh === true)
   })
-  ipcMain.handle(IPC_CHANNELS.checkoutPullRequest, (_event, number: number) =>
-    repositorySessions.requireActive().checkoutPullRequest(number).then(trackSnapshot)
+  ipcMain.handle(IPC_CHANNELS.checkoutPullRequest, (_event, root: unknown, number: number, held: unknown) =>
+    repositorySessions.require(requireRepositoryRoot(root)).checkoutPullRequest(number)
+      .then((snapshot) => replyWithSnapshot(snapshot, held))
   )
   ipcMain.handle(IPC_CHANNELS.submitPullRequestReview, (_event, root: unknown, selector: number | string, commitId: unknown, reviewEvent: string, body: string, comments: unknown) =>
     repositorySessions.require(requireRepositoryRoot(root)).submitPullRequestReview(selector, commitId, reviewEvent, body, comments)
@@ -1321,6 +1392,28 @@ function applyDevelopmentDockIcon(): void {
   if (app.isPackaged || process.platform !== 'darwin') return
   const icon = nativeImage.createFromPath(join(__dirname, '../../build/icon.png'))
   if (!icon.isEmpty()) app.dock?.setIcon(icon)
+}
+
+// What the next launch restores follows the tab in front. Only an open used to
+// move it, so switching tabs restored the wrong folder, and closing the last
+// one restored the folder that had just been closed.
+function rememberActiveRoot(root: string | null): void {
+  if (sessionState.lastRoot !== root && !(root != null && sessionState.lastRoot != null && rootsMatch(sessionState.lastRoot, root))) {
+    sessionState = { ...sessionState, lastRoot: root }
+    if (userDataPath !== '') void saveSessionState(userDataPath, sessionState)
+  }
+  const cachedRoot = root == null ? null : cachedWorkspaceForRoot(root)?.lastRoot ?? null
+  saveWorkspaceCacheStore(withLastWorkspaceRoot(workspaceCacheStore, cachedRoot))
+}
+
+// Closing the folder the next launch would restore hands that to whatever is in
+// front now, or to nothing — the dashboard — when no folder is left. The tab
+// that takes focus can be a new-tab page, which activates nothing, so "in
+// front" falls back to the open folder that was in front most recently.
+function forgetClosedRoot(root: string): void {
+  const restoredRoot = effectiveLastRoot(sessionState.lastRoot, workspaceCacheStore.lastRoot)
+  if (restoredRoot == null || !rootsMatch(restoredRoot, root)) return
+  rememberActiveRoot(repositorySessions.lastActiveRoot())
 }
 
 function rememberOpenedRoot(root: string, active = true): void {

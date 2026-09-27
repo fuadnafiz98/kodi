@@ -56,6 +56,40 @@ describe('DiffToolbar editing controls', () => {
     expect(screen.getByRole('button', { name: `Undo (${formatEditorShortcut('cmdOrCtrl+z')})` })).toBeTruthy()
     expect(screen.getByRole('button', { name: `Redo (${formatEditorShortcut('cmdOrCtrl+shift+z')})` })).toBeTruthy()
   })
+
+  test('Save takes the fill only when there is something to save', () => {
+    const { rerender } = render(<DiffToolbar comparison={null} selectedPath="src/app.ts" isGitRepository
+      isFilePreview={false} diffStyle="split" workspaceView="file" reviewFileCount={1} wordWrap={false} foldUnchanged
+      fileEdit={editControls({ available: true, mode: 'edit' })}
+      onDiffStyleChange={() => {}} onWordWrapToggle={() => {}} onFoldUnchangedToggle={() => {}} />)
+    const save = screen.getByRole('button', { name: /Save/ })
+    expect(save.hasAttribute('data-dirty')).toBe(false)
+    expect((screen.getByRole('button', { name: 'Discard changes' }) as HTMLButtonElement).disabled).toBe(true)
+
+    rerender(<DiffToolbar comparison={null} selectedPath="src/app.ts" isGitRepository
+      isFilePreview={false} diffStyle="split" workspaceView="file" reviewFileCount={1} wordWrap={false} foldUnchanged
+      fileEdit={editControls({ available: true, mode: 'edit', dirty: true })}
+      onDiffStyleChange={() => {}} onWordWrapToggle={() => {}} onFoldUnchangedToggle={() => {}} />)
+    expect(save.hasAttribute('data-dirty')).toBe(true)
+    expect((save as HTMLButtonElement).disabled).toBe(false)
+    expect((screen.getByRole('button', { name: 'Discard changes' }) as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  test('preview is one toggle that goes back to editing', () => {
+    const modes: string[] = []
+    let closed = false
+    render(<DiffToolbar comparison={null} selectedPath="src/app.ts" isGitRepository isFilePreview={false}
+      diffStyle="split" workspaceView="file" reviewFileCount={1} wordWrap={false} foldUnchanged
+      fileEdit={editControls({ available: true, mode: 'preview', onModeChange: (mode) => { modes.push(mode) },
+        onCancel: () => { closed = true } })}
+      onDiffStyleChange={() => {}} onWordWrapToggle={() => {}} onFoldUnchangedToggle={() => {}} />)
+    const preview = screen.getByRole('button', { name: 'Preview draft' })
+    expect(preview.getAttribute('aria-pressed')).toBe('true')
+    preview.click()
+    expect(modes).toEqual(['edit'])
+    screen.getByRole('button', { name: 'Close editor' }).click()
+    expect(closed).toBe(true)
+  })
 })
 
 test('DiffToolbar offers Source, Both, and Preview for a markdown file', () => {

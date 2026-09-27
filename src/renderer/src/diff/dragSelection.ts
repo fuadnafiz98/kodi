@@ -43,18 +43,27 @@ export interface DragLineGeometry extends DragLine {
   bottom: number
 }
 
-interface MeasuredDragLine extends DragLineGeometry {
+interface DragLineCell extends DragLine {
   element: HTMLElement
+}
+
+interface DragLineBounds {
+  top: number
+  bottom: number
 }
 
 interface DragGuideState {
   code: HTMLElement
   start: DragLine
   current: DragLine
-  lines: MeasuredDragLine[]
+  /** Gutter cells in document order, which is also their top-to-bottom order. */
+  cells: DragLineCell[]
+  /** Bounds read so far, by position in `cells`. A scroll moves every row, so it empties this. */
+  bounds: Array<DragLineBounds | undefined>
   elementsByIndex: Map<number, HTMLElement[]>
   renderedRange: { first: number; last: number } | null
-  geometryStale: boolean
+  /** The viewer re-rendered the item, so `cells` may hold detached rows. */
+  rowsStale: boolean
   moved: boolean
   pointerId: number
   captureTarget: HTMLElement
@@ -75,22 +84,27 @@ function lineSideFor(element: HTMLElement, paneSide: 'additions' | 'deletions' |
   return element.getAttribute('data-line-type') === 'change-deletion' ? 'deletions' : 'additions'
 }
 
-export function measureDragLines(code: HTMLElement): {
-  lines: MeasuredDragLine[]
+/**
+ * The rows a drag can land on, without reading any layout. Measuring happens
+ * later and only where the pointer's binary search probes: a scroll moves every
+ * row, and re-measuring them all made each pointermove of a scrolling drag one
+ * layout read per rendered row. Gutter cells are laid out in document order, so
+ * that order stands in for the sort by top this used to need.
+ */
+export function collectDragLines(code: HTMLElement): {
+  cells: DragLineCell[]
   elementsByIndex: Map<number, HTMLElement[]>
 } {
   const paneSide = code.hasAttribute('data-deletions')
     ? 'deletions' as const
     : code.hasAttribute('data-additions') ? 'additions' as const : null
-  const lines: MeasuredDragLine[] = []
+  const cells: DragLineCell[] = []
   for (const element of code.querySelectorAll<HTMLElement>('[data-gutter] [data-column-number]')) {
     const index = Number(element.dataset.lineIndex?.split(',')[0])
     const lineNumber = Number(element.dataset.columnNumber)
     if (!Number.isFinite(index) || !Number.isFinite(lineNumber)) continue
-    const bounds = element.getBoundingClientRect()
-    lines.push({ index, lineNumber, lineSide: lineSideFor(element, paneSide), top: bounds.top, bottom: bounds.bottom, element })
+    cells.push({ index, lineNumber, lineSide: lineSideFor(element, paneSide), element })
   }
-  lines.sort((left, right) => left.top - right.top)
 
   const elementsByIndex = new Map<number, HTMLElement[]>()
   for (const element of code.querySelectorAll<HTMLElement>('[data-line-index]')) {
@@ -100,7 +114,7 @@ export function measureDragLines(code: HTMLElement): {
     if (elements == null) elementsByIndex.set(index, [element])
     else elements.push(element)
   }
-  return { lines, elementsByIndex }
+  return { cells, elementsByIndex }
 }
 
 /** The code column a utility-button press began in — a side pane in a split
@@ -113,35 +127,69 @@ export function codeFromEventPath(path: readonly (EventTarget | null | undefined
   ) ?? null
 }
 
+/**
+ * The position of the row whose center is nearest `pointerY`, among `count` rows
+ * ordered top to bottom. `boundsAt` is only asked for the rows the search probes,
+ * about two per halving, so callers can read layout lazily.
+ */
+export function findClosestDragLinePosition(
+  count: number,
+  boundsAt: (position: number) => DragLineBounds,
+  pointerY: number
+): number | null {
+  if (count === 0) return null
+  const centerAt = (position: number): number => {
+    const bounds = boundsAt(position)
+    return bounds.top + (bounds.bottom - bounds.top) / 2
+  }
+  let low = 0
+  let high = count
+  while (low < high) {
+    const middle = (low + high) >>> 1
+    if (centerAt(middle) < pointerY) low = middle + 1
+    else high = middle
+  }
+  if (low === 0) return 0
+  if (low === count) return count - 1
+  return pointerY - centerAt(low - 1) <= centerAt(low) - pointerY ? low - 1 : low
+}
+
 export function findClosestDragLine<T extends DragLineGeometry>(
   lines: readonly T[],
   pointerY: number
 ): T | null {
-  if (lines.length === 0) return null
-  let low = 0
-  let high = lines.length
-  while (low < high) {
-    const middle = (low + high) >>> 1
-    const line = lines[middle]!
-    const center = line.top + (line.bottom - line.top) / 2
-    if (center < pointerY) low = middle + 1
-    else high = middle
-  }
-  if (low === 0) return lines[0]!
-  if (low === lines.length) return lines[lines.length - 1]!
-  const before = lines[low - 1]!
-  const after = lines[low]!
-  const beforeCenter = before.top + (before.bottom - before.top) / 2
-  const afterCenter = after.top + (after.bottom - after.top) / 2
-  return pointerY - beforeCenter <= afterCenter - pointerY ? before : after
+  const position = findClosestDragLinePosition(lines.length, (index) => lines[index]!, pointerY)
+  return position == null ? null : lines[position]!
+}
+
+function closestDragCell(
+  cells: readonly DragLineCell[],
+  bounds: Array<DragLineBounds | undefined>,
+  pointerY: number
+): DragLineCell | null {
+  const position = findClosestDragLinePosition(cells.length, (index) => {
+    const cached = bounds[index]
+    if (cached != null) return cached
+    const rect = cells[index]!.element.getBoundingClientRect()
+    const measured = { top: rect.top, bottom: rect.bottom }
+    bounds[index] = measured
+    return measured
+  }, pointerY)
+  return position == null ? null : cells[position]!
 }
 
 function renderDragGuide(drag: DragGuideState, endIndex: number): void {
   const startIndex = drag.start.index
   const firstIndex = Math.min(startIndex, endIndex)
   const lastIndex = Math.max(startIndex, endIndex)
+  // Only rows inside the new range or the previous one can change, so the walk
+  // covers those instead of every rendered row.
+  const walkFirst = Math.min(firstIndex, drag.renderedRange?.first ?? firstIndex)
+  const walkLast = Math.max(lastIndex, drag.renderedRange?.last ?? lastIndex)
 
-  for (const [index, elements] of drag.elementsByIndex) {
+  for (let index = walkFirst; index <= walkLast; index += 1) {
+    const elements = drag.elementsByIndex.get(index)
+    if (elements == null) continue
     const boundary = index < firstIndex || index > lastIndex
       ? null
       : firstIndex === lastIndex
@@ -196,17 +244,18 @@ export function syncDragGuideLifecycle(
   const binding: DragGuideBinding = {
     onRangeSelected,
     invalidateGeometry: () => {
-      if (drag != null) drag.geometryStale = true
+      if (drag != null) drag.rowsStale = true
     },
     teardown: () => undefined
   }
 
-  const refreshGeometry = (current: DragGuideState): boolean => {
-    const measured = measureDragLines(current.code)
-    if (measured.lines.length === 0) return false
-    current.lines = measured.lines
-    current.elementsByIndex = measured.elementsByIndex
-    current.geometryStale = false
+  const refreshRows = (current: DragGuideState): boolean => {
+    const collected = collectDragLines(current.code)
+    if (collected.cells.length === 0) return false
+    current.cells = collected.cells
+    current.bounds = []
+    current.elementsByIndex = collected.elementsByIndex
+    current.rowsStale = false
     return true
   }
 
@@ -220,18 +269,20 @@ export function syncDragGuideLifecycle(
 
     const code = codeFromEventPath(path)
     if (code == null) return
-    const measured = measureDragLines(code)
-    const start = findClosestDragLine(measured.lines, pointerEvent.clientY)
+    const { cells, elementsByIndex } = collectDragLines(code)
+    const bounds: Array<DragLineBounds | undefined> = []
+    const start = closestDragCell(cells, bounds, pointerEvent.clientY)
     if (start == null) return
 
     drag = {
       code,
       start,
       current: start,
-      lines: measured.lines,
-      elementsByIndex: measured.elementsByIndex,
+      cells,
+      bounds,
+      elementsByIndex,
       renderedRange: null,
-      geometryStale: false,
+      rowsStale: false,
       moved: false,
       pointerId: pointerEvent.pointerId,
       captureTarget: utilityButton
@@ -243,8 +294,8 @@ export function syncDragGuideLifecycle(
   const onPointerMove = (event: Event): void => {
     const pointerEvent = event as PointerEvent
     if (drag == null || pointerEvent.pointerId !== drag.pointerId) return
-    if (drag.geometryStale && !refreshGeometry(drag)) return
-    const current = findClosestDragLine(drag.lines, pointerEvent.clientY)
+    if (drag.rowsStale && !refreshRows(drag)) return
+    const current = closestDragCell(drag.cells, drag.bounds, pointerEvent.clientY)
     if (current == null) return
 
     pointerEvent.preventDefault()
@@ -311,8 +362,10 @@ export function syncDragGuideLifecycle(
   }
 
   const scrollContainer = node.closest<HTMLElement>('.multi-file-code-view, .diff-scroll')
+  // A scroll leaves the rows in place and moves them all, so only the bounds
+  // read so far go; the next move re-reads the few rows its search probes.
   const onScroll = (): void => {
-    if (drag != null) drag.geometryStale = true
+    if (drag != null) drag.bounds = []
   }
 
   root.addEventListener('pointerdown', onPointerDown, true)

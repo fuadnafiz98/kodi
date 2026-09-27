@@ -93,6 +93,68 @@ export function reviewKey(baseOid: string, headOid: string): string {
   return `${baseOid}:${headOid}`
 }
 
+export const MAX_REMEMBERED_REVIEWS = 8
+// Every pull request open and every local review lands here, and each resident
+// repository keeps its own store, so a count alone let four sessions pin
+// thirty-two whole patches — a single 3,000-file review is 30–60 MB.
+export const MAX_REMEMBERED_REVIEW_BYTES = 32 * 1024 * 1024
+
+/**
+ * The reviews an agent request can be pointed at without reloading them, most
+ * recently opened last. A patch's length stands in for its size: diffs are
+ * overwhelmingly ASCII, which V8 stores a byte per character.
+ */
+export class RememberedReviewStore {
+  readonly #maxEntries: number
+  readonly #maxBytes: number
+  #reviews = new Map<string, RememberedAgentReview>()
+  #bytes = 0
+
+  constructor(maxEntries = MAX_REMEMBERED_REVIEWS, maxBytes = MAX_REMEMBERED_REVIEW_BYTES) {
+    this.#maxEntries = maxEntries
+    this.#maxBytes = maxBytes
+  }
+
+  get size(): number {
+    return this.#reviews.size
+  }
+
+  get bytes(): number {
+    return this.#bytes
+  }
+
+  remember(review: RememberedAgentReview): void {
+    this.#delete(review.key)
+    // A patch bigger than the whole budget would evict every other review and
+    // still not fit. Its title and file list are kept; the patch itself is read
+    // back from the pull-request cache on disk when an agent asks for it.
+    const kept = review.patch.length > this.#maxBytes ? { ...review, patch: '' } : review
+    this.#reviews.set(kept.key, kept)
+    this.#bytes += kept.patch.length
+    while (this.#reviews.size > this.#maxEntries || this.#bytes > this.#maxBytes) {
+      const oldest = this.#reviews.keys().next().value
+      if (oldest == null) break
+      this.#delete(oldest)
+    }
+  }
+
+  get(key: string): RememberedAgentReview | null {
+    return this.#reviews.get(key) ?? null
+  }
+
+  clear(): void {
+    this.#reviews.clear()
+    this.#bytes = 0
+  }
+
+  #delete(key: string): void {
+    const existing = this.#reviews.get(key)
+    if (existing == null) return
+    this.#reviews.delete(key)
+    this.#bytes -= existing.patch.length
+  }
+}
+
 export function agentReviewPaths(root: string): { directory: string; patch: string; brief: string } {
   const directory = join(root, AGENT_REVIEW_DIR)
   return {
@@ -125,7 +187,7 @@ export async function prepareAgentReviewContext(options: {
   cached: CachedReviewPatch | null
 }): Promise<string> {
   const { snapshot, subject, remembered, cached } = options
-  const review = remembered ?? rememberedFromCache(cached, subject)
+  const review = withCachedPatch(remembered, rememberedFromCache(cached, subject))
   if (snapshot == null || snapshot.kind !== 'git') {
     return formatAgentReviewInstructions({
       subject,
@@ -215,6 +277,17 @@ function formatAgentReviewBrief(
     ...files,
     ...overflow
   ].filter((line): line is string => line != null).join('\n')
+}
+
+// A review too big to keep its patch in memory is remembered for its title and
+// file list; the pull-request cache supplies the patch it gave up.
+function withCachedPatch(
+  remembered: RememberedAgentReview | null,
+  cached: RememberedAgentReview | null
+): RememberedAgentReview | null {
+  if (remembered == null) return cached
+  if (remembered.patch !== '' || cached == null) return remembered
+  return { ...remembered, patch: cached.patch }
 }
 
 function rememberedFromCache(

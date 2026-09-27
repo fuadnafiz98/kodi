@@ -23,6 +23,12 @@ export function WorkspaceRootHost({
   collisionPaths
 }: WorkspaceRootHostProps): React.JSX.Element {
   const { gitWorkflow, WorkspaceRoot } = view
+  // Read field by field so the compiler memoizes the reload callback on what it
+  // calls, not on the workflow object: that object is rebuilt whenever the git
+  // panel opens, loads or flips an action key, and a new callback here was a
+  // whole workspace render for state the workspace never reads.
+  const { activeWorld, openPullRequestReview } = gitWorkflow
+  const activeWorldId = activeWorld?.worldId ?? null
   if (WorkspaceRoot == null) {
     return (
       <CachedWorkspaceFallback
@@ -48,8 +54,7 @@ export function WorkspaceRootHost({
       onReviewScrollPositionChange={gitWorkflow.rememberReviewScroll}
       onSelectPath={view.selectPath} onDiffStyleChange={view.setDiffStyle}
       onWorkspaceViewChange={view.setWorkspaceView}
-      onReloadReview={(url) => gitWorkflow.openPullRequestReview(url, snapshot,
-        gitWorkflow.activeWorld?.worldId ?? null, { refresh: true })}
+      onReloadReview={(url) => openPullRequestReview(url, snapshot, activeWorldId, { refresh: true })}
       submittingPullRequestReview={gitWorkflow.submittingReview} pullRequestReviewMessage={gitWorkflow.submissionMessage}
       onSubmitPullRequestReview={gitWorkflow.submitReview} onComparisonSaved={view.onComparisonSaved}
       onError={view.setError}

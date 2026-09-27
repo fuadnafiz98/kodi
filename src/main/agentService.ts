@@ -8,6 +8,7 @@ import type {
 } from '@anthropic-ai/claude-agent-sdk'
 
 import type {
+  AgentActivityUpdate,
   AgentApprovalDecision,
   AgentModelCatalog,
   AgentProvider,
@@ -272,18 +273,47 @@ async function getProviderStatus(provider: AgentProvider): Promise<AgentProvider
   }
 }
 
-const AGENT_TEXT_COALESCE_MS = 16
+const AGENT_STREAM_COALESCE_MS = 16
+
+type StreamedActivityField = 'detail' | 'output'
+
+// A pure delta only extends one field of an activity and restates its identity.
+// Anything more (timestamps, a replaced field) would need merge rules of its
+// own, so only these are merged; everything else is sent as it arrives.
+function readActivityDelta(event: AgentEvent): {
+  activity: AgentActivityUpdate
+  field: StreamedActivityField
+} | null {
+  const activity = event.activity
+  if (event.kind !== 'activity' || activity?.append == null) return null
+  const field = activity.append
+  if (typeof activity[field] !== 'string') return null
+  for (const key of Object.keys(activity)) {
+    if (key !== 'id' && key !== 'kind' && key !== 'title' && key !== 'status' &&
+        key !== 'append' && key !== field) return null
+  }
+  return { activity, field }
+}
 
 // One IPC message per token delta is 30-80 sends, setStates and full-transcript
-// renders a second. Text is the only event kind that concatenates, so it is
-// batched to about a frame; every other kind is sent immediately, after the text
-// that preceded it, so the transcript order is preserved.
+// renders a second, and reasoning, plan and command-output deltas stream just as
+// fast as text. Text and pure activity deltas are therefore batched to about a
+// frame; every other event is sent immediately, after everything batched before
+// it, so nothing is reordered around an approval, a lifecycle change or the end.
+//
+// The renderer folds text into the answer and activity into the activity list,
+// and neither touches the other, so text keeps one batch while activity batches
+// come and go. Activity deltas only merge into the most recent activity batch:
+// the list is ordered by first appearance and capped, so letting a delta jump
+// ahead of a different item could fold to a different list.
 export function coalesceAgentTextEvents(send: (event: AgentEvent) => void): {
   emit(event: AgentEvent): void
   flush(): void
 } {
-  let pendingId: string | null = null
-  let pendingText = ''
+  let pending: AgentEvent[] = []
+  let pendingRequestId: string | null = null
+  let textBatch: { id: string; kind: 'text'; text: string } | null = null
+  let activityBatch: { activity: AgentActivityUpdate; field: StreamedActivityField } | null = null
   let timer: ReturnType<typeof setTimeout> | null = null
 
   const flush = (): void => {
@@ -291,24 +321,59 @@ export function coalesceAgentTextEvents(send: (event: AgentEvent) => void): {
       clearTimeout(timer)
       timer = null
     }
-    if (pendingId == null) return
-    const payload: AgentEvent = { id: pendingId, kind: 'text', text: pendingText }
-    pendingId = null
-    pendingText = ''
-    send(payload)
+    if (pending.length === 0) return
+    const batches = pending
+    pending = []
+    pendingRequestId = null
+    textBatch = null
+    activityBatch = null
+    for (const batch of batches) send(batch)
+  }
+
+  const enqueue = (event: AgentEvent): void => {
+    pending.push(event)
+    pendingRequestId = event.id
+    timer ??= setTimeout(flush, AGENT_STREAM_COALESCE_MS)
+  }
+
+  const appendText = (id: string, text: string): void => {
+    if (textBatch == null) {
+      textBatch = { id, kind: 'text', text }
+      enqueue(textBatch)
+    } else {
+      textBatch.text += text
+    }
+  }
+
+  const appendActivity = (
+    event: AgentEvent,
+    { activity, field }: { activity: AgentActivityUpdate; field: StreamedActivityField }
+  ): void => {
+    const last = activityBatch?.field === field ? activityBatch.activity : null
+    if (last != null && last.id === activity.id && last.kind === activity.kind &&
+        last.title === activity.title && last.status === activity.status) {
+      last[field] = `${last[field] ?? ''}${activity[field] ?? ''}`
+      return
+    }
+    // Copied so the concatenation above never writes into the caller's event.
+    const batched = { ...activity }
+    activityBatch = { activity: batched, field }
+    enqueue({ ...event, activity: batched })
   }
 
   return {
     emit(event) {
-      if (event.kind === 'text' && event.text != null) {
-        if (pendingId !== event.id) flush()
-        pendingId = event.id
-        pendingText += event.text
-        timer ??= setTimeout(flush, AGENT_TEXT_COALESCE_MS)
+      const text = event.kind === 'text' ? event.text : undefined
+      const delta = text == null ? readActivityDelta(event) : null
+      if (text == null && delta == null) {
+        flush()
+        send(event)
         return
       }
-      flush()
-      send(event)
+      // A batch never spans requests, so a new request drains the previous one.
+      if (pendingRequestId != null && pendingRequestId !== event.id) flush()
+      if (text != null) appendText(event.id, text)
+      else if (delta != null) appendActivity(event, delta)
     },
     flush
   }

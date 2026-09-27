@@ -148,9 +148,13 @@ export function parseWorkspaceCacheStore(raw: unknown): WorkspaceCacheStore {
     seen.add(entry.lastRoot)
     entries.push(entry)
   }
-  const lastRoot = typeof record.lastRoot === 'string' && seen.has(record.lastRoot)
-    ? record.lastRoot
-    : entries[0]?.lastRoot ?? null
+  // An explicit null is a closed folder: the next launch opens the dashboard,
+  // not whichever entry happens to be first.
+  const lastRoot = record.lastRoot === null
+    ? null
+    : typeof record.lastRoot === 'string' && seen.has(record.lastRoot)
+      ? record.lastRoot
+      : entries[0]?.lastRoot ?? null
   return { version: WORKSPACE_CACHE_STORE_VERSION, lastRoot, entries }
 }
 
@@ -165,6 +169,16 @@ export function workspaceCacheForRoot(
 /** The workspace the next launch paints before git answers. */
 export function lastWorkspaceCache(store: WorkspaceCacheStore): WorkspaceCache | null {
   return workspaceCacheForRoot(store, store.lastRoot)
+}
+
+/**
+ * Points the next launch at `root` — or at nothing, when it is null or has no
+ * cached entry to paint. The entries themselves stay, so reopening a closed
+ * folder still paints from its cache.
+ */
+export function withLastWorkspaceRoot(store: WorkspaceCacheStore, root: string | null): WorkspaceCacheStore {
+  const lastRoot = root != null && store.entries.some((entry) => entry.lastRoot === root) ? root : null
+  return lastRoot === store.lastRoot ? store : { ...store, lastRoot }
 }
 
 /**

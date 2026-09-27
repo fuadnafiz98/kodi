@@ -9,10 +9,12 @@ import type {
   PullRequestReviewProgress,
   RepositoryApi,
   RepositoryChangeEvent,
+  RepositorySnapshot,
   TerminalDataEvent,
   TerminalExitEvent
 } from '../shared/contracts.js'
 import { IPC_CHANNELS } from '../shared/contracts.js'
+import { HeldPathCache, heldPathList } from '../shared/heldPaths.js'
 import { applyRestoreHintToDocument, parseRestoreHint, restoreHintFromArgv } from '../shared/sessionRestore.js'
 import { parseWorkspaceCache } from '../shared/workspaceCache.js'
 
@@ -57,18 +59,36 @@ const cachedWorkspace = parseWorkspaceCache(ipcRenderer.sendSync(IPC_CHANNELS.ge
 const bootDocument = (globalThis as { document?: { documentElement?: { dataset: Record<string, string | undefined> } } }).document
 applyRestoreHintToDocument(bootDocument?.documentElement, restoreHint)
 
+// Every snapshot main sends passes through here first, so the path list the
+// renderer was last given is known without asking it. A mutation names that
+// list in its request and main leaves it out of the reply.
+const heldPaths = new HeldPathCache()
+
+function rememberSnapshot<Value>(reply: Promise<Value>): Promise<Value> {
+  return reply.then((value) => {
+    heldPaths.remember(value)
+    return value
+  })
+}
+
+function invokeSnapshotMutation(channel: string, ...args: unknown[]): Promise<RepositorySnapshot> {
+  const claim = heldPaths.claim()
+  return ipcRenderer.invoke(channel, ...args, heldPathList(claim))
+    .then((reply: unknown) => heldPaths.complete(reply, claim))
+}
+
 const repositoryApi: RepositoryApi = {
   restoreHint,
   cachedWorkspace,
   persistWorkspaceUi: (ui) => ipcRenderer.invoke(IPC_CHANNELS.persistWorkspaceUi, ui),
   persistFileText: (fileText) => ipcRenderer.invoke(IPC_CHANNELS.persistFileText, fileText),
-  getSessionSnapshot: () => ipcRenderer.invoke(IPC_CHANNELS.getSessionSnapshot),
-  openFolder: () => ipcRenderer.invoke(IPC_CHANNELS.openFolder),
+  getSessionSnapshot: () => rememberSnapshot(ipcRenderer.invoke(IPC_CHANNELS.getSessionSnapshot)),
+  openFolder: () => rememberSnapshot(ipcRenderer.invoke(IPC_CHANNELS.openFolder)),
   chooseFolder: () => ipcRenderer.invoke(IPC_CHANNELS.chooseFolder),
   listFolderCandidates: () => ipcRenderer.invoke(IPC_CHANNELS.listFolderCandidates),
-  openPickedFolder: (path) => ipcRenderer.invoke(IPC_CHANNELS.openPickedFolder, path),
-  openPath: (path) => ipcRenderer.invoke(IPC_CHANNELS.openPath, path),
-  activateRepository: (root) => ipcRenderer.invoke(IPC_CHANNELS.activateRepository, root),
+  openPickedFolder: (path) => rememberSnapshot(ipcRenderer.invoke(IPC_CHANNELS.openPickedFolder, path)),
+  openPath: (path) => rememberSnapshot(ipcRenderer.invoke(IPC_CHANNELS.openPath, path)),
+  activateRepository: (root) => rememberSnapshot(ipcRenderer.invoke(IPC_CHANNELS.activateRepository, root)),
   releaseRepository: (root) => ipcRenderer.invoke(IPC_CHANNELS.releaseRepository, root),
   previewPullRequestFolder: (pullRequestUrl) =>
     ipcRenderer.invoke(IPC_CHANNELS.previewPullRequestFolder, pullRequestUrl),
@@ -102,18 +122,19 @@ const repositoryApi: RepositoryApi = {
   },
   readClipboardText: (type) => ipcRenderer.invoke(IPC_CHANNELS.readClipboardText, type),
   revealPath: (path) => ipcRenderer.invoke(IPC_CHANNELS.revealPath, path),
-  refresh: () => ipcRenderer.invoke(IPC_CHANNELS.refresh),
+  refresh: () => invokeSnapshotMutation(IPC_CHANNELS.refresh),
   getComparison: (path) => ipcRenderer.invoke(IPC_CHANNELS.getComparison, path),
   getRevisionFile: (revision, path) => ipcRenderer.invoke(IPC_CHANNELS.getRevisionFile, revision, path),
   hasRevision: (revision) => ipcRenderer.invoke(IPC_CHANNELS.hasRevision, revision),
   saveWorkingFile: (request) => ipcRenderer.invoke(IPC_CHANNELS.saveWorkingFile, request),
-  getWorkingTreePatch: (paths, requestId) =>
-    ipcRenderer.invoke(IPC_CHANNELS.getWorkingTreePatch, paths, requestId ?? null),
+  getWorkingTreePatch: (paths, requestId, root) =>
+    ipcRenderer.invoke(IPC_CHANNELS.getWorkingTreePatch, paths, requestId ?? null, root ?? null),
   searchContent: (query, forOpenPath) => ipcRenderer.invoke(IPC_CHANNELS.searchContent, query, forOpenPath ?? null),
   cancelContentSearch: () => ipcRenderer.send(IPC_CHANNELS.cancelContentSearch),
   getMarkdownMedia: (url) => ipcRenderer.invoke(IPC_CHANNELS.getMarkdownMedia, url),
   getAvatar: (url) => ipcRenderer.invoke(IPC_CHANNELS.getAvatar, url),
-  getGitIntegration: () => ipcRenderer.invoke(IPC_CHANNELS.getGitIntegration),
+  getGitIntegration: (options) => ipcRenderer.invoke(IPC_CHANNELS.getGitIntegration, options),
+  getRepositoryPullRequests: () => ipcRenderer.invoke(IPC_CHANNELS.getRepositoryPullRequests),
   getPullRequestInbox: () => ipcRenderer.invoke(IPC_CHANNELS.getPullRequestInbox),
   getGlobalPullRequestInbox: (repos) => ipcRenderer.invoke(IPC_CHANNELS.getGlobalPullRequestInbox, repos),
   getClosedPullRequests: () => ipcRenderer.invoke(IPC_CHANNELS.getClosedPullRequests),
@@ -125,21 +146,25 @@ const repositoryApi: RepositoryApi = {
     ipcRenderer.invoke(IPC_CHANNELS.setPullRequestThreadResolved, root, threadId, resolved),
   mergePullRequest: (root, selector, strategy) => ipcRenderer.invoke(IPC_CHANNELS.mergePullRequest, root, selector, strategy),
   markPullRequestReady: (root, selector) => ipcRenderer.invoke(IPC_CHANNELS.markPullRequestReady, root, selector),
-  switchBranch: (name) => ipcRenderer.invoke(IPC_CHANNELS.switchBranch, name),
+  switchBranch: (root, name) => invokeSnapshotMutation(IPC_CHANNELS.switchBranch, root, name),
   getLocalBranchReview: (baseRef, headRef, requestId) =>
     ipcRenderer.invoke(IPC_CHANNELS.getLocalBranchReview, baseRef, headRef, requestId ?? null),
   getLocalSnapshotReview: (baseOid, headOid, baseRefName, headRefName) =>
     ipcRenderer.invoke(IPC_CHANNELS.getLocalSnapshotReview, baseOid, headOid, baseRefName, headRefName),
   getCommitReview: (oid, requestId) =>
     ipcRenderer.invoke(IPC_CHANNELS.getCommitReview, oid, requestId ?? null),
-  fetchRemote: () => ipcRenderer.invoke(IPC_CHANNELS.fetchRemote),
-  pullCurrentBranch: () => ipcRenderer.invoke(IPC_CHANNELS.pullCurrentBranch),
-  pushCurrentBranch: () => ipcRenderer.invoke(IPC_CHANNELS.pushCurrentBranch),
+  fetchRemote: (root) => ipcRenderer.invoke(IPC_CHANNELS.fetchRemote, root),
+  pullCurrentBranch: (root) => invokeSnapshotMutation(IPC_CHANNELS.pullCurrentBranch, root),
+  pushCurrentBranch: (root) => ipcRenderer.invoke(IPC_CHANNELS.pushCurrentBranch, root),
+  stagePaths: (root, paths) => invokeSnapshotMutation(IPC_CHANNELS.stagePaths, root, paths),
+  unstagePaths: (root, paths) => invokeSnapshotMutation(IPC_CHANNELS.unstagePaths, root, paths),
+  discardPaths: (root, paths) => invokeSnapshotMutation(IPC_CHANNELS.discardPaths, root, paths),
+  commitChanges: (root, request) => invokeSnapshotMutation(IPC_CHANNELS.commitChanges, root, request),
   getPullRequestReview: (root, selector, requestId, refresh) =>
     ipcRenderer.invoke(IPC_CHANNELS.getPullRequestReview, root, selector, requestId, refresh === true),
   cancelPullRequestReview: (root, requestId) =>
     ipcRenderer.send(IPC_CHANNELS.cancelPullRequestReview, root, requestId),
-  checkoutPullRequest: (number) => ipcRenderer.invoke(IPC_CHANNELS.checkoutPullRequest, number),
+  checkoutPullRequest: (root, number) => invokeSnapshotMutation(IPC_CHANNELS.checkoutPullRequest, root, number),
   submitPullRequestReview: (root, selector, commitId, event, body, comments) => ipcRenderer.invoke(IPC_CHANNELS.submitPullRequestReview, root, selector, commitId, event, body, comments),
   getAgentModels: () => ipcRenderer.invoke(IPC_CHANNELS.getAgentModels),
   getAgentStatuses: (provider) => ipcRenderer.invoke(IPC_CHANNELS.getAgentStatuses, provider),
@@ -220,7 +245,10 @@ const repositoryApi: RepositoryApi = {
     return () => ipcRenderer.removeListener(IPC_CHANNELS.fullscreenChange, handleChange)
   },
   onDidChange: (listener) => {
-    const handleChange = (_event: Electron.IpcRendererEvent, change: RepositoryChangeEvent): void => listener(change)
+    const handleChange = (_event: Electron.IpcRendererEvent, change: RepositoryChangeEvent): void => {
+      heldPaths.rememberBroadcast(change.snapshot)
+      listener(change)
+    }
     ipcRenderer.on(IPC_CHANNELS.didChange, handleChange)
     return () => ipcRenderer.removeListener(IPC_CHANNELS.didChange, handleChange)
   },

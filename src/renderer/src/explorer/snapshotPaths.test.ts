@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 
 import {
+  heldPathsFor,
   includesPath,
   retainSnapshotIdentity,
   samePathList,
@@ -109,5 +110,43 @@ describe('retainSnapshotIdentity', () => {
     })
     expect(snapshotLooksUnchanged(snapshot, next)).toBe(true)
     expect(snapshotLooksUnchanged(snapshot, { ...next, head: 'zzz' })).toBe(false)
+  })
+})
+
+describe('path revisions', () => {
+  const base = {
+    root: '/repo',
+    name: 'repo',
+    kind: 'git' as const,
+    branch: 'main',
+    head: 'abc',
+    paths: ['a.ts', 'b.ts'],
+    statuses: [],
+    pathsRevision: 3
+  }
+
+  test('keeps the held list for a snapshot naming the same revision without walking it', () => {
+    const next = { ...base, paths: ['a.ts', 'b.ts'], statuses: [{ path: 'a.ts', status: 'modified' }] }
+    expect(retainSnapshotIdentity(base, next).paths).toBe(base.paths)
+  })
+
+  test('treats a new revision over the same list as a change worth applying', () => {
+    const next = { ...base, pathsRevision: 4 }
+    const retained = retainSnapshotIdentity(base, next)
+    expect(retained.paths).toBe(base.paths)
+    expect(snapshotLooksUnchanged(base, retained)).toBe(false)
+  })
+
+  test('fills a left-out list only from a snapshot holding that revision', () => {
+    const stale = { ...base, paths: ['old.ts'], pathsRevision: 1 }
+    expect(heldPathsFor({ root: '/repo', pathsRevision: 3 }, [stale, base])).toBe(base.paths)
+    expect(heldPathsFor({ root: '/repo', pathsRevision: 5 }, [stale, base])).toBeNull()
+    expect(heldPathsFor({ root: '/other', pathsRevision: 3 }, [base])).toBeNull()
+    expect(heldPathsFor({ root: '/repo', pathsRevision: 3 }, [null, { ...base, pathsRevision: undefined }]))
+      .toBeNull()
+  })
+
+  test('trusts the root for an event that carries no revision', () => {
+    expect(heldPathsFor({ root: '/repo' }, [null, base])).toBe(base.paths)
   })
 })

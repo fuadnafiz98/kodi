@@ -48,7 +48,7 @@ import {
 import { useGitWorkflow } from '../git/useGitWorkflow'
 import { useAgentSession } from '../agent/useAgentSession'
 import { useTerminalVisibility } from '../terminal/useTerminalVisibility'
-import { includesPath, retainSnapshotIdentity, snapshotLooksUnchanged } from '../explorer/snapshotPaths'
+import { heldPathsFor, includesPath, retainSnapshotIdentity, snapshotLooksUnchanged } from '../explorer/snapshotPaths'
 import { useComparisonLoader } from '../review/useComparisonLoader'
 import { usePresence, useRetainedPresence } from './usePresence'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -57,7 +57,7 @@ import { agentSubjectForWorld, formatAgentReviewContext } from '../agent/agentRe
 import { sessionWorkspaceStage } from '../../../shared/sessionRestore'
 import { comparisonFromCachedText, initialWorkspacePaint } from '../../../shared/workspaceCache'
 import { automaticWorkspaceView, firstOpenPathForSnapshot } from '../explorer/workspaceMode'
-import { revealInExplorer } from '../explorer/explorerReveal'
+import { openInWorkspace, revealInExplorer } from '../explorer/explorerReveal'
 import { isLiveSnapshot, reportAppliedSnapshot } from '../explorer/folderOpenSettle'
 import { findCollisionPaths, newWorldHoldsReview } from '../review/useReviewWorlds'
 import {
@@ -67,10 +67,15 @@ import {
   subscribeWorkspaceRoot
 } from './workspaceBoot'
 import { markRendererStartup } from './startupMetrics'
+import { loadRepositoryPanel } from '../git/repositoryPanelChunk'
 
 const TerminalDock = lazy(() => import('../terminal/TerminalDock'))
+// A cold git status on a large repository takes a few seconds; half a minute
+// covers anything but a hung refresh, which the watcher reports on its own.
+const SESSION_CATCH_UP_INTERVAL_MS = 250
+const SESSION_CATCH_UP_ATTEMPTS = 120
 const RepositoryPanel = lazy(async () => ({
-  default: (await import('../github/GitHubPanel')).RepositoryPanel
+  default: (await loadRepositoryPanel()).RepositoryPanel
 }))
 const SettingsPage = lazy(async () => ({
   default: (await import('../settings/SettingsPage')).SettingsPage
@@ -159,6 +164,12 @@ const AgentSessionLayout = memo(function AgentSessionLayout(view: WorkspaceLayou
     {reviewLoadingPresence.mounted ? <PullRequestLoadingIndicator closing={reviewLoadingPresence.closing} /> : null}
     {repositoryPanelPresence.mounted && view.snapshot?.kind === 'git' ? <Suspense fallback={null}>
       <RepositoryPanel open={gitWorkflow.panelOpen} initialTab={gitWorkflow.panelTab}
+        root={view.snapshot.root} repositoryName={view.snapshot.name} branch={view.snapshot.branch}
+        statuses={view.snapshot.statuses} onTabChange={gitWorkflow.setPanelTab}
+        onConfirmStage={gitWorkflow.confirmSensitiveStage}
+        onStage={gitWorkflow.stagePaths} onUnstage={gitWorkflow.unstagePaths}
+        onDiscard={gitWorkflow.discardPaths} onCommit={gitWorkflow.commitChanges}
+        onOpenChangedFile={gitWorkflow.openChangedFile}
         integration={gitWorkflow.integration} loading={gitWorkflow.loadingIntegration}
         inbox={gitWorkflow.inbox} loadingInbox={gitWorkflow.loadingInbox}
         actionKey={gitWorkflow.actionKey} onClose={() => gitWorkflow.setPanelOpen(false)}
@@ -230,7 +241,9 @@ const AppLayout = memo(function AppLayout(view: AppLayoutProps): React.JSX.Eleme
       onToggleTerminal={workspace.toggleTerminal}
       onRunCommand={workspace.runCommand}
       recentFiles={workspace.recentFiles}
-      onOpenFile={workspace.selectPath}
+      onOpenFile={(path) => {
+        if (!openInWorkspace(path)) workspace.selectPath(path)
+      }}
       onRevealDirectory={revealInExplorer}
       branches={paletteBranches}
       onSwitchBranch={(branch) => void workspace.gitWorkflow.switchBranch(branch)}
@@ -433,33 +446,100 @@ export function App({
   })
   const closeFolderPicker = folderOpen.closeFolderPicker
 
+  // An event can name a path list this window never received — the cached
+  // paint before the session answers, or a tab whose session was evicted and
+  // reopened. The session's own snapshot is the only safe fill, so it is asked
+  // for once instead of guessing from an older list.
+  const recoveringPathsRef = useRef(false)
+  const recoverHeldPaths = useEffectEvent((root: string): void => {
+    if (recoveringPathsRef.current) return
+    recoveringPathsRef.current = true
+    void requireRepositoryApi().getSessionSnapshot()
+      .then((recovered) => {
+        if (recovered == null || recovered.root !== root || appliedSnapshotRef.current?.root !== root) return
+        syncRepositorySnapshot(recovered)
+        startTransition(() => applySnapshot(recovered))
+      })
+      .catch((recoverError: unknown) => setError(getErrorMessage(recoverError)))
+      .finally(() => {
+        recoveringPathsRef.current = false
+      })
+  })
+
   const handleRepositoryChange = useEffectEvent((change: RepositoryChangeEvent): void => {
+    const root = change.snapshot.root
     const previousWorld = reviewWorlds.find((world) => world.source !== 'new'
-      && world.root === change.snapshot.root)
+      && world.root === root)
     const previousSnapshot = previousWorld == null || previousWorld.source === 'new'
       ? null
       : previousWorld.snapshot
-    const nextSnapshot: RepositorySnapshot = {
-      ...change.snapshot,
-      paths: change.snapshot.paths ?? previousSnapshot?.paths ?? []
-    }
-    syncRepositorySnapshot(nextSnapshot)
-    if (appliedSnapshotRef.current?.root !== change.snapshot.root) return
-    const adoptSkeletonOpen = skeletonOpenRootRef.current === nextSnapshot.root
+    const paths = change.snapshot.paths
+      ?? heldPathsFor(change.snapshot, [appliedSnapshotRef.current, previousSnapshot])
+    const nextSnapshot: RepositorySnapshot | null = paths == null ? null : { ...change.snapshot, paths }
+    if (nextSnapshot != null) syncRepositorySnapshot(nextSnapshot)
+    if (appliedSnapshotRef.current?.root !== root) return
+    if (nextSnapshot == null) recoverHeldPaths(root)
+    const adoptSkeletonOpen = nextSnapshot != null
+      && skeletonOpenRootRef.current === root
       && isLiveSnapshot(nextSnapshot)
     if (adoptSkeletonOpen) skeletonOpenRootRef.current = null
-    comparisonLoader.invalidate(change.changedPaths)
+    const invalidateAll = change.invalidateAll === true
+    comparisonLoader.invalidate(invalidateAll ? 'all' : change.changedPaths)
     startTransition(() => {
-      applySnapshot(nextSnapshot)
+      if (nextSnapshot != null) applySnapshot(nextSnapshot)
       setRepositoryChange(change)
       if (adoptSkeletonOpen) gitWorkflow.resyncDeskNavigation(nextSnapshot)
-      if (selectedPath != null && change.changedPaths.includes(selectedPath)) {
+      if (selectedPath != null && (invalidateAll || change.changedPaths.includes(selectedPath))) {
         comparisonLoader.markRevision(change.revision)
       }
     })
   })
 
   useEffect(() => requireRepositoryApi().onDidChange(handleRepositoryChange), [])
+
+  // A change event for a root this window has not applied yet is dropped above,
+  // and the live snapshot of a folder opened at launch can be published while
+  // the app is still mounting — on a cold start (the first launch after an
+  // install) it reliably was, and main answered the renderer's own question
+  // with the skeleton listing it had at the time. The window then sat on that
+  // skeleton for good: four files, "Detached HEAD", nothing clickable. So while a
+  // skeleton is on screen the session is asked again until it answers live.
+  // One chain at a time: switching roots and back started a second poll beside
+  // the first.
+  const catchUpTimerRef = useRef(0)
+  const catchUpWithSession = useEffectEvent((root: string): void => {
+    window.clearTimeout(catchUpTimerRef.current)
+    const ask = (attempt: number): void => {
+      void requireRepositoryApi().getSessionSnapshot()
+        .then((latest) => {
+          const applied = appliedSnapshotRef.current
+          if (latest == null || latest.root !== root || applied?.root !== root) return
+          if (!isLiveSnapshot(latest)) {
+            if (!isLiveSnapshot(applied) && attempt < SESSION_CATCH_UP_ATTEMPTS) {
+              catchUpTimerRef.current = window.setTimeout(() => ask(attempt + 1), SESSION_CATCH_UP_INTERVAL_MS)
+            }
+            return
+          }
+          syncRepositorySnapshot(latest)
+          const adoptSkeletonOpen = skeletonOpenRootRef.current === root
+          if (adoptSkeletonOpen) skeletonOpenRootRef.current = null
+          startTransition(() => {
+            applySnapshot(latest)
+            if (adoptSkeletonOpen) gitWorkflow.resyncDeskNavigation(latest)
+          })
+        })
+        .catch(() => {
+          // The next watcher event carries the same snapshot; nothing to report.
+        })
+    }
+    ask(0)
+  })
+  const appliedRoot = snapshot?.root ?? null
+  useEffect(() => {
+    if (appliedRoot == null) return
+    catchUpWithSession(appliedRoot)
+    return () => window.clearTimeout(catchUpTimerRef.current)
+  }, [appliedRoot])
 
   const hasSnapshot = snapshot != null
 
@@ -474,6 +554,9 @@ export function App({
       openWorkingTree(restoredSnapshot)
       if (!holdingReview && appliedSnapshotRef.current?.root !== restoredSnapshot.root) {
         changeWorkspaceView(automaticWorkspaceView(restoredSnapshot, null))
+        // A restore that lands as a skeleton derived its view from no statuses;
+        // the live snapshot behind it re-derives it, as a fresh open does.
+        if (!isLiveSnapshot(restoredSnapshot)) skeletonOpenRootRef.current = restoredSnapshot.root
       }
       setRecentFolders((current) => rememberRecentFolder(current, restoredSnapshot))
     },

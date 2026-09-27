@@ -15,7 +15,7 @@ type FetchLike = (url: string, init?: RequestInit) => Promise<Response>
 export async function loadMarkdownMedia(
   rawUrl: unknown,
   fetchImpl: FetchLike = fetch,
-  readToken: () => Promise<string | null> = readGitHubAuthToken
+  readToken: () => Promise<string | null> = () => readGitHubAuthToken()
 ): Promise<MarkdownMediaBytes> {
   if (typeof rawUrl !== 'string' || !isAllowedGitHubMediaUrl(rawUrl)) {
     throw new Error('Only GitHub-hosted videos can be previewed.')
@@ -41,10 +41,40 @@ export async function loadMarkdownMedia(
   return { mimeType, bytes: new Uint8Array(buffer) }
 }
 
-async function readGitHubAuthToken(): Promise<string | null> {
+// A pull request description can embed several videos, and each one spawned
+// `gh auth token` again. The token outlives a review by far, so it is asked for
+// once per ten minutes; a miss is not remembered, so signing in takes effect on
+// the next video rather than after the window.
+export const GITHUB_TOKEN_TTL_MS = 10 * 60 * 1000
+
+let cachedToken: { value: Promise<string | null>; expiresAt: number } | null = null
+
+export function readGitHubAuthToken(
+  spawnToken: () => Promise<string | null> = spawnGitHubAuthToken,
+  now = Date.now()
+): Promise<string | null> {
+  if (cachedToken != null && cachedToken.expiresAt > now) return cachedToken.value
+  const entry = {
+    value: spawnToken().catch(() => null),
+    expiresAt: now + GITHUB_TOKEN_TTL_MS
+  }
+  cachedToken = entry
+  void entry.value.then((token) => {
+    if (token == null && cachedToken === entry) cachedToken = null
+  })
+  return entry.value
+}
+
+export function resetGitHubAuthTokenForTests(): void {
+  cachedToken = null
+}
+
+async function spawnGitHubAuthToken(): Promise<string | null> {
   for (const candidate of GH_EXECUTABLE_CANDIDATES) {
     try {
-      const result = await runCommand(candidate, ['auth', 'token'])
+      // An embedded video is garnish beside the review it sits in, so the lookup
+      // yields to the git and gh work the review itself is waiting on.
+      const result = await runCommand(candidate, ['auth', 'token'], undefined, [], undefined, undefined, 'background')
       const token = result.stdout.toString('utf8').trim()
       if (token !== '') return token
     } catch {

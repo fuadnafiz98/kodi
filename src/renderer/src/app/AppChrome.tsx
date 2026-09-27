@@ -4,6 +4,7 @@ import { formatKeybinding } from '../settings/keybindings'
 import { Titlebar } from './Titlebar'
 import type { NewWorld } from '../review/useReviewWorlds'
 import { WorldStrip } from './WorldStrip'
+import { preloadRepositoryPanel } from '../git/repositoryPanelChunk'
 
 export interface AppChromeProps {
   view: WorkspaceLayoutProps
@@ -66,7 +67,9 @@ export function AppChrome({
       }}
       onSettingsOpen={view.openSettings}
       agentOpen={agentOpen} onAgentToggle={onAgentToggle}
-      terminalOpen={view.terminalOpen} onTerminalToggle={view.toggleTerminal} />
+      terminalOpen={view.terminalOpen} onTerminalToggle={view.toggleTerminal}
+      onSourceControlOpen={gitWorkflow.openSourceControl}
+      onSourceControlPreload={preloadRepositoryPanel} />
     </header>
   )
 }

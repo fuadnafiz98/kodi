@@ -1,7 +1,8 @@
-import { afterEach, expect, test } from 'bun:test'
-import { cleanup, renderHook } from '@testing-library/react'
+import { afterEach, expect, mock, test } from 'bun:test'
+import { cleanup, renderHook, waitFor } from '@testing-library/react'
 
-import type { PullRequestReview } from '../../../shared/contracts'
+import type { LocalReviewProgress, PullRequestReview, RepositoryApi } from '../../../shared/contracts'
+import { reviewItemId } from './reviewItems'
 import { useReviewLoadState } from './useReviewLoadState'
 import { worldViewCache } from './worldViewCache'
 
@@ -80,3 +81,92 @@ test('parsed items are charged on the world cache and reused after a world switc
   expect(result.current.loadState.items).toBe(firstItems)
   expect(result.current.loadState.items[0]).toBe(firstItem)
 })
+
+test('a review rebuilt around the same patch keeps the same load state', () => {
+  const first = review(1, '2026-09-01T00:00:00Z')
+  const paths = ['a.ts']
+  const { result, rerender } = renderHook(
+    ({ repositoryReview }: { repositoryReview: PullRequestReview }) =>
+      useReviewLoadState({
+        pathsKey: 'a.ts',
+        stablePaths: paths,
+        repositoryReview,
+        repositoryChange: null,
+        worldId: 'patch:1'
+      }),
+    { initialProps: { repositoryReview: first } }
+  )
+  const loadState = result.current.loadState
+  // What a checks poll does to the review: a new object, the same patch.
+  rerender({ repositoryReview: { ...first, pullRequest: { ...first.pullRequest, mergeable: 'MERGEABLE' } } })
+  expect(result.current.loadState).toBe(loadState)
+})
+
+const filePatch = (path: string) => `diff --git a/${path} b/${path}
+index 1111111111111111111111111111111111111111..2222222222222222222222222222222222222222 100644
+--- a/${path}
++++ b/${path}
+@@ -1,1 +1,1 @@
+-old
++new
+`
+
+type ProgressListener = (progress: LocalReviewProgress) => void
+
+/**
+ * A repository whose working-tree reply overtakes its own pages, the way
+ * Electron delivers them when the reply and the progress events race: the
+ * reply lands first, the pages after it, then `done`.
+ */
+function racingRepository(pagesBeforeReply: string[], pagesAfterReply: string[]) {
+  const listeners = new Set<ProgressListener>()
+  const getComparison = mock(async () => {
+    throw new Error('a streamed review must not page files one by one')
+  })
+  const emit = (requestId: string, progress: LocalReviewProgress) => {
+    for (const listener of listeners) listener({ ...progress, requestId })
+  }
+  const page = (requestId: string, patch: string) => emit(requestId, {
+    kind: 'files', selector: 'working-tree', patch, files: [], omittedFiles: []
+  })
+  window.repository = {
+    getComparison,
+    onLocalReviewProgress: (listener: ProgressListener) => {
+      listeners.add(listener)
+      return () => listeners.delete(listener)
+    },
+    getWorkingTreePatch: async (_paths: string[], requestId: string) => {
+      for (const patch of pagesBeforeReply) page(requestId, patch)
+      setTimeout(() => {
+        for (const patch of pagesAfterReply) page(requestId, patch)
+        emit(requestId, { kind: 'done', selector: 'working-tree', fileCount: 0 })
+      }, 20)
+      return { patch: '', omittedFiles: [] }
+    }
+  } as unknown as RepositoryApi
+  return { getComparison }
+}
+
+const folderPaths = ['a.ts', 'b.ts', 'c.ts']
+
+for (const [label, before, after] of [
+  ['before any page', [], [filePatch('a.ts'), `${filePatch('b.ts')}${filePatch('c.ts')}`]],
+  ['after the first page', [filePatch('a.ts')], [`${filePatch('b.ts')}${filePatch('c.ts')}`]]
+] as const) {
+  test(`a folder review keeps every streamed page when the reply lands ${label}`, async () => {
+    const { getComparison } = racingRepository([...before], [...after])
+    const { result } = renderHook(() => useReviewLoadState({
+      pathsKey: folderPaths.join('\0'),
+      stablePaths: folderPaths,
+      repositoryReview: null,
+      repositoryChange: null,
+      worldId: 'desk:/repo'
+    }))
+    await waitFor(() => expect(result.current.loadState.loadedPaths.size).toBe(folderPaths.length))
+    expect(result.current.loadState.items.map((item) => item.id)).toEqual(
+      folderPaths.map((path) => reviewItemId(path))
+    )
+    expect(result.current.loadState.paged).toBe(false)
+    expect(getComparison).not.toHaveBeenCalled()
+  })
+}

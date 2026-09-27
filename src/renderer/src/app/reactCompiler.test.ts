@@ -23,7 +23,10 @@ const HOT_COMPONENTS: ReadonlyArray<readonly [string, readonly string[]]> = [
   ['app/RepositoryWorkspace.tsx', ['RepositoryWorkspace']],
   // Split out of AppView.tsx; both are in the chunk that paints first.
   ['app/Titlebar.tsx', ['Titlebar']],
-  ['diff/DiffToolbar.tsx', ['DiffToolbar']]
+  ['diff/DiffToolbar.tsx', ['DiffToolbar']],
+  // Typing a commit message re-renders the composer; staging re-renders the lists.
+  ['git/GitCommitComposer.tsx', ['GitCommitComposer']],
+  ['git/GitChangesTab.tsx', ['GitChangesTab', 'ChangeSection']]
 ]
 
 const SOURCE_DIRECTORY = join(dirname(fileURLToPath(import.meta.url)), '..')

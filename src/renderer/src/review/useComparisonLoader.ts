@@ -27,8 +27,11 @@ export interface ComparisonLoader {
   loading: boolean
   /** Records a comparison the app produced itself, such as a saved edit. */
   save(comparison: FileComparison): void
-  /** Drops cached entries for paths the watcher reported as changed. */
-  invalidate(changedPaths: readonly string[]): void
+  /**
+   * Drops cached entries for paths the watcher reported as changed, or every
+   * entry when the change could not say which (`'all'`).
+   */
+  invalidate(changedPaths: readonly string[] | 'all'): void
   /** Re-reads the open file after the watcher reported it changed. */
   markRevision(revision: number): void
 }
@@ -39,6 +42,10 @@ export interface ComparisonLoader {
  * every time; the watcher's `changedPaths` is precise enough to invalidate by
  * path, and HEAD moving invalidates everything at once.
  */
+// About eight seconds of asking, the longest a tab's session takes to activate.
+const PREMATURE_SESSION_RETRIES = 32
+const PREMATURE_SESSION_RETRY_MS = 250
+
 export function useComparisonLoader({
   snapshot,
   selectedPath,
@@ -54,6 +61,7 @@ export function useComparisonLoader({
   const [loading, setLoading] = useState(false)
   const [revision, setRevision] = useState(0)
   const requestRef = useRef(0)
+  const prematureRetriesRef = useRef(0)
   const lastPathRef = useRef<string | null>(
     initialComparison?.path === selectedPath ? selectedPath : null
   )
@@ -68,8 +76,9 @@ export function useComparisonLoader({
     setComparison(nextComparison)
   }, [cache])
 
-  const invalidate = useCallback((changedPaths: readonly string[]) => {
-    cache.invalidate(changedPaths)
+  const invalidate = useCallback((changedPaths: readonly string[] | 'all') => {
+    if (changedPaths === 'all') cache.clear()
+    else cache.invalidate(changedPaths)
   }, [cache])
 
   // A commit, a branch switch or a checkout replaces the old side of every file at
@@ -104,6 +113,7 @@ export function useComparisonLoader({
     }
     const pathChanged = lastPathRef.current !== selectedPath
     lastPathRef.current = selectedPath
+    if (pathChanged) prematureRetriesRef.current = 0
     const cached = cache.get(selectedPath)
     if (cached != null) {
       setComparison(cached)
@@ -122,12 +132,24 @@ export function useComparisonLoader({
     void requireRepositoryApi()
       .getComparison(selectedPath)
       .then((nextComparison) => {
+        prematureRetriesRef.current = 0
         cache.set(nextComparison)
         if (requestRef.current === requestId) setComparison(nextComparison)
       })
       .catch((comparisonError: unknown) => {
         if (requestRef.current !== requestId) return
-        if (isPrematureSessionError(comparisonError)) return
+        if (isPrematureSessionError(comparisonError)) {
+          // The session behind this tab is still activating (a tab switch, a
+          // restore). Dropping the error left the file selected over "Select a
+          // file in the explorer" for good; ask again once it can answer.
+          if (prematureRetriesRef.current < PREMATURE_SESSION_RETRIES) {
+            prematureRetriesRef.current += 1
+            window.setTimeout(() => {
+              if (requestRef.current === requestId) setRevision((current) => current + 1)
+            }, PREMATURE_SESSION_RETRY_MS)
+          }
+          return
+        }
         onError(getErrorMessage(comparisonError))
       })
       .finally(() => {

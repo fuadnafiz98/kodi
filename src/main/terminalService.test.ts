@@ -222,4 +222,21 @@ describe('TerminalService', () => {
     const payload = owner.events.at(-1)?.payload as TerminalDataEvent
     expect(payload.data).toHaveLength(512 * 1_024)
   })
+
+  test('replays exactly the capped tail when the hidden buffer is between trims', async () => {
+    const pty = fakePty()
+    const owner = fakeOwner(1)
+    const service = new TerminalService(() => pty)
+    const session = await service.create(owner, process.cwd(), 80, 24, '0.1.0')
+    service.ready(owner.id, session.id)
+    service.setVisible(owner.id, session.id, false)
+
+    // 700 KB: over the cap, under the point where a hidden read trims.
+    for (let index = 0; index < 7; index += 1) pty.emitData(String(index).repeat(100_000))
+    service.setVisible(owner.id, session.id, true)
+
+    const payload = owner.events.at(-1)?.payload as TerminalDataEvent
+    expect(payload.data).toHaveLength(512 * 1_024)
+    expect(payload.data.endsWith('6'.repeat(100_000))).toBe(true)
+  })
 })

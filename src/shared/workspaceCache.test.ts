@@ -20,6 +20,7 @@ import {
   parseWorkspaceCacheStore,
   parseWorkspaceUi,
   rememberWorkspaceCacheEntry,
+  withLastWorkspaceRoot,
   workspaceCacheForRoot
 } from './workspaceCache.js'
 
@@ -263,5 +264,25 @@ describe('workspace cache store', () => {
     )
     const onDisk = JSON.stringify(store)
     expect(parseWorkspaceCacheStore(JSON.parse(onDisk))).toEqual(store)
+  })
+
+  // Closing the last folder must open the dashboard next launch, not the folder
+  // that was just closed — which the first-entry fallback used to bring back.
+  it('keeps a closed folder closed across a restart while keeping its cache', () => {
+    const store = rememberWorkspaceCacheEntry(rememberWorkspaceCacheEntry(EMPTY_WORKSPACE_CACHE_STORE, cache), other)
+    const closed = withLastWorkspaceRoot(store, null)
+
+    expect(closed.lastRoot).toBeNull()
+    expect(closed.entries).toEqual(store.entries)
+    const restarted = parseWorkspaceCacheStore(JSON.parse(JSON.stringify(closed)))
+    expect(restarted.lastRoot).toBeNull()
+    expect(lastWorkspaceCache(restarted)).toBeNull()
+  })
+
+  it('points the next launch at the tab in front, or at nothing without a cache for it', () => {
+    const store = rememberWorkspaceCacheEntry(rememberWorkspaceCacheEntry(EMPTY_WORKSPACE_CACHE_STORE, cache), other)
+    expect(withLastWorkspaceRoot(store, cache.lastRoot).lastRoot).toBe(cache.lastRoot)
+    expect(withLastWorkspaceRoot(store, '/never/cached').lastRoot).toBeNull()
+    expect(withLastWorkspaceRoot(store, other.lastRoot)).toBe(store)
   })
 })

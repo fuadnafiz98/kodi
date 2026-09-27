@@ -2,6 +2,7 @@
 node_modules/
 
 # Build output and caches
+scripts/e2e/results/
 out/
 dist/
 release/

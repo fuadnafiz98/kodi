@@ -11,6 +11,15 @@ async function directory(): Promise<string> {
 }
 
 describe('writeFileAtomic', () => {
+  it('leaves the file and no temp behind when the write was superseded', async () => {
+    const base = await directory()
+    const path = join(base, 'state.json')
+    await writeFile(path, '{"generation":1}', 'utf8')
+    await writeFileAtomic(path, '{"generation":2}', () => false)
+    expect(await readFile(path, 'utf8')).toBe('{"generation":1}')
+    expect(await readdir(base)).toEqual(['state.json'])
+  })
+
   it('replaces the previous contents', async () => {
     const base = await directory()
     const path = join(base, 'state.json')

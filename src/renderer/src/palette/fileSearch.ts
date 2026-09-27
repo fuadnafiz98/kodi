@@ -115,6 +115,9 @@ let indexBuilds = 0
 export function createFileSearchIndex(paths: readonly string[]): IndexedPath[] {
   if (paths === cachedIndexInput) return cachedIndex
   indexBuilds += 1
+  // The narrowed match set points into the index being replaced; kept, it held
+  // that whole index alive until the next keystroke.
+  lastMatches = null
   const indexed: IndexedPath[] = []
   const directories = new Set<string>()
   for (const path of paths) {
@@ -213,6 +216,52 @@ function priorityFilePaths(
   return ordered.slice(0, limit).map((entry) => ({ path: entry.path, kind: entry.kind }))
 }
 
+// A watcher tick rebuilds the status list even when nothing in it changed, and
+// the ranking cache is keyed on the set's identity: a new set per tick ranked
+// the whole index again with the palette open, for the same rows. One slot is
+// enough for the one palette there is.
+let lastPriorityPaths: ReadonlySet<string> | undefined
+
+/** The changed paths as a set, the same instance while their contents are unchanged. */
+export function priorityPathSet(paths: readonly string[]): ReadonlySet<string> | undefined {
+  if (paths.length === 0) return undefined
+  const next = new Set(paths)
+  const previous = lastPriorityPaths
+  if (previous != null && previous.size === next.size) {
+    let same = true
+    for (const path of next) {
+      if (previous.has(path)) continue
+      same = false
+      break
+    }
+    if (same) return previous
+  }
+  lastPriorityPaths = next
+  return next
+}
+
+// Every entry a query that extends this one could match. Narrowing is sound in
+// both scoring paths: a string that contains "serv" contains "ser", and one that
+// has "s…e…r…v" as a subsequence has "s…e…r" too. Keeping the whole match set,
+// not just the rows shown, is what lets the next keystroke score hundreds of
+// entries instead of the whole index.
+interface MatchSet {
+  paths: readonly IndexedPath[]
+  normalizedQuery: string
+  matches: readonly IndexedPath[]
+}
+
+let lastMatches: MatchSet | null = null
+let entriesScored = 0
+
+/**
+ * How many index entries have been scored. The count is the budget a keystroke
+ * spends, and unlike a wall clock it does not depend on the machine.
+ */
+export function fileSearchEntriesScored(): number {
+  return entriesScored
+}
+
 interface RankingCacheEntry extends FileRankingOptions {
   paths: readonly IndexedPath[]
   query: string
@@ -264,16 +313,26 @@ function computeRanking(
   const normalizedQuery = query.trim().toLowerCase()
   if (normalizedQuery === '') return priorityFilePaths(paths, limit, priorityPaths, recentPaths)
 
+  const previous = lastMatches
+  const candidates = previous != null
+    && previous.paths === paths
+    && normalizedQuery.startsWith(previous.normalizedQuery)
+    ? previous.matches
+    : paths
+  entriesScored += candidates.length
+  const matches: IndexedPath[] = []
   const scored: ScoredPath[] = []
-  for (const entry of paths) {
+  for (const entry of candidates) {
     const score = fuzzyPathScore(entry, normalizedQuery)
     if (score == null) continue
+    matches.push(entry)
     addScoredPath(scored, {
       entry,
       score: entry.kind === 'dir' ? score + DIRECTORY_SCORE_PENALTY : score,
       priority: priorityPaths?.has(entry.path) === true
     }, limit)
   }
+  lastMatches = { paths, normalizedQuery, matches }
   return scored
     .sort(compareScoredPaths)
     .map((result) => ({ path: result.entry.path, kind: result.entry.kind }))

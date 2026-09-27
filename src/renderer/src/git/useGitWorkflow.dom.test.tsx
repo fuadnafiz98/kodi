@@ -1,11 +1,16 @@
 import { afterEach, expect, mock, test } from 'bun:test'
 import { act, cleanup, renderHook, waitFor } from '@testing-library/react'
+import { useState } from 'react'
 
 import {
   COMMAND_ABORTED_MESSAGE,
+  type GitIntegrationSnapshot,
+  type LocalBranchReview,
+  type LocalReviewProgress,
   type PullRequestReview,
   type PullRequestReviewProgress,
   type RepositoryApi,
+  type RepositoryPullRequests,
   type RepositorySnapshot
 } from '../../../shared/contracts'
 import { useGitWorkflow } from './useGitWorkflow'
@@ -481,4 +486,299 @@ test('a superseded local review does not raise a cancelled error banner', async 
 
   expect(errors.filter((message) => message != null)).toEqual([])
   expect(result.current.worlds.filter((world) => world.source === 'patch')).toHaveLength(0)
+})
+
+// Electron does not order an invoke's reply against the progress events sent
+// before it. A streamed reply carries no files, so a load that trusted it opened
+// an empty pull request, or kept a local review at the pages that had arrived.
+test('a pull request whose reply overtakes its metadata and pages still opens whole', async () => {
+  let progressListener: ((progress: PullRequestReviewProgress) => void) | null = null
+  const finalReview = review(6)
+  window.repository = {
+    getPullRequestReview: async (_root: string, _selector: number | string, requestId: string) => {
+      setTimeout(() => {
+        progressListener?.({ kind: 'metadata', selector: '6', review: { ...finalReview, files: [] }, root: '/repo', requestId })
+        progressListener?.({ kind: 'files', selector: '6', files: finalReview.files, patch: '', omittedFiles: [], root: '/repo', requestId })
+        progressListener?.({ kind: 'done', selector: '6', fileCount: 1, root: '/repo', requestId })
+      }, 20)
+      return { ...finalReview, files: [], patch: '', omittedFiles: [] }
+    },
+    activateRepository: async () => repositorySnapshot,
+    releaseRepository: async () => {},
+    onPullRequestReviewProgress: (listener: (progress: PullRequestReviewProgress) => void) => {
+      progressListener = listener
+      return () => { progressListener = null }
+    }
+  } as unknown as RepositoryApi
+  const { result } = renderHook(() => useGitWorkflow(workflowOptions()))
+
+  await act(() => result.current.openPullRequestReview(6))
+
+  const patchWorld = result.current.worlds.find((world) => world.source === 'patch')
+  expect(patchWorld?.source === 'patch' ? patchWorld.review.files.map((file) => file.path) : []).toEqual(['file-6.ts'])
+  expect(patchWorld?.source === 'patch' ? patchWorld.loadStatus : null).toBe('ready')
+})
+
+test('a local review keeps the pages that land after its reply', async () => {
+  let progressListener: ((progress: LocalReviewProgress) => void) | null = null
+  const localReview = (files: string[]): LocalBranchReview => ({
+    kind: 'local',
+    id: 'commit:abc1234',
+    title: 'Commit abc1234',
+    baseRefName: 'abc1234^',
+    headRefName: 'abc1234',
+    baseOid: 'a'.repeat(40),
+    headOid: 'c'.repeat(40),
+    files: files.map((path) => ({ path, additions: 1, deletions: 0 })),
+    patch: '',
+    omittedFiles: [],
+    expectedFileCount: 3
+  })
+  window.repository = {
+    getCommitReview: async (_oid: string, requestId: string) => {
+      progressListener?.({ kind: 'metadata', review: localReview(['one.ts']), requestId })
+      setTimeout(() => {
+        progressListener?.({
+          kind: 'files', selector: 'commit:abc1234', patch: '',
+          files: [{ path: 'two.ts', additions: 1, deletions: 0 }, { path: 'three.ts', additions: 1, deletions: 0 }],
+          omittedFiles: [], requestId
+        })
+        progressListener?.({ kind: 'done', selector: 'commit:abc1234', fileCount: 3, requestId })
+      }, 20)
+      return localReview(['one.ts', 'two.ts', 'three.ts'])
+    },
+    onLocalReviewProgress: (listener: (progress: LocalReviewProgress) => void) => {
+      progressListener = listener
+      return () => { progressListener = null }
+    }
+  } as unknown as RepositoryApi
+  const { result } = renderHook(() => useGitWorkflow(workflowOptions()))
+
+  await act(() => result.current.reviewCommit('abc1234'))
+
+  const patchWorld = result.current.worlds.find((world) => world.source === 'patch')
+  expect(patchWorld?.source === 'patch' ? patchWorld.review.files.map((file) => file.path) : [])
+    .toEqual(['one.ts', 'two.ts', 'three.ts'])
+})
+
+const integrationSnapshot: GitIntegrationSnapshot = {
+  branches: [{ name: 'main', current: true, upstream: 'origin/main' }],
+  remoteBranches: [],
+  remotes: [],
+  commits: [],
+  defaultBranch: 'main',
+  ahead: 0,
+  behind: 0,
+  pullRequests: [],
+  githubAvailable: true,
+  githubMessage: null
+}
+
+// The hook reads its snapshot back from props, so the tests below route
+// `applySnapshot` into state the way App does.
+function useLiveWorkflow(overrides: Partial<ReturnType<typeof workflowOptions>> = {}) {
+  const [snapshot, setSnapshot] = useState<RepositorySnapshot>(repositorySnapshot)
+  return useGitWorkflow({ ...workflowOptions(), snapshot, applySnapshot: setSnapshot, ...overrides })
+}
+
+test('a stage clicked while a commit is running waits for the commit', async () => {
+  const commit = deferred<RepositorySnapshot>()
+  const calls: string[] = []
+  window.repository = {
+    commitChanges: (root: string) => {
+      calls.push(`commit:${root}`)
+      return commit.promise
+    },
+    stagePaths: async (root: string, paths: readonly string[]) => {
+      calls.push(`stage:${root}:${paths.join(',')}`)
+      return repositorySnapshot
+    },
+    onPullRequestReviewProgress: () => () => {}
+  } as unknown as RepositoryApi
+  const { result } = renderHook(() => useGitWorkflow(workflowOptions()))
+
+  let committing!: Promise<boolean>
+  let staging!: Promise<boolean>
+  act(() => { committing = result.current.commitChanges({ message: 'Ship it' }) })
+  await waitFor(() => expect(calls).toEqual(['commit:/repo']))
+  act(() => { staging = result.current.stagePaths(['late.ts']) })
+  await new Promise((settle) => setTimeout(settle, 10))
+  expect(calls).toEqual(['commit:/repo'])
+
+  await act(async () => {
+    commit.resolve({ ...repositorySnapshot, head: 'after-commit' })
+    await committing
+  })
+  await act(() => staging)
+  expect(calls).toEqual(['commit:/repo', 'stage:/repo:late.ts'])
+})
+
+test('a discard confirmed after a tab switch acts on the repository it asked about', async () => {
+  const answer = deferred<boolean>()
+  const applied: string[] = []
+  const discardPaths = mock(async (root: string) => ({ ...repositorySnapshot, root }))
+  window.repository = { discardPaths, onPullRequestReviewProgress: () => () => {} } as unknown as RepositoryApi
+  const other: RepositorySnapshot = { ...repositorySnapshot, root: '/other', name: 'other' }
+  const { result, rerender } = renderHook(({ snapshot }) => useGitWorkflow({
+    ...workflowOptions(),
+    snapshot,
+    applySnapshot: (next) => applied.push(next.root),
+    confirm: () => answer.promise
+  }), { initialProps: { snapshot: repositorySnapshot } })
+
+  let discarding!: Promise<boolean>
+  act(() => { discarding = result.current.discardPaths(['desk.ts'], 0) })
+  rerender({ snapshot: other })
+  await act(async () => {
+    answer.resolve(true)
+    await discarding
+  })
+
+  expect(discardPaths).toHaveBeenCalledWith('/repo', ['desk.ts'])
+  // Painting /repo's answer would drag the reader back out of /other.
+  expect(applied).toEqual([])
+})
+
+test('a pull request list that fails to load reads as GitHub unavailable, not as empty', async () => {
+  window.repository = {
+    getGitIntegration: async () => integrationSnapshot,
+    getRepositoryPullRequests: async () => { throw new Error('gh: not logged in') },
+    getPullRequestInbox: async () => ({ available: true, message: null, sections: [] }),
+    onPullRequestReviewProgress: () => () => {}
+  } as unknown as RepositoryApi
+  const { result } = renderHook(() => useGitWorkflow(workflowOptions()))
+
+  await act(() => result.current.loadIntegration(true))
+
+  expect(result.current.integration?.githubAvailable).toBe(false)
+  expect(result.current.integration?.githubMessage).toBe('gh: not logged in')
+})
+
+test('a fetch keeps the GitHub availability it had and does not reload local git twice', async () => {
+  const getGitIntegration = mock(async () => integrationSnapshot)
+  let pullRequestAnswer: Promise<RepositoryPullRequests> = Promise.resolve({
+    pullRequests: [], githubAvailable: false, githubMessage: 'offline'
+  })
+  window.repository = {
+    getGitIntegration,
+    getRepositoryPullRequests: () => pullRequestAnswer,
+    fetchRemote: async (root: string) => root === '/repo' ? integrationSnapshot : Promise.reject(new Error(root)),
+    getPullRequestInbox: async () => ({ available: true, message: null, sections: [] }),
+    onPullRequestReviewProgress: () => () => {}
+  } as unknown as RepositoryApi
+  const { result } = renderHook(() => useGitWorkflow(workflowOptions()))
+  await act(() => result.current.loadIntegration(true))
+  expect(getGitIntegration).toHaveBeenCalledTimes(1)
+
+  const later = deferred<RepositoryPullRequests>()
+  pullRequestAnswer = later.promise
+  await act(() => result.current.fetchRemote())
+  // Local git answered with `githubAvailable: true`; that is a placeholder.
+  expect(result.current.integration?.githubAvailable).toBe(false)
+  await act(async () => {
+    later.resolve({ pullRequests: [], githubAvailable: true, githubMessage: null })
+    await later.promise
+  })
+  expect(result.current.integration?.githubAvailable).toBe(true)
+  expect(getGitIntegration).toHaveBeenCalledTimes(1)
+})
+
+test('commit and push records the head the commit made, so the panel is not stale after', async () => {
+  const getGitIntegration = mock(async () => integrationSnapshot)
+  const pushCurrentBranch = mock(async (_root: string) => integrationSnapshot)
+  window.repository = {
+    getGitIntegration,
+    getRepositoryPullRequests: async () => ({ pullRequests: [], githubAvailable: true, githubMessage: null }),
+    getPullRequestInbox: async () => ({ available: true, message: null, sections: [] }),
+    commitChanges: async () => ({ ...repositorySnapshot, head: 'after-commit' }),
+    pushCurrentBranch,
+    onPullRequestReviewProgress: () => () => {}
+  } as unknown as RepositoryApi
+  const { result } = renderHook(() => useLiveWorkflow())
+  await act(() => result.current.loadIntegration(true))
+
+  let committed = false
+  await act(async () => { committed = await result.current.commitChanges({ message: 'Ship it', push: true }) })
+
+  expect(committed).toBe(true)
+  expect(pushCurrentBranch).toHaveBeenCalledWith('/repo')
+  await act(() => result.current.loadIntegration())
+  expect(getGitIntegration).toHaveBeenCalledTimes(1)
+})
+
+// A stage takes no `actionKey`, so Switch, Pull and Checkout stay enabled while
+// its `git add` runs; main holds no lock, and the two raced into `index.lock`.
+test('a branch switch, pull or checkout clicked while a stage is running waits for it', async () => {
+  const stage = deferred<RepositorySnapshot>()
+  const calls: string[] = []
+  window.repository = {
+    stagePaths: (root: string) => {
+      calls.push(`stage:${root}`)
+      return stage.promise
+    },
+    switchBranch: async (root: string, name: string) => {
+      calls.push(`switch:${root}:${name}`)
+      return repositorySnapshot
+    },
+    pullCurrentBranch: async (root: string) => {
+      calls.push(`pull:${root}`)
+      return repositorySnapshot
+    },
+    checkoutPullRequest: async (root: string, number: number) => {
+      calls.push(`checkout:${root}:${number}`)
+      return repositorySnapshot
+    },
+    getGitIntegration: async () => integrationSnapshot,
+    getRepositoryPullRequests: async () => ({ pullRequests: [], githubAvailable: true, githubMessage: null }),
+    getPullRequestInbox: async () => ({ available: true, message: null, sections: [] }),
+    onPullRequestReviewProgress: () => () => {}
+  } as unknown as RepositoryApi
+  const { result } = renderHook(() => useGitWorkflow(workflowOptions()))
+
+  let staging!: Promise<boolean>
+  let switching!: Promise<void>
+  let pulling!: Promise<void>
+  let checkingOut!: Promise<void>
+  act(() => { staging = result.current.stagePaths(['desk.ts']) })
+  await waitFor(() => expect(calls).toEqual(['stage:/repo']))
+  act(() => {
+    switching = result.current.switchBranch('feature')
+    pulling = result.current.pullCurrentBranch()
+    checkingOut = result.current.checkoutPullRequest(review(4).pullRequest)
+  })
+  await new Promise((settle) => setTimeout(settle, 10))
+  expect(calls).toEqual(['stage:/repo'])
+
+  await act(async () => {
+    stage.resolve(repositorySnapshot)
+    await staging
+  })
+  await act(() => Promise.all([switching, pulling, checkingOut]))
+  expect(calls).toEqual(['stage:/repo', 'switch:/repo:feature', 'pull:/repo', 'checkout:/repo:4'])
+})
+
+test('a cancelled pull request list keeps the answer the panel already had', async () => {
+  const listed = review(7).pullRequest
+  let answer: () => Promise<RepositoryPullRequests> = async () => ({
+    pullRequests: [listed], githubAvailable: true, githubMessage: null
+  })
+  window.repository = {
+    getGitIntegration: async () => integrationSnapshot,
+    getRepositoryPullRequests: () => answer(),
+    getPullRequestInbox: async () => ({ available: true, message: null, sections: [] }),
+    onPullRequestReviewProgress: () => () => {}
+  } as unknown as RepositoryApi
+  const { result } = renderHook(() => useGitWorkflow(workflowOptions()))
+  await act(() => result.current.loadIntegration(true))
+  expect(result.current.integration?.pullRequests).toEqual([listed])
+
+  // How Electron hands a rejected invoke to the renderer.
+  answer = async () => {
+    throw new Error(`Error invoking remote method 'repository:get-pull-requests': Error: ${COMMAND_ABORTED_MESSAGE}`)
+  }
+  await act(() => result.current.loadIntegration(true))
+
+  expect(result.current.integration?.githubAvailable).toBe(true)
+  expect(result.current.integration?.githubMessage).toBeNull()
+  expect(result.current.integration?.pullRequests).toEqual([listed])
 })
