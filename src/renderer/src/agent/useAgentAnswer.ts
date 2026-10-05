@@ -12,13 +12,23 @@ import type {
   AgentUsageUpdate
 } from '../../../shared/contracts'
 import { getErrorMessage } from '../explorer/repositoryApi'
-import {
-  appendStreamingMarkdown,
-  EMPTY_STREAMING_MARKDOWN,
-  type MarkdownBlock,
-  type StreamingMarkdown
-} from '../markdown/markdown'
+import type { MarkdownBlock, StreamingMarkdown } from '../markdown/markdown'
 import { markAgentStreamEvent } from '../review/reviewMetrics'
+import type { AgentChat } from './agentChats'
+
+// The chat list is its own chunk, shared with the panel, so the startup path
+// pays nothing for it until a first answer lands.
+const loadChats = (): Promise<typeof import('./agentChats')> => import('./agentChats')
+// The markdown parser only runs on an answer, so it loads with the first
+// question (which waits for it) rather than on the startup path.
+let markdown: typeof import('../markdown/markdown') | null = null
+export async function loadAgentMarkdown(): Promise<void> {
+  markdown ??= await import('../markdown/markdown')
+}
+
+// Set once a chat has been left mid-answer, so no stray event loads the chat
+// list before anything could be running there.
+let hasBackgroundRuns = false
 
 const MAX_ANSWER_LENGTH = 200_000
 
@@ -27,8 +37,11 @@ export interface AgentAnswerState {
   streaming: boolean
   error: string | null
   sessionId: string | null
+  /** The chat this conversation is saved as; '' until its first question. */
+  chatId: string
   /** Echoed above the answer so a long stream still shows what was asked. */
   question: string
+  references: readonly AgentReference[]
   /** What the agent did on the way to the answer: tool calls, thinking. */
   activity: readonly AgentActivityUpdate[]
   approvals: readonly AgentApprovalRequest[]
@@ -62,12 +75,26 @@ export interface AgentAnswerApi extends AgentAnswerState {
   }): void
   respondToApproval(requestId: string, decision: AgentApprovalDecision): void
   cancel(): void
+  /** Starts a new chat; the current one stays in the chat list. */
   reset(): void
+  /** Shows a saved chat again. Refused while an answer is streaming. */
+  openChat(id: string): void
+  deleteChat(id: string): void
+}
+
+/** A selection a question was asked about, shown on the question it went with. */
+export interface AgentReference {
+  path: string
+  startLine: number
+  endLine: number
+  side: 'additions' | 'deletions'
 }
 
 export interface AgentTurnRecord {
   id: string
   question: string
+  /** Absent on turns saved before references were kept. */
+  references?: readonly AgentReference[]
   answer: string
   blocks: MarkdownBlock[]
   activity: readonly AgentActivityUpdate[]
@@ -98,7 +125,9 @@ export const EMPTY_ANSWER: AgentAnswerState = {
   streaming: false,
   error: null,
   sessionId: null,
+  chatId: '',
   question: '',
+  references: [],
   activity: [],
   approvals: [],
   sessionKey: null,
@@ -110,7 +139,7 @@ export const EMPTY_ANSWER: AgentAnswerState = {
   accessMode: null,
   startedAt: null,
   completedAt: null,
-  parsed: EMPTY_STREAMING_MARKDOWN
+  parsed: { source: '', settledLength: 0, settled: [], settledEnds: [], blocks: [] }
 }
 
 function archiveTurn(state: AgentAnswerState): AgentTurnRecord | null {
@@ -118,6 +147,7 @@ function archiveTurn(state: AgentAnswerState): AgentTurnRecord | null {
   return {
     id: `${state.startedAt ?? Date.now()}-${state.question.slice(0, 24)}`,
     question: state.question,
+    references: state.references,
     answer: state.answer,
     blocks: state.parsed.blocks,
     activity: state.activity,
@@ -146,7 +176,7 @@ function trimmedActivity(item: AgentActivityUpdate): AgentActivityUpdate {
 
 // Returns the same record when nothing needed trimming, so a turn that is
 // already compact keeps its identity and its memoized row does not re-render.
-function compactTurn(turn: AgentTurnRecord): AgentTurnRecord {
+export function compactTurn(turn: AgentTurnRecord): AgentTurnRecord {
   let changed = false
   const activity = turn.activity.map((item) => {
     const trimmed = trimmedActivity(item)
@@ -166,8 +196,26 @@ export function appendTurnToHistory(
 ): readonly AgentTurnRecord[] {
   const next = [...history, turn].slice(-MAX_HISTORY_TURNS)
   const firstFull = next.length - FULL_HISTORY_TURNS
-  for (let index = 0; index < firstFull; index += 1) next[index] = compactTurn(next[index]!)
-  return next
+  return next.map((entry, index) => index < firstFull ? compactTurn(entry) : entry)
+}
+
+/** The conversation as a saved chat: every turn so far, the current one last. */
+export function chatFromState(state: AgentAnswerState): AgentChat | null {
+  if (state.chatId === '') return null
+  const current = archiveTurn(state)
+  const turns = current == null ? state.history : [...state.history, current]
+  const first = turns[0]
+  const last = turns.at(-1)
+  if (first == null || last == null) return null
+  const question = first.question.trim().split('\n')[0]?.trim() ?? ''
+  return {
+    id: state.chatId,
+    title: question.length > 80 ? `${question.slice(0, 79)}…` : question || 'Untitled chat',
+    updatedAt: last.completedAt ?? last.startedAt ?? 0,
+    turns,
+    sessionId: state.sessionId,
+    sessionKey: state.sessionKey
+  }
 }
 
 // Folded outside the component so a whole frame's worth of events costs one
@@ -180,7 +228,8 @@ export function reduceAgentEvent(current: AgentAnswerState, event: AgentStreamEv
     // A long answer is truncated from the front so the panel cannot grow
     // without bound during a very long stream; the cut lands on a settled block
     // boundary so the parse stays incremental afterwards.
-    const parsed = appendStreamingMarkdown(current.parsed, event.text ?? '', MAX_ANSWER_LENGTH)
+    if (markdown == null) return current
+    const parsed = markdown.appendStreamingMarkdown(current.parsed, event.text ?? '', MAX_ANSWER_LENGTH)
     return { ...current, answer: parsed.source, parsed }
   }
   if (event.kind === 'activity') {
@@ -227,6 +276,16 @@ export function useAgentAnswer(): AgentAnswerApi {
   const requestIdRef = useRef<string | null>(null)
   const queueRef = useRef<AgentStreamEvent[]>([])
   const frameRef = useRef(0)
+  const stateRef = useRef(state)
+
+  // A settled conversation is saved to the chat list as it stands, so a new
+  // chat, a reload or a restart never loses it.
+  useEffect(() => {
+    stateRef.current = state
+    if (state.streaming) return
+    const chat = chatFromState(state)
+    if (chat != null) void loadChats().then((chats) => chats.saveChat(chat))
+  }, [state])
 
   useEffect(() => {
     const repository = window.repository
@@ -242,7 +301,11 @@ export function useAgentAnswer(): AgentAnswerApi {
       setState((current) => reduceAgentEvents(current, events))
     }
     const unsubscribe = repository.onAgentEvent((event) => {
-      if (event.id !== requestIdRef.current) return
+      if (event.id !== requestIdRef.current) {
+        // A chat left while it was answering keeps answering in the chat list.
+        if (hasBackgroundRuns) void loadChats().then((chats) => chats.backgroundEvent(event))
+        return
+      }
       markAgentStreamEvent()
       queueRef.current.push(event)
       // A terminal state or a permission prompt is what the user is waiting on,
@@ -263,7 +326,22 @@ export function useAgentAnswer(): AgentAnswerApi {
       const runningId = requestIdRef.current
       requestIdRef.current = null
       if (runningId != null) void window.repository?.cancelAgent(runningId)
+      if (hasBackgroundRuns) void loadChats().then((chats) => chats.cancelBackgroundRuns())
     }
+  }, [])
+
+  // The chat on screen, with any events that have not reached it yet folded
+  // in, handed to the chat list to finish in the background.
+  const sendToBackground = useCallback(() => {
+    const requestId = requestIdRef.current
+    if (requestId == null) return
+    requestIdRef.current = null
+    if (frameRef.current !== 0) window.cancelAnimationFrame(frameRef.current)
+    frameRef.current = 0
+    const running = reduceAgentEvents(stateRef.current, queueRef.current)
+    queueRef.current = []
+    hasBackgroundRuns = true
+    void loadChats().then((chats) => chats.runInBackground(running, requestId))
   }, [])
 
   const ask = useCallback((options: {
@@ -288,11 +366,13 @@ export function useAgentAnswer(): AgentAnswerApi {
       const archived = archiveTurn(current)
       return {
         ...EMPTY_ANSWER,
+        chatId: current.chatId === '' ? crypto.randomUUID() : current.chatId,
         history: archived == null ? current.history : appendTurnToHistory(current.history, archived),
         streaming: true,
         sessionId: resumeSessionId,
         sessionKey,
         question: options.question ?? options.prompt,
+        references: options.selections.map(({ path, startLine, endLine, side }) => ({ path, startLine, endLine, side })),
         provider: options.provider,
         model: options.model,
         effort: options.effort,
@@ -300,19 +380,20 @@ export function useAgentAnswer(): AgentAnswerApi {
         startedAt: Date.now()
       }
     })
-    void repository
-      .askAgent({
-        id,
-        provider: options.provider,
-        model: options.model,
-        effort: options.effort,
-        accessMode: options.accessMode,
-        prompt: options.prompt,
-        context: options.context,
-        subject: options.subject,
-        selections: options.selections,
-        ...(resumeSessionId == null ? {} : { resumeSessionId })
-      })
+    const send = (): Promise<void> => repository.askAgent({
+      id,
+      provider: options.provider,
+      model: options.model,
+      effort: options.effort,
+      accessMode: options.accessMode,
+      prompt: options.prompt,
+      context: options.context,
+      subject: options.subject,
+      selections: options.selections,
+      ...(resumeSessionId == null ? {} : { resumeSessionId })
+    })
+    // Answer events are parsed as they land, so the first question waits for the parser.
+    void (markdown == null ? loadAgentMarkdown().then(send) : send())
       .catch((error: unknown) => {
         if (requestIdRef.current !== id) return
         requestIdRef.current = null
@@ -356,12 +437,47 @@ export function useAgentAnswer(): AgentAnswerApi {
     }))
   }, [])
 
+  // A new chat does not stop the one being answered: it goes on in the chat
+  // list and is there, finished or still going, when it is opened again.
   const reset = useCallback(() => {
-    requestIdRef.current = null
+    sendToBackground()
     setState(EMPTY_ANSWER)
+  }, [sendToBackground])
+
+  const openChat = useCallback((id: string) => {
+    if (stateRef.current.chatId === id) return
+    sendToBackground()
+    void loadChats().then((chats) => {
+      const running = chats.takeBackgroundRun(id)
+      if (running != null) {
+        requestIdRef.current = running.requestId
+        setState(running.state)
+        return
+      }
+      const chat = chats.findChat(id)
+      if (chat == null) return
+      setState({
+        ...EMPTY_ANSWER,
+        chatId: chat.id,
+        history: chat.turns,
+        sessionId: chat.sessionId,
+        sessionKey: chat.sessionKey
+      })
+    })
+  }, [sendToBackground])
+
+  const deleteChat = useCallback((id: string) => {
+    if (stateRef.current.chatId === id) {
+      // Deleted, not left: its answer has nowhere to go, so it stops.
+      const runningId = requestIdRef.current
+      requestIdRef.current = null
+      if (runningId != null) void window.repository?.cancelAgent(runningId)
+      setState(EMPTY_ANSWER)
+    }
+    void loadChats().then((chats) => chats.removeChat(id))
   }, [])
 
-  return { ...state, blocks: state.parsed.blocks, ask, respondToApproval, cancel, reset }
+  return { ...state, blocks: state.parsed.blocks, ask, respondToApproval, cancel, reset, openChat, deleteChat }
 }
 
 function appendBounded(current: string | undefined, addition: string | undefined, limit: number): string {

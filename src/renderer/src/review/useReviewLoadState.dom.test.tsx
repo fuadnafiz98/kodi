@@ -170,3 +170,46 @@ for (const [label, before, after] of [
     expect(getComparison).not.toHaveBeenCalled()
   })
 }
+
+test('a reload cut short by a newer change still lands with the next one', async () => {
+  const versions: Record<string, string> = { 'a.ts': 'v1', 'b.ts': 'v1' }
+  let slowNextPatch = false
+  const changePatch = (path: string) => `diff --git a/${path} b/${path}
+index 1111111..${versions[path] === 'v1' ? '2222222' : '3333333'} 100644
+--- a/${path}
++++ b/${path}
+@@ -1,1 +1,1 @@
+-old
++${path} ${versions[path]}
+`
+  window.repository = {
+    getWorkingTreePatch: async (paths: string[]) => {
+      if (slowNextPatch) {
+        slowNextPatch = false
+        await new Promise((resolve) => setTimeout(resolve, 120))
+      }
+      return { patch: paths.map(changePatch).join(''), omittedFiles: [] }
+    }
+  } as unknown as RepositoryApi
+  const paths = ['a.ts', 'b.ts']
+  type Props = { repositoryChange: Parameters<typeof useReviewLoadState>[0]['repositoryChange'] }
+  const { result, rerender } = renderHook(({ repositoryChange }: Props) => useReviewLoadState({
+    pathsKey: paths.join('\0'), stablePaths: paths, repositoryReview: null, repositoryChange, worldId: null, root: '/repo'
+  }), { initialProps: { repositoryChange: null } as Props })
+  await waitFor(() => expect(result.current.loadState.items).toHaveLength(2))
+  const shown = (path: string): string => {
+    const item = result.current.loadState.items.find((candidate) => candidate.id === reviewItemId(path))
+    return item?.type === 'diff' ? item.fileDiff.additionLines.join('') : ''
+  }
+
+  // a.ts's reload is still waiting for its patch when b.ts changes.
+  versions['a.ts'] = 'v2'
+  slowNextPatch = true
+  rerender({ repositoryChange: { changedPaths: ['a.ts'], revision: 1 } as unknown as Props['repositoryChange'] })
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  versions['b.ts'] = 'v2'
+  rerender({ repositoryChange: { changedPaths: ['b.ts'], revision: 2 } as unknown as Props['repositoryChange'] })
+
+  await waitFor(() => expect(shown('b.ts')).toContain('b.ts v2'))
+  expect(shown('a.ts')).toContain('a.ts v2')
+})

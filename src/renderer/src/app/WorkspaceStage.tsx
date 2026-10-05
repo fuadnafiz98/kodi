@@ -5,6 +5,7 @@ import type { WorkspaceLayoutProps } from './appLayoutProps'
 import { AgentDock } from '../agent/AgentDock'
 import { agentContextLabel } from '../agent/agentReviewContext'
 import type { useAgentSession } from '../agent/useAgentSession'
+import { requestReveal } from './revealLocation'
 import { WorkspaceRootHost } from './WorkspaceRootHost'
 
 // Only ever seen with no folder open, and it is the one screen that pulls
@@ -58,6 +59,11 @@ export function WorkspaceStage({
         <WorkspaceRootHost view={view} snapshot={snapshot} agent={agent} collisionPaths={collisionPaths} />
         <AgentDock session={agent}
           confirm={view.confirm}
+          onOpenReference={(reference) => {
+            // Old-side lines are numbered in the old file; those open the file only.
+            if (reference.side === 'additions') requestReveal({ path: reference.path, line: reference.startLine })
+            view.selectPath(reference.path)
+          }}
           contextLabel={agentContextLabel(gitWorkflow.activeWorld ?? null, gitWorkflow.repositoryReview)} />
       </div>
     </div>

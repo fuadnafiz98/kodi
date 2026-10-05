@@ -134,93 +134,22 @@ export function Welcome({
 }: WelcomeProps): React.JSX.Element {
   const [animateEntrance] = useState(() => !welcomeEntranceShown)
   const [pickerOpen, setPickerOpen] = useState(false)
-  const inboxScope = inboxRepos.join(' ')
-  const [inboxRows, setInboxRows] = useState<WelcomeInboxRow[]>(() => readWelcomeInboxCache(inboxScope))
-  const [inboxLoading, setInboxLoading] = useState(() => welcomeInboxIsStale(inboxScope))
-  const [inboxRefreshing, setInboxRefreshing] = useState(false)
-  const [inboxSyncedAt, setInboxSyncedAt] = useState(() => readWelcomeInboxSyncedAt(inboxScope))
-  // Outlives the fetch until the current turn completes, so a quick answer
-  // still reads as one full rotation instead of the icon snapping back.
-  const [refreshSpinning, setRefreshSpinning] = useState(false)
-  // Rows that arrived with a refresh rather than the first paint — the ones
-  // someone just asked you about, so they get a brief highlight.
-  const [freshInboxUrls, setFreshInboxUrls] = useState<ReadonlySet<string>>(() => new Set())
-  const refreshInbox = useRef<(() => void) | null>(null)
   const [openingPullRequestUrl, setOpeningPullRequestUrl] = useState<string | null>(null)
 
   useEffect(() => {
     welcomeEntranceShown = true
   }, [])
 
-  useEffect(() => {
-    const repository = window.repository
-    if (repository == null) {
-      setInboxLoading(false)
-      return
-    }
-    setInboxSyncedAt(readWelcomeInboxSyncedAt(inboxScope))
-    let cancelled = false
-    let inFlight = false
-    // Derived from the scope rather than the prop so a new array identity on an
-    // unrelated re-render cannot restart the fetch.
-    const repos = inboxScope === '' ? [] : inboxScope.split(' ')
-    const settle = (): void => {
-      inFlight = false
-      if (cancelled) return
-      setInboxRefreshing(false)
-      setInboxLoading(false)
-    }
-    const fetchInbox = (): void => {
-      if (inFlight) return
-      inFlight = true
-      setInboxRefreshing(true)
-      setRefreshSpinning(true)
-      const shownUrls = new Set(readWelcomeInboxCache(inboxScope).map((row) => row.url))
-      void repository.getGlobalPullRequestInbox(repos).then((snapshot) => {
-        if (cancelled) return
-        if (snapshot.available) {
-          const rows = welcomeInboxRows(snapshot)
-          writeWelcomeInboxCache(rows, welcomeInboxRepos(snapshot), inboxScope)
-          setInboxSyncedAt(readWelcomeInboxSyncedAt(inboxScope))
-          setFreshInboxUrls(shownUrls.size === 0 ? new Set() : new Set(rows.map((row) => row.url).filter((url) => !shownUrls.has(url))))
-          setInboxRows(rows)
-        } else {
-          touchWelcomeInboxCache(inboxScope)
-        }
-        settle()
-      }, () => {
-        if (cancelled) return
-        touchWelcomeInboxCache(inboxScope)
-        settle()
-      })
-    }
-    refreshInbox.current = fetchInbox
-
-    if (welcomeInboxIsStale(inboxScope)) {
-      setInboxLoading(true)
-      fetchInbox()
-    } else {
-      setInboxLoading(false)
-    }
-
-    // A hidden window has nobody to show new rows to; it catches up on return.
-    const fetchIfOlderThan = (maxAgeMs: number): void => {
-      if (document.visibilityState === 'visible' && welcomeInboxIsStale(inboxScope, Date.now(), maxAgeMs)) fetchInbox()
-    }
-    // Ticks faster than the poll so the cadence tracks the last fetch, whoever
-    // started it, instead of stacking a timer fetch on top of a manual one.
-    const poll = window.setInterval(() => fetchIfOlderThan(WELCOME_INBOX_POLL_MS), WELCOME_INBOX_WAKE_MS)
-    const wake = (): void => fetchIfOlderThan(WELCOME_INBOX_WAKE_MS)
-    window.addEventListener('focus', wake)
-    document.addEventListener('visibilitychange', wake)
-    return () => {
-      cancelled = true
-      refreshInbox.current = null
-      window.clearInterval(poll)
-      window.removeEventListener('focus', wake)
-      document.removeEventListener('visibilitychange', wake)
-    }
-  }, [inboxScope])
+  const {
+    inboxRows,
+    inboxLoading,
+    inboxRefreshing,
+    inboxSyncedAt,
+    refreshSpinning,
+    setRefreshSpinning,
+    freshInboxUrls,
+    refreshInbox
+  } = useWelcomeInbox(inboxRepos.join(' '))
 
   // Placeholders only stand in for rows nobody has seen yet: a cached inbox
   // paints its real rows immediately and revalidates underneath.
@@ -232,7 +161,6 @@ export function Welcome({
     void Promise.resolve(onOpenPullRequest(row.url)).finally(() => setOpeningPullRequestUrl(null))
   }
 
-  const shownFolders = recentFolders.slice(0, WELCOME_RECENT_FOLDER_LIMIT)
   return (
     <section className="welcome" data-entrance={animateEntrance ? 'run' : 'off'}>
       <div className="welcome-layout">
@@ -328,35 +256,147 @@ export function Welcome({
             </section>
           ) : null}
 
-          <section className="welcome-group recent-folders" aria-labelledby="recent-folders-title">
-            <div className="welcome-group-heading">
-              <strong id="recent-folders-title">Recent folders</strong>
-              {shownFolders.length > 0 ? <span>{shownFolders.length}</span> : null}
-            </div>
-            {shownFolders.length > 0 ? (
-              <div className="welcome-group-list">
-                {shownFolders.map((folder) => (
-                  <div className="recent-folder" key={folder.path}>
-                    <button className="recent-folder-open" type="button" title={folder.path} onClick={() => void onRecentOpen(folder)} disabled={openingRecentPath != null}>
-                      {openingRecentPath === folder.path ? <IconRefresh className="spin" /> : <IconFolder />}
-                      <span><strong>{folder.name}</strong><small>{recentFolderHint(folder.path, folder.name)}</small></span>
-                    </button>
-                    <button className="recent-folder-remove" type="button" onClick={() => onRecentRemove(folder.path)} aria-label={`Remove ${folder.name} from recent folders`} title="Remove from recent folders">
-                      <IconX />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <div className="recent-folders-empty">
-                <IconFolder />
-                <div><strong>No recent folders</strong><span>Folders you open will appear here.</span></div>
-              </div>
-            )}
-          </section>
+          <RecentFoldersSection
+            recentFolders={recentFolders}
+            openingRecentPath={openingRecentPath}
+            onRecentOpen={onRecentOpen}
+            onRecentRemove={onRecentRemove}
+          />
         </div>
       </div>
       <footer className="welcome-footer"><span>Git is optional</span><span>Local files only</span></footer>
+    </section>
+  )
+}
+
+function useWelcomeInbox(inboxScope: string) {
+  const [inboxRows, setInboxRows] = useState<WelcomeInboxRow[]>(() => readWelcomeInboxCache(inboxScope))
+  const [inboxLoading, setInboxLoading] = useState(() => welcomeInboxIsStale(inboxScope))
+  const [inboxRefreshing, setInboxRefreshing] = useState(false)
+  const [inboxSyncedAt, setInboxSyncedAt] = useState(() => readWelcomeInboxSyncedAt(inboxScope))
+  // Outlives the fetch until the current turn completes, so a quick answer
+  // still reads as one full rotation instead of the icon snapping back.
+  const [refreshSpinning, setRefreshSpinning] = useState(false)
+  // Rows that arrived with a refresh rather than the first paint — the ones
+  // someone just asked you about, so they get a brief highlight.
+  const [freshInboxUrls, setFreshInboxUrls] = useState<ReadonlySet<string>>(() => new Set())
+  const refreshInbox = useRef<(() => void) | null>(null)
+
+  useEffect(() => {
+    const repository = window.repository
+    if (repository == null) {
+      setInboxLoading(false)
+      return
+    }
+    setInboxSyncedAt(readWelcomeInboxSyncedAt(inboxScope))
+    let cancelled = false
+    let inFlight = false
+    // Derived from the scope rather than the prop so a new array identity on an
+    // unrelated re-render cannot restart the fetch.
+    const repos = inboxScope === '' ? [] : inboxScope.split(' ')
+    const settle = (): void => {
+      inFlight = false
+      if (cancelled) return
+      setInboxRefreshing(false)
+      setInboxLoading(false)
+    }
+    const fetchInbox = (): void => {
+      if (inFlight) return
+      inFlight = true
+      setInboxRefreshing(true)
+      setRefreshSpinning(true)
+      const shownUrls = new Set(readWelcomeInboxCache(inboxScope).map((row) => row.url))
+      void repository.getGlobalPullRequestInbox(repos).then((snapshot) => {
+        if (cancelled) return
+        if (snapshot.available) {
+          const rows = welcomeInboxRows(snapshot)
+          writeWelcomeInboxCache(rows, welcomeInboxRepos(snapshot), inboxScope)
+          setInboxSyncedAt(readWelcomeInboxSyncedAt(inboxScope))
+          setFreshInboxUrls(shownUrls.size === 0 ? new Set() : new Set(rows.map((row) => row.url).filter((url) => !shownUrls.has(url))))
+          setInboxRows(rows)
+        } else {
+          touchWelcomeInboxCache(inboxScope)
+        }
+        settle()
+      }, () => {
+        if (cancelled) return
+        touchWelcomeInboxCache(inboxScope)
+        settle()
+      })
+    }
+    refreshInbox.current = fetchInbox
+
+    if (welcomeInboxIsStale(inboxScope)) {
+      setInboxLoading(true)
+      fetchInbox()
+    } else {
+      setInboxLoading(false)
+    }
+
+    // A hidden window has nobody to show new rows to; it catches up on return.
+    const fetchIfOlderThan = (maxAgeMs: number): void => {
+      if (document.visibilityState === 'visible' && welcomeInboxIsStale(inboxScope, Date.now(), maxAgeMs)) fetchInbox()
+    }
+    // Ticks faster than the poll so the cadence tracks the last fetch, whoever
+    // started it, instead of stacking a timer fetch on top of a manual one.
+    const poll = window.setInterval(() => fetchIfOlderThan(WELCOME_INBOX_POLL_MS), WELCOME_INBOX_WAKE_MS)
+    const wake = (): void => fetchIfOlderThan(WELCOME_INBOX_WAKE_MS)
+    window.addEventListener('focus', wake)
+    document.addEventListener('visibilitychange', wake)
+    return () => {
+      cancelled = true
+      refreshInbox.current = null
+      window.clearInterval(poll)
+      window.removeEventListener('focus', wake)
+      document.removeEventListener('visibilitychange', wake)
+    }
+  }, [inboxScope])
+
+  return {
+    inboxRows,
+    inboxLoading,
+    inboxRefreshing,
+    inboxSyncedAt,
+    refreshSpinning,
+    setRefreshSpinning,
+    freshInboxUrls,
+    refreshInbox
+  }
+}
+
+function RecentFoldersSection({
+  recentFolders,
+  openingRecentPath,
+  onRecentOpen,
+  onRecentRemove
+}: Pick<WelcomeProps, 'recentFolders' | 'openingRecentPath' | 'onRecentOpen' | 'onRecentRemove'>): React.JSX.Element {
+  const shownFolders = recentFolders.slice(0, WELCOME_RECENT_FOLDER_LIMIT)
+  return (
+    <section className="welcome-group recent-folders" aria-labelledby="recent-folders-title">
+      <div className="welcome-group-heading">
+        <strong id="recent-folders-title">Recent folders</strong>
+        {shownFolders.length > 0 ? <span>{shownFolders.length}</span> : null}
+      </div>
+      {shownFolders.length > 0 ? (
+        <div className="welcome-group-list">
+          {shownFolders.map((folder) => (
+            <div className="recent-folder" key={folder.path}>
+              <button className="recent-folder-open" type="button" title={folder.path} onClick={() => void onRecentOpen(folder)} disabled={openingRecentPath != null}>
+                {openingRecentPath === folder.path ? <IconRefresh className="spin" /> : <IconFolder />}
+                <span><strong>{folder.name}</strong><small>{recentFolderHint(folder.path, folder.name)}</small></span>
+              </button>
+              <button className="recent-folder-remove" type="button" onClick={() => onRecentRemove(folder.path)} aria-label={`Remove ${folder.name} from recent folders`} title="Remove from recent folders">
+                <IconX />
+              </button>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="recent-folders-empty">
+          <IconFolder />
+          <div><strong>No recent folders</strong><span>Folders you open will appear here.</span></div>
+        </div>
+      )}
     </section>
   )
 }

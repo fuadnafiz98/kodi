@@ -1,3 +1,4 @@
+
 import type {
   AgentAccessMode,
   AgentActivityUpdate,
@@ -8,15 +9,19 @@ import type {
 } from '../../../shared/contracts'
 import { AgentActivityTimeline } from './AgentActivityTimeline'
 import { AnswerActions } from './AgentAnswerActions'
+import { AgentQuestion } from './AgentQuestion'
 import { AgentApprovalRequests } from './AgentApprovalRequests'
 import { LiveStatus } from './AgentLiveStatus'
 import { TurnMeta } from './AgentTurnMeta'
 import { UsageSummary } from './AgentUsageSummary'
 import type { MarkdownBlock } from '../markdown/markdown'
+import type { AgentReference } from './useAgentAnswer'
 import { MarkdownContent } from '../markdown/MarkdownContent'
 
 export interface AgentCurrentTurnProps {
   question: string
+  references: readonly AgentReference[]
+  onOpenReference?(reference: AgentReference): void
   blocks: MarkdownBlock[]
   answer: string
   error: string | null
@@ -39,6 +44,8 @@ export interface AgentCurrentTurnProps {
 /** The turn in flight, or the last one, below the archived history. */
 export function AgentCurrentTurn({
   question,
+  references,
+  onOpenReference,
   blocks,
   answer,
   error,
@@ -58,7 +65,7 @@ export function AgentCurrentTurn({
   if (question === '' && blocks.length === 0 && activity.length === 0 && error == null) return null
   return (
     <article className="agent-turn current">
-      {question === '' ? null : <p className="agent-question">{question}</p>}
+      <AgentQuestion question={question} references={references} onOpenReference={onOpenReference} />
       <TurnMeta provider={provider} model={modelLabel} effort={effort}
         accessMode={accessMode} running={streaming} startedAt={startedAt}
         completedAt={completedAt} />

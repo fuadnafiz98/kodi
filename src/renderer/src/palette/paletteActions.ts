@@ -20,6 +20,7 @@ import {
   type AppCommand,
   type KeybindingMap
 } from '../settings/keybindings'
+import { requestReveal } from '../app/revealLocation'
 import { fileNameFromPath } from './paletteQuery'
 import { rankPaletteEntries, type PaletteEntry } from './paletteCommands'
 
@@ -71,6 +72,10 @@ export interface PaletteActionsOptions {
   /** A PR selector takes the whole panel, so no rows are built for it. */
   hasPullRequestSelector: boolean
   fileResults: readonly RankedPath[]
+  /** The line the query names (`src/app.ts:42`, or `:42` alone for the open file). */
+  line: number | null
+  /** The file in front, which a bare `:42` goes to. */
+  currentPath?: string | null
   contentResults: readonly ContentSearchResult[]
   branches?: readonly string[]
   keybindings: KeybindingMap
@@ -96,6 +101,8 @@ export function usePaletteActions({
   commandOnly,
   hasPullRequestSelector,
   fileResults,
+  line,
+  currentPath,
   contentResults,
   branches,
   keybindings,
@@ -182,7 +189,7 @@ export function usePaletteActions({
       id: `${result.kind}:${result.path}`,
       group: 'Files' as const,
       title: fileNameFromPath(result.path),
-      subtitle: result.path,
+      subtitle: line == null || result.kind === 'dir' ? result.path : `${result.path}:${line}`,
       icon: result.kind === 'dir' ? IconFolder : IconFileCode,
       // A folder is a place to look, not a thing to open: selecting one narrows
       // the query to its contents and leaves the palette up.
@@ -190,10 +197,25 @@ export function usePaletteActions({
         ? () => onDrillIntoDirectory(result.path)
         : () => {
             onClose()
-            onOpenFile(result.path)
+            openFileAt(onOpenFile, result.path, line)
           }
     }))
-  }, [fileResults, onClose, onDrillIntoDirectory, onOpenFile])
+  }, [fileResults, line, onClose, onDrillIntoDirectory, onOpenFile])
+
+  const goToLineAction = useMemo<PaletteAction | null>(() => {
+    if (onOpenFile == null || line == null || currentPath == null) return null
+    return {
+      id: `line:${currentPath}:${line}`,
+      group: 'Files' as const,
+      title: `Go to line ${line}`,
+      subtitle: currentPath,
+      icon: IconFileCode,
+      run: () => {
+        onClose()
+        openFileAt(onOpenFile, currentPath, line)
+      }
+    }
+  }, [currentPath, line, onClose, onOpenFile])
 
   const contentActions = useMemo<PaletteAction[]>(() => {
     if (onOpenFile == null) return []
@@ -207,7 +229,7 @@ export function usePaletteActions({
       previewPath: result.path,
       run: () => {
         onClose()
-        onOpenFile(result.path)
+        openFileAt(onOpenFile, result.path, result.line)
       }
     }))
   }, [contentResults, onClose, onOpenFile])
@@ -217,6 +239,8 @@ export function usePaletteActions({
     if (commandOnly) {
       return rankPaletteEntries(commandActions, filterQuery, MAX_RESULTS) as PaletteAction[]
     }
+    // `:42` on its own: the open file, at that line.
+    if (goToLineAction != null && filterQuery.trim().startsWith(':')) return [goToLineAction]
     if (filterQuery.trim() === '') {
       return [
         ...fileActions.slice(0, MAX_EMPTY_QUERY_FILES),
@@ -227,7 +251,13 @@ export function usePaletteActions({
     const matched = rankPaletteEntries(commandActions, filterQuery, MAX_RESULTS) as PaletteAction[]
     return [...fileActions.slice(0, MAX_SEARCH_FILES), ...contentActions, ...matched].slice(0, MAX_RESULTS)
   }, [
-    commandActions, commandOnly, contentActions, fileActions, filterQuery,
+    commandActions, commandOnly, contentActions, fileActions, filterQuery, goToLineAction,
     hasPullRequestSelector, moreCommandsAction
   ])
+}
+
+/** Opens a file, landing on `line` when the reader named one. */
+export function openFileAt(onOpenFile: (path: string) => void, path: string, line: number | null): void {
+  if (line != null) requestReveal({ path, line })
+  onOpenFile(path)
 }

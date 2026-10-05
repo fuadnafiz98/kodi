@@ -78,10 +78,38 @@ await runSuite('review-editing', async (suite, cleanup) => {
       })
   }
 
+  // A file is edited by clicking into its text; there is no Edit button.
   await suite.step(cdp, 'opens a clean file for editing', async () => {
-    await press(cdp, `${deepElement('[data-item-path="notes.ts"][data-item-type="file"]')}.click()`)
-    await cdp.waitFor(`document.querySelector('.file-edit-start:not([disabled])') != null`, 10_000, 16)
-    await press(cdp, `document.querySelector('.file-edit-start').click()`)
+    // The tree is virtualized behind 80 changed files, so the file is opened by name.
+    await cdp.combo('k', 'KeyK', 75, 4)
+    await cdp.waitFor(`document.activeElement === document.querySelector('#command-palette-input')`, 8_000, 4)
+    await cdp.send('Input.insertText', { text: 'notes.ts' })
+    await cdp.waitFor(`[...document.querySelectorAll('.command-palette-results button')].some((row) => row.textContent.includes('notes.ts'))`, 8_000, 8)
+    await cdp.enter()
+    // The single-file surface only: the review's viewer can still be mounted.
+    const fileLine = `(() => {
+      const walk = (root) => {
+        const found = root.querySelector('[data-content] [data-line="5"]')
+        if (found != null) return found
+        for (const element of root.querySelectorAll('*')) {
+          if (element.shadowRoot == null) continue
+          const inner = walk(element.shadowRoot)
+          if (inner != null) return inner
+        }
+        return null
+      }
+      const host = document.querySelector('.diff-stale-host')
+      return host == null ? null : walk(host)
+    })()`
+    await cdp.waitFor(`${fileLine} != null`, 10_000, 16)
+    await Bun.sleep(300)
+    const point = await cdp.eval(`(() => {
+      const rect = ${fileLine}.getBoundingClientRect()
+      return { x: Math.round(rect.left + 20), y: Math.round(rect.top + rect.height / 2) }
+    })()`)
+    for (const type of ['mousePressed', 'mouseReleased']) {
+      await cdp.send('Input.dispatchMouseEvent', { type, x: point.x, y: point.y, button: 'left', clickCount: 1 })
+    }
   }, `${deepElement('[contenteditable="true"]')} != null`, { timeoutMs: 15_000 })
   await press(cdp, `(() => {
     const editor = ${deepElement('[contenteditable="true"]')}

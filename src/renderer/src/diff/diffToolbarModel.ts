@@ -51,7 +51,7 @@ export function diffToolbarComparisonLabel({
 
 export interface DiffToolbarLayout {
   showDiffLayout: boolean
-  showEditStart: boolean
+  showReadOnly: boolean
   showMarkdownViewToggle: boolean
   markdownPreviewOnly: boolean
 }
@@ -64,12 +64,10 @@ export function diffToolbarLayout(
   const markdownPath = selectedPath != null && isMarkdownPath(selectedPath)
   return {
     showDiffLayout: isGitRepository && (workspaceView === 'multi' || !isFilePreview),
-    showEditStart: (fileEdit.available && fileEdit.mode === 'read')
-      || (!fileEdit.available && fileEdit.unavailableReason != null && workspaceView === 'file'),
-    showMarkdownViewToggle: markdownPath && workspaceView === 'file' && fileEdit.mode === 'read',
-    markdownPreviewOnly: markdownPath && (
-      fileEdit.mode === 'preview'
-      || (fileEdit.mode === 'read' && fileEdit.documentView === 'preview')
-    )
+    showReadOnly: !fileEdit.available && fileEdit.unavailableReason != null && workspaceView === 'file',
+    // Source, both or preview stays offered while editing: the split follows the
+    // draft, and preview-only is where a reader goes to look without typing.
+    showMarkdownViewToggle: markdownPath && workspaceView === 'file',
+    markdownPreviewOnly: markdownPath && fileEdit.mode === 'read' && fileEdit.documentView === 'preview'
   }
 }

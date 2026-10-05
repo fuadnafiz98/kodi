@@ -41,9 +41,15 @@ await runSuite('large-worktree', async (suite, cleanup) => {
 
   const toggle = `document.querySelector('.sidebar-heading-actions button[aria-label$="all folders"]')`
   const label = (value) => `${toggle}?.getAttribute('aria-label') === '${value}'`
+  // The changed file's folder is open, so the tree is an open tree: the one
+  // control offers to close it (it said Expand all until every folder was open).
+  const startsOpen = await cdp.waitFor(label('Collapse all folders'), 10_000, 16)
+  suite.record('a tree with a folder open offers Collapse all', !startsOpen.timedOut)
+  await suite.step(cdp, 'collapse all folders stays responsive',
+    () => press(cdp, `${toggle}.click()`), label('Expand all folders'))
   await suite.step(cdp, 'expand all folders stays responsive',
     () => press(cdp, `${toggle}.click()`), label('Collapse all folders'))
-  await suite.step(cdp, 'collapse all folders stays responsive',
+  await suite.step(cdp, 'collapse all folders again stays responsive',
     () => press(cdp, `${toggle}.click()`), label('Expand all folders'))
 
   const heapBefore = await app.memory()

@@ -103,51 +103,22 @@ export const Titlebar = memo(function Titlebar({
               </button>
             )}
             {snapshot?.kind === 'git' && onSourceControlOpen != null ? (
-              <button
-                className="icon-button source-control-titlebar-button"
-                type="button"
-                onClick={onSourceControlOpen}
-                onPointerEnter={onSourceControlPreload}
-                onFocus={onSourceControlPreload}
-                aria-label={snapshot.statuses.length === 0
-                  ? 'Source control'
-                  : `Source control, ${snapshot.statuses.length} changed ${snapshot.statuses.length === 1 ? 'file' : 'files'}`}
-                title="Source Control"
-              >
-                <IconBranch />
-                {snapshot.statuses.length === 0 ? null : (
-                  <span className="source-control-badge" aria-hidden="true">
-                    {snapshot.statuses.length > 99 ? '99+' : snapshot.statuses.length}
-                  </span>
-                )}
-              </button>
+              <SourceControlButton
+                changedCount={snapshot.statuses.length}
+                onOpen={onSourceControlOpen}
+                onPreload={onSourceControlPreload}
+              />
             ) : null}
             <button className="icon-button" type="button" onClick={onSettingsOpen} aria-label="Open settings" title="Settings">
               <IconGear />
             </button>
             {snapshot != null ? (
-              <>
-                <button
-                  className={`icon-button terminal-titlebar-button ${terminalOpen ? 'active' : ''}`}
-                  type="button"
-                  aria-label={terminalOpen ? 'Hide terminal' : 'Show terminal'}
-                  aria-pressed={terminalOpen}
-                  title={`Toggle Terminal (${formatTerminalToggleShortcut()})`}
-                  onClick={onTerminalToggle}
-                >
-                  <IconTerminal />
-                </button>
-                <button
-                  className={`icon-button agent-titlebar-button ${agentOpen ? 'active' : ''}`}
-                  type="button"
-                  aria-label={agentOpen ? 'Close agent' : 'Ask agent'}
-                  aria-pressed={agentOpen}
-                  title={agentOpen ? 'Close Agent' : 'Ask Agent'}
-                  onClick={onAgentToggle}
-                >
-                  <IconSparklesOutline />
-                </button>
-              </>
+              <WorkspaceToggleButtons
+                agentOpen={agentOpen}
+                onAgentToggle={onAgentToggle}
+                terminalOpen={terminalOpen}
+                onTerminalToggle={onTerminalToggle}
+              />
             ) : null}
           </div>
         </div>
@@ -155,3 +126,66 @@ export const Titlebar = memo(function Titlebar({
     </div>
   )
 })
+
+function SourceControlButton({
+  changedCount,
+  onOpen,
+  onPreload
+}: {
+  changedCount: number
+  onOpen(): void
+  onPreload(): void
+}): React.JSX.Element {
+  return (
+    <button
+      className="icon-button source-control-titlebar-button"
+      type="button"
+      onClick={onOpen}
+      onPointerEnter={onPreload}
+      onFocus={onPreload}
+      aria-label={changedCount === 0
+        ? 'Source control'
+        : `Source control, ${changedCount} changed ${changedCount === 1 ? 'file' : 'files'}`}
+      title="Source Control"
+    >
+      <IconBranch />
+      {changedCount === 0 ? null : (
+        <span className="source-control-badge" aria-hidden="true">
+          {changedCount > 99 ? '99+' : changedCount}
+        </span>
+      )}
+    </button>
+  )
+}
+
+function WorkspaceToggleButtons({
+  agentOpen,
+  onAgentToggle,
+  terminalOpen,
+  onTerminalToggle
+}: Pick<TitlebarProps, 'agentOpen' | 'onAgentToggle' | 'terminalOpen' | 'onTerminalToggle'>): React.JSX.Element {
+  return (
+    <>
+      <button
+        className={`icon-button terminal-titlebar-button ${terminalOpen ? 'active' : ''}`}
+        type="button"
+        aria-label={terminalOpen ? 'Hide terminal' : 'Show terminal'}
+        aria-pressed={terminalOpen}
+        title={`Toggle Terminal (${formatTerminalToggleShortcut()})`}
+        onClick={onTerminalToggle}
+      >
+        <IconTerminal />
+      </button>
+      <button
+        className={`icon-button agent-titlebar-button ${agentOpen ? 'active' : ''}`}
+        type="button"
+        aria-label={agentOpen ? 'Close agent' : 'Ask agent'}
+        aria-pressed={agentOpen}
+        title={agentOpen ? 'Close Agent' : 'Ask Agent'}
+        onClick={onAgentToggle}
+      >
+        <IconSparklesOutline />
+      </button>
+    </>
+  )
+}

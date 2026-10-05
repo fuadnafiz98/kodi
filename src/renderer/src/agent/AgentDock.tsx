@@ -5,6 +5,7 @@ import { IconSparklesOutline } from '../app/IconSparklesOutline'
 
 import type { useAgentSession } from './useAgentSession'
 import type { ConfirmRequest } from '../app/ConfirmDialog'
+import type { AgentReference } from './useAgentAnswer'
 
 const AgentPanel = lazy(async () => ({ default: (await import('./AgentPanel')).AgentPanel }))
 
@@ -12,6 +13,8 @@ interface AgentDockProps {
   session: ReturnType<typeof useAgentSession>
   contextLabel: string
   confirm(request: ConfirmRequest): Promise<boolean>
+  /** A file reference on a question: opens that file, at those lines on the new side. */
+  onOpenReference?(reference: AgentReference): void
 }
 
 // The chunk's fallback: the same header the panel renders, so the column does
@@ -36,7 +39,7 @@ function AgentDockShell({ onClose }: { onClose(): void }): React.JSX.Element {
 
 // Keeps the panel's wiring next to the panel: the workspace only decides where
 // the column sits, not how the conversation is plumbed together.
-export function AgentDock({ session, contextLabel, confirm }: AgentDockProps): React.JSX.Element | null {
+export function AgentDock({ session, contextLabel, confirm, onOpenReference }: AgentDockProps): React.JSX.Element | null {
   if (!session.open) return null
   return (
     <Suspense fallback={<AgentDockShell onClose={session.toggle} />}>
@@ -46,10 +49,12 @@ export function AgentDock({ session, contextLabel, confirm }: AgentDockProps): R
         streaming={session.answer.streaming}
         error={session.answer.error}
         question={session.answer.question}
+        references={session.answer.references}
         activity={session.answer.activity}
         approvals={session.answer.approvals}
         usage={session.answer.usage}
         history={session.answer.history}
+        chatId={session.answer.chatId}
         startedAt={session.answer.startedAt}
         completedAt={session.answer.completedAt}
         provider={session.provider}
@@ -78,6 +83,9 @@ export function AgentDock({ session, contextLabel, confirm }: AgentDockProps): R
         onAsk={session.ask}
         onCancel={session.answer.cancel}
         onReset={session.answer.reset}
+        onOpenChat={session.answer.openChat}
+        onOpenReference={onOpenReference}
+        onDeleteChat={session.answer.deleteChat}
         onClose={session.close}
       />
     </Suspense>

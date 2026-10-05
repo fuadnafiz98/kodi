@@ -120,7 +120,7 @@ describe('cached file text', () => {
       status: 'unchanged',
       oldFile: null,
       newFile: {
-        name: 'a.ts',
+        name: 'src/a.ts',
         contents: 'hello',
         cacheKey: 'workspace-cache:src/a.ts'
       },
@@ -128,6 +128,7 @@ describe('cached file text', () => {
       oversized: false
     })
   })
+
 
   it('returns cached text instead of throwing when no session is open', () => {
     expect(comparisonWithoutOpenSession('Makefile', { path: 'Makefile', text: 'all:\n' })).toMatchObject({
@@ -274,7 +275,9 @@ describe('workspace cache store', () => {
 
     expect(closed.lastRoot).toBeNull()
     expect(closed.entries).toEqual(store.entries)
-    const restarted = parseWorkspaceCacheStore(JSON.parse(JSON.stringify(closed)))
+    // What a restart reads is the file on disk: through JSON, not a copy.
+    const onDisk = JSON.stringify(closed)
+    const restarted = parseWorkspaceCacheStore(JSON.parse(onDisk))
     expect(restarted.lastRoot).toBeNull()
     expect(lastWorkspaceCache(restarted)).toBeNull()
   })

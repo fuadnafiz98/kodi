@@ -85,50 +85,21 @@ export const Explorer = memo(function Explorer({
     () => ({ height: '100%', colorScheme: themeType }) as React.CSSProperties,
     [themeType]
   )
-  // A chip that hides nothing is a control with no effect, so it says how many
-  // it would take and goes quiet when that is none. Counting is four regular
-  // expressions per path and a repository opens with forty thousand of them, so
-  // it runs in idle slices after the tree has painted rather than as one long
-  // task in front of it — at 100k paths that task was up to 150 ms on every new
-  // file. Until it lands the chips show no number and stay live, which is the
-  // honest reading of "not counted yet".
-  const [hiddenCounts, setHiddenCounts] = useState<{ tests: number; api: number } | null>(null)
-  useEffect(() => {
-    let tests = 0
-    let api = 0
-    let index = 0
-    let handle = 0
-    const slice = (): void => {
-      const end = Math.min(unfilteredFilePaths.length, index + HIDDEN_COUNT_SLICE)
-      for (; index < end; index += 1) {
-        const path = unfilteredFilePaths[index]!
-        if (isTestFilePath(path)) tests += 1
-        if (isApiFilePath(path)) api += 1
-      }
-      if (index < unfilteredFilePaths.length) handle = scheduleIdle(slice)
-      else setHiddenCounts({ tests, api })
-    }
-    handle = scheduleIdle(slice)
-    return () => cancelIdle(handle)
-  }, [unfilteredFilePaths])
+  const hiddenCounts = useHiddenFileCounts(unfilteredFilePaths)
 
-  // Whichever of expand-all and collapse-all matches the tree in front of you is
-  // the only one you can press meaningfully, so there is one control and the
-  // tree decides which way it goes — including when a folder was opened by hand,
-  // which is why this tracks the tree rather than the last press.
-  const [allFoldersExpanded, setAllFoldersExpanded] = useState(false)
+  // One control, and the tree decides which way it goes: any open folder —
+  // opened by hand, by a jump, or by the review — makes it Collapse all, the
+  // way every editor reads it. It said Expand all over a tree full of open
+  // folders until every last folder in the repository was open.
+  const [anyFolderExpanded, setAnyFolderExpanded] = useState(false)
   // Only directories the model actually holds can answer; a path it has not
-  // built a handle for is unknown, not open, and a tree that knows of none is
-  // not an expanded tree.
-  const readAllExpanded = useCallback(() => {
-    let known = 0
+  // built a handle for is unknown, not open.
+  const readAnyExpanded = useCallback(() => {
     for (const directoryPath of directoryPaths) {
       const item = model.getItem(directoryPath)
-      if (item == null || !('isExpanded' in item)) continue
-      if (!item.isExpanded()) return false
-      known += 1
+      if (item != null && 'isExpanded' in item && item.isExpanded()) return true
     }
-    return known > 0
+    return false
   }, [directoryPaths, model])
 
   // The tree notifies on every selection and scroll as well; only a change in
@@ -140,15 +111,15 @@ export const Explorer = memo(function Explorer({
       const nextVisibleCount = model.getVisibleCount()
       if (nextVisibleCount === visibleCount) return
       visibleCount = nextVisibleCount
-      setAllFoldersExpanded(readAllExpanded())
+      setAnyFolderExpanded(readAnyExpanded())
     }
     sync()
     return model.subscribe(sync)
-  }, [model, readAllExpanded])
+  }, [model, readAnyExpanded])
 
   const toggleAllFolders = useCallback(() => {
-    setAllDirectoriesExpanded(model, filePaths, directoryPaths, !readAllExpanded())
-  }, [directoryPaths, filePaths, model, readAllExpanded])
+    setAllDirectoriesExpanded(model, filePaths, directoryPaths, !readAnyExpanded())
+  }, [directoryPaths, filePaths, model, readAnyExpanded])
 
   // The tree reports selection *changes*, so clicking the row that is already
   // selected reports nothing. Rows are read straight off the click instead, which
@@ -201,66 +172,115 @@ export const Explorer = memo(function Explorer({
           </span>
           <button
             type="button"
-            aria-label={allFoldersExpanded ? 'Collapse all folders' : 'Expand all folders'}
-            title={allFoldersExpanded ? 'Collapse all folders' : 'Expand all folders'}
+            aria-label={anyFolderExpanded ? 'Collapse all folders' : 'Expand all folders'}
+            title={anyFolderExpanded ? 'Collapse all folders' : 'Expand all folders'}
             onClick={toggleAllFolders}
           >
-            <span className="icon-swap" data-state={allFoldersExpanded ? 'alt' : 'base'}>
+            <span className="icon-swap" data-state={anyFolderExpanded ? 'alt' : 'base'}>
               <IconExpandAll /><IconChevronsClose />
             </span>
           </button>
         </div>
       </div>
       {onFileFilterChange == null ? null : (
-        <div className="sidebar-file-filter">
-          <input
-            type="search"
-            name="file-filter"
-            value={fileFilter.query}
-            placeholder="Filter files, e.g. /api/* or *.test.ts"
-            aria-label="Filter files"
-            onChange={(event) => onFileFilterChange({ ...fileFilter, query: event.target.value })}
-          />
-          {/* One line that scrolls, not a block that reflows: a wrapped chip row
-              changes the tree's height as you type, which moves the rows you are
-              reading. */}
-          <div className="filter-chips" role="group" aria-label="Hide file groups">
-            <button
-              type="button"
-              className="filter-chip"
-              aria-pressed={fileFilter.hideTests}
-              disabled={hiddenCounts?.tests === 0}
-              onClick={() => onFileFilterChange({ ...fileFilter, hideTests: !fileFilter.hideTests })}
-            >
-              Hide tests
-              {hiddenCounts == null ? null : <span className="filter-chip-count">{hiddenCounts.tests}</span>}
-            </button>
-            <button
-              type="button"
-              className="filter-chip"
-              aria-pressed={fileFilter.hideApi}
-              disabled={hiddenCounts?.api === 0}
-              onClick={() => onFileFilterChange({ ...fileFilter, hideApi: !fileFilter.hideApi })}
-            >
-              Hide API
-              {hiddenCounts == null ? null : <span className="filter-chip-count">{hiddenCounts.api}</span>}
-            </button>
-            {reviewFileFilterIsActive(fileFilter) ? (
-              <button
-                type="button"
-                className="filter-clear"
-                aria-label="Clear filters"
-                title="Clear filters"
-                onClick={() => onFileFilterChange(EMPTY_REVIEW_FILE_FILTER)}
-              >
-                <IconX />
-              </button>
-            ) : null}
-          </div>
-        </div>
+        <ExplorerFileFilter fileFilter={fileFilter} hiddenCounts={hiddenCounts} onFileFilterChange={onFileFilterChange} />
       )}
       <FileTree className="project-tree" data-review-mode={reviewMode ? 'true' : undefined}
         model={model} style={treeStyle} onClick={activateClickedRow} />
     </aside>
   )
 })
+
+interface HiddenFileCounts {
+  tests: number
+  api: number
+}
+
+// A chip that hides nothing is a control with no effect, so it says how many
+// it would take and goes quiet when that is none. Counting is four regular
+// expressions per path and a repository opens with forty thousand of them, so
+// it runs in idle slices after the tree has painted rather than as one long
+// task in front of it — at 100k paths that task was up to 150 ms on every new
+// file. Until it lands the chips show no number and stay live, which is the
+// honest reading of "not counted yet".
+function useHiddenFileCounts(unfilteredFilePaths: readonly string[]): HiddenFileCounts | null {
+  const [hiddenCounts, setHiddenCounts] = useState<HiddenFileCounts | null>(null)
+  useEffect(() => {
+    let tests = 0
+    let api = 0
+    let index = 0
+    let handle = 0
+    const slice = (): void => {
+      const end = Math.min(unfilteredFilePaths.length, index + HIDDEN_COUNT_SLICE)
+      for (; index < end; index += 1) {
+        const path = unfilteredFilePaths[index]!
+        if (isTestFilePath(path)) tests += 1
+        if (isApiFilePath(path)) api += 1
+      }
+      if (index < unfilteredFilePaths.length) handle = scheduleIdle(slice)
+      else setHiddenCounts({ tests, api })
+    }
+    handle = scheduleIdle(slice)
+    return () => cancelIdle(handle)
+  }, [unfilteredFilePaths])
+  return hiddenCounts
+}
+
+function ExplorerFileFilter({
+  fileFilter,
+  hiddenCounts,
+  onFileFilterChange
+}: {
+  fileFilter: ReviewFileFilter
+  hiddenCounts: HiddenFileCounts | null
+  onFileFilterChange(filter: ReviewFileFilter): void
+}): React.JSX.Element {
+  return (
+    <div className="sidebar-file-filter">
+      <input
+        type="search"
+        name="file-filter"
+        value={fileFilter.query}
+        placeholder="Filter files, e.g. /api/* or *.test.ts"
+        aria-label="Filter files"
+        onChange={(event) => onFileFilterChange({ ...fileFilter, query: event.target.value })}
+      />
+      {/* One line that scrolls, not a block that reflows: a wrapped chip row
+          changes the tree's height as you type, which moves the rows you are
+          reading. */}
+      <div className="filter-chips" role="group" aria-label="Hide file groups">
+        <button
+          type="button"
+          className="filter-chip"
+          aria-pressed={fileFilter.hideTests}
+          disabled={hiddenCounts?.tests === 0}
+          onClick={() => onFileFilterChange({ ...fileFilter, hideTests: !fileFilter.hideTests })}
+        >
+          Hide tests
+          {hiddenCounts == null ? null : <span className="filter-chip-count">{hiddenCounts.tests}</span>}
+        </button>
+        <button
+          type="button"
+          className="filter-chip"
+          aria-pressed={fileFilter.hideApi}
+          disabled={hiddenCounts?.api === 0}
+          onClick={() => onFileFilterChange({ ...fileFilter, hideApi: !fileFilter.hideApi })}
+        >
+          Hide API
+          {hiddenCounts == null ? null : <span className="filter-chip-count">{hiddenCounts.api}</span>}
+        </button>
+        {reviewFileFilterIsActive(fileFilter) ? (
+          <button
+            type="button"
+            className="filter-clear"
+            aria-label="Clear filters"
+            title="Clear filters"
+            onClick={() => onFileFilterChange(EMPTY_REVIEW_FILE_FILTER)}
+          >
+            <IconX />
+          </button>
+        ) : null}
+      </div>
+    </div>
+  )
+}

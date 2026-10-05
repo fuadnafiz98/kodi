@@ -20,12 +20,12 @@ export const SPLIT_DIFF_RESIZE_CSS = `
       minmax(0, var(--kodi-split-after, 50fr));
   }
 
-  /* Anchors, because the handle has nowhere legal to live inside the diff: the
+  ${/* Anchors, because the handle has nowhere legal to live inside the diff: the
      viewer asserts the <pre> has exactly two code children and that each pane's
      gutter and content have matching child counts, and it throws out of line
      selection when either is off by one. So the handle sits beside the <pre> in
      the shadow root and is anchored to the new pane's line-number column, whose
-     leading edge is the split boundary in both wrap and scroll mode. */
+     leading edge is the split boundary in both wrap and scroll mode. */ ''}
   [data-diff-type="split"] {
     position: relative;
     anchor-name: --kodi-split-pre;

@@ -31,12 +31,76 @@ interface RemoteReviewThreadCardProps {
   onToggleResolved(threadId: string, resolved: boolean): void
 }
 
+function RemoteThreadHeader({ thread, author, now, pending, onHide, onToggleResolved }: {
+  thread: RemoteReviewThread
+  author: string
+  now: number
+  pending: boolean
+  onHide(): void
+  onToggleResolved(): void
+}): React.JSX.Element {
+  const resolveLabel = thread.resolved ? 'Reopen thread on GitHub' : 'Resolve thread on GitHub'
+  return (
+    <header>
+      <RemoteAvatar url={thread.comments[0]?.authorAvatarUrl ?? ''} login={author} />
+      <strong>{author}</strong>
+      <span className="review-remote-age">{formatCommentAge(thread.comments[0]?.createdAt ?? '', now)}</span>
+      {thread.outdated ? <em data-tone="outdated">Outdated</em> : null}
+      {thread.resolved ? <em data-tone="resolved">Resolved</em> : null}
+      {thread.resolved ? (
+        <button className="review-remote-resolve" type="button"
+          title="Hide this resolved thread" aria-label="Hide this resolved thread"
+          onClick={onHide}><IconChevronSm /></button>
+      ) : null}
+      <button className="review-remote-resolve" type="button" disabled={pending}
+        title={resolveLabel} aria-label={resolveLabel}
+        onClick={onToggleResolved}>
+        {pending ? <IconRefresh className="spin" /> : thread.resolved ? <IconCheck /> : <IconApproved />}
+      </button>
+    </header>
+  )
+}
+
+function RemoteThreadReply({ author, pending, composing, replyBody, onCompose, onChange, onCancel, onSend }: {
+  author: string
+  pending: boolean
+  composing: boolean
+  replyBody: string
+  onCompose(): void
+  onChange(body: string): void
+  onCancel(): void
+  onSend(): void
+}): React.JSX.Element {
+  return composing ? (
+    <div className="review-reply-composer">
+      <textarea value={replyBody} rows={2} autoFocus
+        aria-label={`Reply to ${author}`}
+        placeholder="Reply on GitHub…" onChange={(event) => onChange(event.target.value)} />
+      <div className="review-card-actions">
+        <button type="button" onClick={onCancel}>Cancel</button>
+        <button className="primary" type="button" disabled={replyBody.trim() === '' || pending}
+          onClick={onSend}>
+          {pending ? <IconRefresh className="spin" /> : <IconReply />}Reply
+        </button>
+      </div>
+    </div>
+  ) : (
+    <footer>
+      <button className="review-remote-reply" type="button" disabled={pending} onClick={onCompose}>
+        <IconReply />Reply on GitHub
+      </button>
+    </footer>
+  )
+}
+
 export function RemoteReviewThreadCard({
   thread,
   pending,
   onReply,
   onToggleResolved
 }: RemoteReviewThreadCardProps): React.JSX.Element {
+  // Held here rather than in the reply area, so a draft outlives the thread
+  // folding away when it is resolved and coming back when it is reopened.
   const [replyBody, setReplyBody] = useState('')
   const [composing, setComposing] = useState(false)
   // A resolved thread is settled business. It stays on its line — that is where
@@ -46,7 +110,6 @@ export function RemoteReviewThreadCard({
   const now = useReviewClock()
 
   const author = thread.comments[0]?.authorLogin ?? 'GitHub'
-  const resolveLabel = thread.resolved ? 'Reopen thread on GitHub' : 'Resolve thread on GitHub'
   const collapsed = thread.resolved && !showResolved
   const commentCount = thread.comments.length
 
@@ -64,23 +127,9 @@ export function RemoteReviewThreadCard({
 
   return (
     <article className={`review-card review-thread review-remote-thread ${thread.resolved ? 'resolved' : ''}`}>
-      <header>
-        <RemoteAvatar url={thread.comments[0]?.authorAvatarUrl ?? ''} login={author} />
-        <strong>{author}</strong>
-        <span className="review-remote-age">{formatCommentAge(thread.comments[0]?.createdAt ?? '', now)}</span>
-        {thread.outdated ? <em data-tone="outdated">Outdated</em> : null}
-        {thread.resolved ? <em data-tone="resolved">Resolved</em> : null}
-        {thread.resolved ? (
-          <button className="review-remote-resolve" type="button"
-            title="Hide this resolved thread" aria-label="Hide this resolved thread"
-            onClick={() => setShowResolved(false)}><IconChevronSm /></button>
-        ) : null}
-        <button className="review-remote-resolve" type="button" disabled={pending}
-          title={resolveLabel} aria-label={resolveLabel}
-          onClick={() => onToggleResolved(thread.id, !thread.resolved)}>
-          {pending ? <IconRefresh className="spin" /> : thread.resolved ? <IconCheck /> : <IconApproved />}
-        </button>
-      </header>
+      <RemoteThreadHeader thread={thread} author={author} now={now} pending={pending}
+        onHide={() => setShowResolved(false)}
+        onToggleResolved={() => onToggleResolved(thread.id, !thread.resolved)} />
       <ol className="review-remote-comments">
         {thread.comments.map((comment, index) => (
           <li className="review-remote-comment" key={comment.id}>
@@ -93,30 +142,15 @@ export function RemoteReviewThreadCard({
           </li>
         ))}
       </ol>
-      {composing ? (
-        <div className="review-reply-composer">
-          <textarea value={replyBody} rows={2} autoFocus
-            aria-label={`Reply to ${author}`}
-            placeholder="Reply on GitHub…" onChange={(event) => setReplyBody(event.target.value)} />
-          <div className="review-card-actions">
-            <button type="button" onClick={() => { setComposing(false); setReplyBody('') }}>Cancel</button>
-            <button className="primary" type="button" disabled={replyBody.trim() === '' || pending}
-              onClick={() => {
-                onReply(thread.id, replyBody.trim())
-                setComposing(false)
-                setReplyBody('')
-              }}>
-              {pending ? <IconRefresh className="spin" /> : <IconReply />}Reply
-            </button>
-          </div>
-        </div>
-      ) : (
-        <footer>
-          <button className="review-remote-reply" type="button" disabled={pending} onClick={() => setComposing(true)}>
-            <IconReply />Reply on GitHub
-          </button>
-        </footer>
-      )}
+      <RemoteThreadReply author={author} pending={pending} composing={composing} replyBody={replyBody}
+        onCompose={() => setComposing(true)}
+        onChange={setReplyBody}
+        onCancel={() => { setComposing(false); setReplyBody('') }}
+        onSend={() => {
+          onReply(thread.id, replyBody.trim())
+          setComposing(false)
+          setReplyBody('')
+        }} />
     </article>
   )
 }

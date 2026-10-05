@@ -31,3 +31,15 @@ export function formatReset(timestamp: number): string {
   const date = new Date(timestamp < 1_000_000_000_000 ? timestamp * 1_000 : timestamp)
   return RESET_TIME_FORMATTER.format(date)
 }
+
+const CHAT_DATE_FORMATTER = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' })
+
+/** When a chat last moved, as the chat list shows it: now, 5m, 3h, then a date. */
+export function formatChatTime(timestamp: number, now: number): string {
+  const minutes = Math.floor(Math.max(0, now - timestamp) / 60_000)
+  if (minutes < 1) return 'now'
+  if (minutes < 60) return `${minutes}m`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours}h`
+  return CHAT_DATE_FORMATTER.format(new Date(timestamp))
+}

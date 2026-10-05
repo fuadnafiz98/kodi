@@ -1,8 +1,8 @@
 import type { SelectedLineRange } from '@pierre/diffs'
 
 export const DRAG_SELECTION_CSS = `
-  /* Tint through Pierre's mix variables so added/removed greens stay visible.
-     A solid background !important is what turned the selection into mud. */
+  ${/* Tint through Pierre's mix variables so added/removed greens stay visible.
+     A solid background !important is what turned the selection into mud. */ ''}
   [data-drag-range] {
     --diffs-computed-hovered-line-bg: color-mix(
       in srgb,

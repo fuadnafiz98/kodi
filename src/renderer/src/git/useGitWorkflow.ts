@@ -434,9 +434,9 @@ export function useGitWorkflow({
   // which also leaves Switch, Pull and Checkout live while a `git add` runs.
   // Those rewrite HEAD and the index too, and main holds no lock of its own, so
   // they queue here as well instead of racing the stage into `index.lock`.
-  const indexQueueRef = useRef<Promise<unknown>>(Promise.resolve())
+  const indexQueueRef = useRef<Promise<unknown> | null>(null)
   const enqueueIndexWrite = useCallback(<Value,>(write: () => Promise<Value>): Promise<Value> => {
-    const next = indexQueueRef.current.then(write)
+    const next = (indexQueueRef.current ?? Promise.resolve()).then(write)
     // A failed write must not wedge the ones queued behind it.
     indexQueueRef.current = next.catch(() => {})
     return next
@@ -693,6 +693,12 @@ export function useGitWorkflow({
     const nextIndex = (index + direction + reviewWorldList.length) % reviewWorldList.length
     const nextWorld = reviewWorldList[nextIndex]
     if (nextWorld != null) void focusWorld(nextWorld.worldId)
+  }, [activeReviewWorld, focusWorld, reviewWorldList])
+
+  // ⌘1–⌘8 pick that tab, ⌘9 the last one, as in a browser.
+  const focusWorldAt = useCallback((position: number): void => {
+    const world = position >= 9 ? reviewWorldList.at(-1) : reviewWorldList[position - 1]
+    if (world != null && world.worldId !== activeReviewWorld?.worldId) void focusWorld(world.worldId)
   }, [activeReviewWorld, focusWorld, reviewWorldList])
 
   const reviewPullRequest = useCallback((pullRequest: PullRequestSummary) => {
@@ -1091,6 +1097,7 @@ export function useGitWorkflow({
     closeReview,
     focusWorld,
     cycleWorld,
+    focusWorldAt,
     rememberReviewScroll,
     mergePullRequest,
     markPullRequestReady
@@ -1098,6 +1105,7 @@ export function useGitWorkflow({
     actionKey,
     activeReviewWorld,
     cycleWorld,
+    focusWorldAt,
     hibernateReviews,
     focusWorld,
     initialReviewScrollTop,

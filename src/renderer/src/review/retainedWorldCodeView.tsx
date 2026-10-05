@@ -13,9 +13,11 @@ import {
   type CodeViewItem,
   type CodeViewLineSelection,
   type DiffLineAnnotation,
+  type FileContents,
   type LineAnnotation
 } from '@pierre/diffs'
 import { CodeView, type CodeViewHandle, type CodeViewReactOptions } from '@pierre/diffs/react'
+import type { EditorOptions } from '@pierre/diffs/edit'
 
 import type { ReviewAnnotationMetadata } from './ReviewComments'
 import {
@@ -230,6 +232,9 @@ interface RetainedWorldCodeViewProps {
   setViewerRef(viewer: CodeViewHandle<ReviewAnnotationMetadata> | null): void
   getInitialScrollTop(): number
   loading: boolean
+  /** In-place editing of the working tree; absent everywhere else. */
+  editorOptions?: Omit<EditorOptions<ReviewAnnotationMetadata>, 'onChange'>
+  onItemEditChange?(item: CodeViewItem<ReviewAnnotationMetadata>, file: FileContents): void
 }
 
 export const RetainedWorldCodeView = memo(function RetainedWorldCodeView({
@@ -246,7 +251,9 @@ export const RetainedWorldCodeView = memo(function RetainedWorldCodeView({
   cancelScrollRestoreRef,
   setViewerRef,
   getInitialScrollTop,
-  loading
+  loading,
+  editorOptions,
+  onItemEditChange
 }: RetainedWorldCodeViewProps): React.JSX.Element {
   const localViewerRef = useRef<CodeViewHandle<ReviewAnnotationMetadata> | null>(null)
   const localContainerRef = useRef<HTMLDivElement | null>(null)
@@ -334,6 +341,8 @@ export const RetainedWorldCodeView = memo(function RetainedWorldCodeView({
           items={view.items} onScroll={active ? handleScroll : NOOP_SCROLL}
           options={view.codeViewOptions} selectedLines={view.selectedLines}
           onSelectedLinesChange={view.onHighlightLines}
+          editorOptions={active ? editorOptions : undefined}
+          onItemEditChange={active ? onItemEditChange : undefined}
           {...codeViewSlotProps(view.slots)}
           className="multi-file-code-view" style={view.codeStyle} />
       </div>

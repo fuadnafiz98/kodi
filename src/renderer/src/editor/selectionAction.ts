@@ -12,7 +12,12 @@ export interface SelectionActionContext {
 }
 
 export interface SelectionAction {
+  /** The button's name, read out and shown as its tooltip. */
   label: string
+  tooltip?: string
+  icon: 'copy' | 'chat' | 'comment'
+  /** The action the selection is for (Comment): its glyph carries the accent. */
+  primary?: boolean
   run(context: SelectionActionContext): void
 }
 
@@ -27,26 +32,4 @@ export function selectionLineRange(selection: Range): { startLine: number; endLi
     ? selection.end.line
     : selection.end.line + 1
   return { startLine, endLine }
-}
-
-export function createSelectionActionElement(
-  actions: readonly SelectionAction[],
-  context: SelectionActionContext
-): HTMLElement {
-  const container = document.createElement('div')
-  container.dataset.selectionAction = 'true'
-  for (const action of actions) {
-    const button = document.createElement('button')
-    button.type = 'button'
-    button.textContent = action.label
-    // Without this the click blurs the editor first, which collapses the very
-    // selection the action is about to read.
-    button.addEventListener('mousedown', (event) => event.preventDefault())
-    button.addEventListener('click', () => {
-      action.run(context)
-      context.close()
-    })
-    container.append(button)
-  }
-  return container
 }

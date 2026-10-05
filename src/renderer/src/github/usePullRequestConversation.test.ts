@@ -86,6 +86,12 @@ describe('sameConversation', () => {
     expect(sameConversation(conversation(), conversation())).toBe(true)
   })
 
+  // The head is how an open review learns of a push. Ignoring it kept the old
+  // object on every poll after one, and the "Load new commits" button never came.
+  it('detects a push that changed nothing but the head commit', () => {
+    expect(sameConversation(conversation(), conversation({ headOid: 'b'.repeat(40) }))).toBe(false)
+  })
+
   it('never matches a missing previous conversation', () => {
     expect(sameConversation(null, conversation())).toBe(false)
   })

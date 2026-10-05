@@ -49,9 +49,11 @@ function useIntercept(handlers: GutterActionHandlers): React.RefObject<HTMLSpanE
       handlersRef.current.onComment()
     }
     // Capture, so the button's own container answers before anything above it.
-    for (const type of ['pointerdown', 'click']) host.addEventListener(type, intercept, true)
+    host.addEventListener('pointerdown', intercept, true)
+    host.addEventListener('click', intercept, true)
     return () => {
-      for (const type of ['pointerdown', 'click']) host.removeEventListener(type, intercept, true)
+      host.removeEventListener('pointerdown', intercept, true)
+      host.removeEventListener('click', intercept, true)
     }
   }, [])
 

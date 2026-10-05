@@ -1,6 +1,7 @@
 import { IconCommentAdd, IconX } from '@pierre/icons'
 
 import { IconSparklesOutline } from '../app/IconSparklesOutline'
+import { AgentChatHistory } from './AgentChatHistory'
 
 export interface AgentDockHeaderProps {
   streaming: boolean
@@ -8,7 +9,10 @@ export interface AgentDockHeaderProps {
   ready: boolean
   /** A conversation exists, so there is something to reset. */
   started: boolean
+  currentChatId: string
   onReset(): void
+  onOpenChat(id: string): void
+  onDeleteChat(id: string): void
   onClose(): void
 }
 
@@ -16,7 +20,10 @@ export function AgentDockHeader({
   streaming,
   ready,
   started,
+  currentChatId,
   onReset,
+  onOpenChat,
+  onDeleteChat,
   onClose
 }: AgentDockHeaderProps): React.JSX.Element {
   return (
@@ -31,6 +38,8 @@ export function AgentDockHeader({
         <span>{streaming ? 'Working' : ready ? 'Ready' : 'Offline'}</span>
       </div>
       <div className="agent-dock-header-actions">
+        <AgentChatHistory currentChatId={currentChatId}
+          onOpenChat={onOpenChat} onDeleteChat={onDeleteChat} />
         {started ? (
           <button type="button" onClick={onReset} aria-label="New conversation" title="New conversation">
             <IconCommentAdd />

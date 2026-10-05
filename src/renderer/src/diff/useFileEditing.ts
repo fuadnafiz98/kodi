@@ -1,32 +1,56 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type RefObject, type SetStateAction } from 'react'
 import type { FileContents } from '@pierre/diffs'
 import type { Editor, EditorOptions } from '@pierre/diffs/edit'
 
 import type { FileComparison, RepositoryReview } from '../../../shared/contracts'
-import type { FileEditControls, WorkspaceView } from '../app/AppView'
+import { CACHED_TEXT_KEY_PREFIX } from '../../../shared/workspaceCache'
+import type { EditCaretPosition, FileEditControls, WorkspaceView } from '../app/AppView'
 import type { DocumentView } from '../review/documentView'
 import type { ReviewAnnotationMetadata } from '../review/ReviewComments'
-import {
-  browserDraftStorage,
-  draftPaths,
-  putDraft,
-  readDrafts,
-  removeDraft,
-  writeDrafts,
-  type DraftMap
-} from '../editor/draftStore'
+import { putDraft, removeDraft } from '../editor/draftStore'
 import { resolveDiskState, resolveDraftFile, type DraftText } from '../editor/editSession'
 import { getErrorMessage, requireRepositoryApi } from '../explorer/repositoryApi'
-import { notifyStorageWriteFailed } from '../review/storageBudget'
 import { showToast } from '../app/toast'
+import type { TextEdit } from '../editor/minimalTextEdit'
+import { useDraftStore, type DraftStore, type WorkingDrafts } from '../editor/useDraftStore'
 
-let editorModule: Promise<typeof import('@pierre/diffs/edit')> | null = null
+export type { WorkingDrafts } from '../editor/useDraftStore'
+
+let editorModule: Promise<[
+  typeof import('@pierre/diffs/edit'),
+  typeof import('../editor/minimalTextEdit'),
+  typeof import('../editor/selectionActionBar')
+]> | null = null
 let EditorConstructor: typeof import('@pierre/diffs/edit').Editor | null = null
+// Only an editor ever needs these, so they travel with the editor module rather
+// than with the workspace, which every launch loads.
+let textEdit: typeof import('../editor/minimalTextEdit').minimalTextEdit | null = null
+let selectionBar: typeof import('../editor/selectionActionBar').createSelectionActionElement | null = null
 
 export async function preloadDiffEditor(): Promise<void> {
-  editorModule ??= import('@pierre/diffs/edit')
-  const loaded = await editorModule
+  editorModule ??= Promise.all([
+    import('@pierre/diffs/edit'),
+    import('../editor/minimalTextEdit'),
+    import('../editor/selectionActionBar')
+  ])
+  const [loaded, edits, bar] = await editorModule
   EditorConstructor = loaded.Editor
+  textEdit = edits.minimalTextEdit
+  selectionBar = bar.createSelectionActionElement
+}
+
+/** The bar a ranged selection shows; only an editor, loaded with it, asks. */
+export function createSelectionBar(
+  ...args: Parameters<typeof import('../editor/selectionActionBar').createSelectionActionElement>
+): HTMLElement {
+  if (selectionBar == null) throw new Error('The editor module is not loaded.')
+  return selectionBar(...args)
+}
+
+/** See `minimalTextEdit`; loaded with the editor, so any attached editor has it. */
+function minimalTextEdit(from: string, to: string): TextEdit | null {
+  if (textEdit == null) throw new Error('The editor module is not loaded.')
+  return textEdit(from, to)
 }
 
 export function createDiffEditor<LAnnotation>(options: EditorOptions<LAnnotation>): Editor<LAnnotation> {
@@ -36,7 +60,6 @@ export function createDiffEditor<LAnnotation>(options: EditorOptions<LAnnotation
 
 interface FileEditSession {
   path: string
-  mode: 'edit' | 'preview'
   /**
    * The comparison the session renders. Its identity is pinned for the whole
    * session: the surface must never receive a new `newFile` while typing, or
@@ -47,6 +70,45 @@ interface FileEditSession {
   sourceCacheKey: string
   sourceContents: string
   dirty: boolean
+  /** The cacheKey the surface renders under (see renderKeyFor). */
+  renderKey: string
+}
+
+// The editor keeps each file's text document by cacheKey for the life of the
+// app, and the cacheKey is the disk content's hash. A document that has been
+// typed into no longer holds the text its key names, so when the disk came
+// back to that content — the edit undone from outside, a checkout — the stale
+// document was put back on screen. A key typed into is never rendered again;
+// an untouched one is, and keeps the viewer's highlight cache warm.
+const typedRenderKeys = new Set<string>()
+let renderKeySalt = 0
+
+function renderKeyFor(cacheKey: string): string {
+  if (!typedRenderKeys.has(cacheKey)) return cacheKey
+  renderKeySalt += 1
+  return `${cacheKey}:edit${renderKeySalt}`
+}
+
+// Reading goes through the same cache: the viewer's rendered file for a key an
+// edit went through is the edited text. A read of that key gets a stand-in of
+// its own, one per key, and the same object for the same comparison.
+const readKeys = new Map<string, string>()
+const readComparisons = new WeakMap<FileComparison, FileComparison>()
+
+function readableComparison(comparison: FileComparison | null): FileComparison | null {
+  const file = comparison?.newFile
+  if (comparison == null || file == null || !typedRenderKeys.has(file.cacheKey)) return comparison
+  const cached = readComparisons.get(comparison)
+  if (cached != null) return cached
+  let key = readKeys.get(file.cacheKey)
+  if (key == null) {
+    renderKeySalt += 1
+    key = `${file.cacheKey}:read${renderKeySalt}`
+    readKeys.set(file.cacheKey, key)
+  }
+  const readable = { ...comparison, newFile: { ...file, cacheKey: key } }
+  readComparisons.set(comparison, readable)
+  return readable
 }
 
 export interface EditConflict {
@@ -61,14 +123,15 @@ interface UseFileEditingOptions {
   workspaceView: WorkspaceView
   repositoryReview: RepositoryReview | null
   autosaveOnBlur: boolean
-  onWorkspaceViewChange(view: WorkspaceView): void
   onSelectPath(path: string): void
   onComparisonChange(comparison: FileComparison): void
   onError(message: string | null): void
 }
 
+
 interface FileEditingController {
   hasSession: boolean
+  workingDrafts: WorkingDrafts
   activeSession: FileEditSession | null
   renderedComparison: FileComparison | null
   controls: FileEditControls
@@ -87,18 +150,16 @@ function createSession(comparison: FileComparison, draft?: DraftText): FileEditS
   const draftContents = resolveDraftFile(file, draft).contents
   return {
     path: comparison.path,
-    mode: 'edit',
     base: comparison,
+    renderKey: renderKeyFor(file.cacheKey),
     sourceCacheKey: file.cacheKey,
     sourceContents: file.contents,
-    // Leaving edit mode keeps the draft, and the editor keeps its cached text
-    // document under the same cacheKey, so resuming has to start out dirty.
+    // Leaving a file keeps its draft, and the editor keeps its cached text
+    // document under the same cacheKey, so coming back has to start out dirty.
     dirty: draftContents !== file.contents
   }
 }
 
-const DRAFT_PERSIST_DEBOUNCE_MS = 400
-const restoredDraftRoots = new Set<string>()
 
 export function shouldAutosaveOnBlur(options: {
   enabled: boolean
@@ -109,245 +170,162 @@ export function shouldAutosaveOnBlur(options: {
   return options.enabled && options.dirty && !options.saving && !options.conflict
 }
 
-export function useFileEditing({
-  root,
-  comparison,
-  selectedPath,
-  workspaceView,
-  repositoryReview,
-  autosaveOnBlur,
-  onWorkspaceViewChange,
-  onSelectPath,
-  onComparisonChange,
-  onError
-}: UseFileEditingOptions): FileEditingController {
-  const [session, setSession] = useState<FileEditSession | null>(null)
-  const [documentView, setDocumentView] = useState<DocumentView>('split')
-  const [saving, setSaving] = useState(false)
-  const [history, setHistory] = useState({ canUndo: false, canRedo: false })
-  const [initialDrafts] = useState<DraftMap>(() => readDrafts(root, browserDraftStorage()))
-  // Only which files have drafts is state; their text changes on every keystroke
-  // and lives in `draftsRef`. Holding the map in state re-rendered the whole
-  // workspace per character typed.
-  const [dirtyPaths, setDirtyPaths] = useState<readonly string[]>(() => draftPaths(initialDrafts))
-  const editorRef = useRef<Editor<ReviewAnnotationMetadata> | null>(null)
-  const savingRef = useRef(false)
-  const editRequestRef = useRef(0)
-  const attachedPathsRef = useRef(new Set<string>())
-  // Keyed by the cacheKey the draft was typed against, so a draft that predates
-  // an external write is never replayed over the newer file.
-  const [draftContents] = useState(() => new Map<string, DraftText>(
-    Object.values(initialDrafts).map((draft) => [draft.path, {
-      baseCacheKey: draft.sourceCacheKey,
-      contents: draft.contents
-    }])
-  ))
-  const persistTimerRef = useRef<number | null>(null)
-  const selectedPathRef = useRef(selectedPath)
-  useEffect(() => {
-    selectedPathRef.current = selectedPath
-  }, [selectedPath])
+/** The text a launch painted from the workspace cache, before main's copy. */
+export function isCachedTextComparison(comparison: FileComparison | null): boolean {
+  return comparison?.newFile?.cacheKey.startsWith(CACHED_TEXT_KEY_PREFIX) === true
+}
 
-  // An external write (agent, checkout, formatter) makes the revision the next
-  // save asserts about disk stale. A clean session adopts the new revision as it
-  // renders; a dirty one has to ask, because either answer loses somebody's work.
-  const diskFile = comparison != null && comparison.path === session?.path ? comparison.newFile : null
-  const diskState = resolveDiskState(session, diskFile)
-  const activeSession = useMemo<FileEditSession | null>(() => {
-    if (session == null || comparison == null || session.path !== comparison.path) return null
-    if (diskState !== 'adopt' || diskFile == null) return session
-    return { ...session, base: comparison, sourceContents: diskFile.contents, sourceCacheKey: diskFile.cacheKey }
-  }, [comparison, diskFile, diskState, session])
-  const conflictComparison = diskState === 'conflict' ? comparison : null
-  const conflict = useMemo<EditConflict | null>(
-    () => conflictComparison == null ? null : { path: conflictComparison.path, comparison: conflictComparison },
-    [conflictComparison]
-  )
-  const sessionRef = useRef<FileEditSession | null>(activeSession)
-  const conflictRef = useRef<EditConflict | null>(conflict)
-  useEffect(() => {
-    sessionRef.current = activeSession
-    conflictRef.current = conflict
-  }, [activeSession, conflict])
+/** Whether the open file can be edited here, and if not, the reason to show. */
+function editAvailability(
+  comparison: FileComparison | null,
+  selectedPath: string | null,
+  workspaceView: WorkspaceView,
+  repositoryReview: RepositoryReview | null
+): { canRequestEdit: boolean; unavailableReason: string | null } {
+  if (repositoryReview != null) return { canRequestEdit: false, unavailableReason: 'Editing is disabled while a review is open.' }
+  if (comparison?.binary === true) return { canRequestEdit: false, unavailableReason: 'Binary files cannot be edited.' }
+  if (comparison?.oversized === true) return { canRequestEdit: false, unavailableReason: 'Files larger than 2 MB cannot be edited.' }
+  // The text a launch painted is not the file on disk yet: a click there waits
+  // for main's copy, a moment later, rather than typing into a stand-in.
+  const canRequestEdit = selectedPath != null && workspaceView === 'file' && comparison?.path === selectedPath
+    && comparison.newFile != null && !isCachedTextComparison(comparison)
+  return { canRequestEdit, unavailableReason: null }
+}
 
+/** A draft typed against exactly the file now on disk, with text that differs from it. */
+function hasDraftToResume(comparison: FileComparison | null, draftContents: ReadonlyMap<string, DraftText>): boolean {
+  const file = comparison?.newFile
+  if (comparison == null || file == null) return false
+  const draft = draftContents.get(comparison.path)
+  return draft != null && resolveDraftFile(file, draft) !== file
+}
+
+function useSessionComparison(
+  activeSession: FileEditSession | null,
+  draftContents: ReadonlyMap<string, DraftText>
+): FileComparison | null {
   const sessionBase = activeSession?.base
   const sessionPath = activeSession?.path
-  const sessionMode = activeSession?.mode
-  // Only session boundaries — entering, resuming, switching between edit and
-  // preview — publish draft text to the surface. Typing updates the ref, and
-  // the library keeps the rendered DOM and the diff in sync from the editor's
-  // own document, so the file prop identity must not move while it happens.
-  const sessionComparison = useMemo(() => {
-    if (sessionBase == null || sessionPath == null || sessionMode == null) return null
+  const sessionRenderKey = activeSession?.renderKey
+  // Only session boundaries — starting, coming back to a draft — publish draft
+  // text to the surface. Typing updates the ref, and the library keeps the
+  // rendered DOM and the diff in sync from the editor's own document, so the
+  // file prop identity must not move while it happens.
+  return useMemo(() => {
+    if (sessionBase == null || sessionPath == null) return null
     const file = sessionBase.newFile
-    if (file == null) return sessionBase
+    if (file == null || sessionRenderKey == null) return sessionBase
     const rendered = resolveDraftFile(file, draftContents.get(sessionPath))
-    return rendered === file ? sessionBase : { ...sessionBase, newFile: rendered }
-    // sessionMode is a dependency because switching to preview and back is a
-    // boundary that has to republish the draft, not because it is read here.
-  }, [draftContents, sessionBase, sessionMode, sessionPath])
+    if (rendered === file && sessionRenderKey === file.cacheKey) return sessionBase
+    return { ...sessionBase, newFile: { ...rendered, cacheKey: sessionRenderKey } }
+  }, [draftContents, sessionBase, sessionPath, sessionRenderKey])
+}
 
-  const renderedComparison = activeSession == null ? comparison : sessionComparison
-  const canEditLoadedFile = comparison?.newFile != null
-    && !comparison.binary
-    && !comparison.oversized
-  const canRequestEdit = repositoryReview == null
-    && selectedPath != null
-    && (workspaceView === 'multi' || canEditLoadedFile)
-  const unavailableReason = repositoryReview != null
-    ? 'Editing is disabled while a review is open.'
-    : comparison?.binary === true
-      ? 'Binary files cannot be edited.'
-      : comparison?.oversized === true
-        ? 'Files larger than 2 MB cannot be edited.'
-        : null
+/**
+ * The session as the file on screen sees it. It ends when the reader leaves the
+ * file — the draft is kept, in storage and in the editor's cached document, and
+ * coming back to a file with a draft starts a new one — and when a write from
+ * outside lands under a clean session (a formatter, an agent, a checkout): the
+ * attached editor keeps its own document whatever file it is handed, so the only
+ * way to show the disk is to read it again. Nothing unsaved is lost, and the next
+ * click edits the new text. A dirty session asks instead (`diskState`), because
+ * either answer loses somebody's work.
+ */
+function sessionOnScreen(
+  session: FileEditSession | null,
+  comparison: FileComparison | null,
+  selectedPath: string | null,
+  workspaceView: WorkspaceView
+): { ended: boolean; activeSession: FileEditSession | null; diskState: ReturnType<typeof resolveDiskState> } {
+  if (session == null) return { ended: false, activeSession: null, diskState: 'unchanged' }
+  if (session.path !== selectedPath || workspaceView !== 'file') return { ended: true, activeSession: null, diskState: 'unchanged' }
+  if (comparison == null || comparison.path !== session.path) return { ended: false, activeSession: null, diskState: 'unchanged' }
+  const diskState = resolveDiskState(session, comparison.newFile)
+  // The comparison the session opened on is still the prop for a beat after a
+  // save moved the revision on; only a comparison that arrived since is a write.
+  if (diskState === 'adopt' && comparison !== session.base) return { ended: true, activeSession: null, diskState }
+  return { ended: false, activeSession: session, diskState }
+}
 
-  const syncHistory = useCallback(() => {
-    const editor = editorRef.current
-    const canUndo = editor?.canUndo ?? false
-    const canRedo = editor?.canRedo ?? false
-    setHistory((current) => current.canUndo === canUndo && current.canRedo === canRedo
-      ? current
-      : { canUndo, canRedo })
-  }, [])
+function withDirty(session: FileEditSession | null, path: string, dirty: boolean): FileEditSession | null {
+  return session == null || session.path !== path || session.dirty === dirty ? session : { ...session, dirty }
+}
 
+/** The editor the surface attached, and where its caret goes when it does. */
+function useEditorAttachment(
+  sessionRef: RefObject<FileEditSession | null>,
+  draftContents: ReadonlyMap<string, DraftText>
+) {
+  const editorRef = useRef<Editor<ReviewAnnotationMetadata> | null>(null)
+  // Where the reader clicked to start editing: the caret goes there once the
+  // editor attaches, a frame or two after the click.
+  const pendingCaretRef = useRef<EditCaretPosition | null>(null)
+  const attachedPathsRef = useRef(new Set<string>())
   const attachEditor = useCallback((editor: Editor<ReviewAnnotationMetadata>) => {
     editorRef.current = editor
-    syncHistory()
     const path = sessionRef.current?.path
-    // `persistState` restores the caret and scroll of a file this session has
-    // already edited, so the initial placement only owns a file's first attach.
+    // The click that started the session owns the caret. Without one — a draft
+    // resumed on arrival — `persistState` restores the caret of a file already
+    // edited, so the initial placement only owns a file's first attach.
+    const caret = pendingCaretRef.current
+    pendingCaretRef.current = null
     const firstAttach = path == null || !attachedPathsRef.current.has(path)
     if (path != null) attachedPathsRef.current.add(path)
+    // A draft resumed as its file opens reaches a viewer that has already drawn
+    // the disk copy, and the editor adopts what is drawn: the toolbar said
+    // Unsaved over the disk text. The session's own text is put in, once.
+    const draft = path == null ? undefined : draftContents.get(path)
+    const session = sessionRef.current
+    const resumed = session != null && draft != null && draft.baseCacheKey === session.sourceCacheKey
+      ? minimalTextEdit(editor.getText(), draft.contents)
+      : null
+    if (resumed != null) editor.applyEdits([resumed])
     window.requestAnimationFrame(() => {
-      editor.focus(firstAttach ? { lineNumber: 'first-visible', preventScroll: true } : { preventScroll: true })
+      if (caret != null) editor.focus({ ...caret, preventScroll: true })
+      else editor.focus(firstAttach ? { lineNumber: 'first-visible', preventScroll: true } : { preventScroll: true })
     })
-  }, [syncHistory])
+  }, [draftContents, sessionRef])
+  const getEditor = useCallback(() => editorRef.current, [])
+  return { editorRef, pendingCaretRef, attachedPathsRef, attachEditor, getEditor }
+}
 
-  // React can replay a state updater, so the next map is computed from a mirror
-  // ref and the storage write happens outside the setter.
-  const draftsRef = useRef(initialDrafts)
-  const applyDrafts = useCallback((update: (current: DraftMap) => DraftMap) => {
-    const next = update(draftsRef.current)
-    if (next === draftsRef.current) return
-    draftsRef.current = next
-    const nextPaths = draftPaths(next)
-    setDirtyPaths((current) => samePaths(current, nextPaths) ? current : nextPaths)
-    if (persistTimerRef.current != null) window.clearTimeout(persistTimerRef.current)
-    persistTimerRef.current = window.setTimeout(() => {
-      persistTimerRef.current = null
-      if (!writeDrafts(root, next, browserDraftStorage())) {
-        notifyStorageWriteFailed('drafts', showToast)
-      }
-    }, DRAFT_PERSIST_DEBOUNCE_MS)
-  }, [root])
-
-  const updateDraftFile = useCallback((file: FileContents) => {
-    const current = sessionRef.current
-    if (current == null || current.path !== file.name) return
-    draftContents.set(current.path, {
-      baseCacheKey: current.base.newFile?.cacheKey ?? current.sourceCacheKey,
-      contents: file.contents
-    })
-    const dirty = file.contents !== current.sourceContents
-    setSession((previous) => previous == null || previous.path !== current.path || previous.dirty === dirty
-      ? previous
-      : { ...previous, dirty })
-    applyDrafts((previous) => dirty
-      ? putDraft(previous, {
-        path: current.path,
-        sourceCacheKey: current.sourceCacheKey,
-        contents: file.contents,
-        savedAt: Date.now()
-      })
-      : removeDraft(previous, current.path))
-    queueMicrotask(syncHistory)
-  }, [applyDrafts, draftContents, syncHistory])
-
-  const startEditing = useCallback(async () => {
-    if (session != null && activeSession == null) {
-      try {
-        await preloadDiffEditor()
-        onSelectPath(session.path)
-        onWorkspaceViewChange('file')
-      } catch (error) {
-        onError(getErrorMessage(error))
-      }
-      return
-    }
-    if (repositoryReview != null || selectedPath == null) return
-    if (workspaceView === 'multi') {
-      const requestId = editRequestRef.current + 1
-      editRequestRef.current = requestId
-      onError(null)
-      try {
-        const [loadedComparison] = await Promise.all([
-          requireRepositoryApi().getComparison(selectedPath),
-          preloadDiffEditor()
-        ])
-        if (requestId !== editRequestRef.current || selectedPathRef.current !== selectedPath) return
-        const nextSession = createSession(loadedComparison, draftContents.get(selectedPath))
-        if (nextSession == null) throw new Error('This working file is not editable.')
-        onComparisonChange(loadedComparison)
-        setSession(nextSession)
-        onWorkspaceViewChange('file')
-      } catch (error) {
-        onError(getErrorMessage(error))
-      }
-      return
-    }
-    if (comparison == null) return
-    try {
-      await preloadDiffEditor()
-      const nextSession = createSession(comparison, draftContents.get(comparison.path))
-      if (nextSession != null) setSession(nextSession)
-    } catch (error) {
-      onError(getErrorMessage(error))
-    }
-  }, [activeSession, comparison, draftContents, onComparisonChange, onError, onSelectPath, onWorkspaceViewChange,
-    repositoryReview, selectedPath, session, workspaceView])
-
-  const setMode = useCallback((mode: 'edit' | 'preview') => {
-    setSession((current) => current == null || current.mode === mode
-      ? current
-      : { ...current, mode })
-  }, [])
-
-  // Leaving edit mode keeps the draft: the editor holds the text document under
-  // the same cacheKey either way, so discarding here would only desynchronise
-  // the two. Revert is the explicit way back, and it is undoable.
-  const close = useCallback(() => {
-    editorRef.current = null
-    setHistory({ canUndo: false, canRedo: false })
-    setSession(null)
-  }, [])
+/** What a session can be told to do: save, go back to disk, settle a conflict. */
+function useSessionCommands({
+  active,
+  sessionRef,
+  conflictRef,
+  editorRef,
+  attachedPathsRef,
+  draftContents,
+  applyDrafts,
+  setSession,
+  autosaveOnBlur,
+  onComparisonChange,
+  onError
+}: {
+  active: boolean
+  sessionRef: RefObject<FileEditSession | null>
+  conflictRef: RefObject<EditConflict | null>
+  editorRef: RefObject<Editor<ReviewAnnotationMetadata> | null>
+  attachedPathsRef: RefObject<Set<string>>
+  draftContents: Map<string, DraftText>
+  applyDrafts: DraftStore['applyDrafts']
+  setSession: Dispatch<SetStateAction<FileEditSession | null>>
+  autosaveOnBlur: boolean
+  onComparisonChange(comparison: FileComparison): void
+  onError(message: string | null): void
+}) {
+  const [saving, setSaving] = useState(false)
+  const savingRef = useRef(false)
 
   const revert = useCallback(() => {
     const current = sessionRef.current
     const editor = editorRef.current
     if (current == null || editor == null || !current.dirty) return
-    const draft = draftContents.get(current.path)?.contents ?? ''
-    const lines = draft.split('\n')
-    const lastLine = Math.max(0, lines.length - 1)
-    editor.applyEdits([{
-      range: {
-        start: { line: 0, character: 0 },
-        end: { line: lastLine, character: lines[lastLine]?.length ?? 0 }
-      },
-      newText: current.sourceContents
-    }])
-    queueMicrotask(syncHistory)
-  }, [draftContents, syncHistory])
-
-  const undo = useCallback(() => {
-    editorRef.current?.undo()
-    queueMicrotask(syncHistory)
-  }, [syncHistory])
-
-  const redo = useCallback(() => {
-    editorRef.current?.redo()
-    queueMicrotask(syncHistory)
-  }, [syncHistory])
+    // Only what was typed goes back, so the caret stays where the change was.
+    const edit = minimalTextEdit(editor.getText(), current.sourceContents)
+    if (edit != null) editor.applyEdits([edit])
+  }, [editorRef, sessionRef])
 
   const save = useCallback(async () => {
     const current = sessionRef.current
@@ -378,6 +356,10 @@ export function useFileEditing({
           dirty: false
         })
       applyDrafts((previous) => removeDraft(previous, current.path))
+      // Saved text is the disk's now; left here it would be replayed as a draft
+      // the next time the disk shows the revision it was typed against. Text
+      // typed while the write was out is still a draft and stays.
+      if (draftContents.get(current.path)?.contents === contents) draftContents.delete(current.path)
       onComparisonChange(savedComparison)
       showToast(`Saved ${current.path}`)
     } catch (error) {
@@ -386,7 +368,7 @@ export function useFileEditing({
       savingRef.current = false
       setSaving(false)
     }
-  }, [applyDrafts, draftContents, onComparisonChange, onError])
+  }, [applyDrafts, draftContents, editorRef, onComparisonChange, onError, sessionRef, setSession])
 
   const handleEditorBlur = useCallback(() => {
     const current = sessionRef.current
@@ -397,7 +379,7 @@ export function useFileEditing({
       conflict: conflictRef.current != null
     })) return
     void save()
-  }, [autosaveOnBlur, save])
+  }, [autosaveOnBlur, conflictRef, save, sessionRef])
 
   const keepDraft = useCallback(() => {
     const pending = conflictRef.current
@@ -407,7 +389,7 @@ export function useFileEditing({
     setSession((current) => current == null || current.path !== pending.path
       ? current
       : { ...current, sourceCacheKey: pending.comparison.newFile?.cacheKey ?? current.sourceCacheKey })
-  }, [])
+  }, [conflictRef, setSession])
 
   const reloadFromDisk = useCallback(() => {
     const pending = conflictRef.current
@@ -418,10 +400,10 @@ export function useFileEditing({
     const nextSession = createSession(pending.comparison)
     setSession(nextSession)
     onComparisonChange(pending.comparison)
-  }, [applyDrafts, draftContents, onComparisonChange])
+  }, [applyDrafts, attachedPathsRef, conflictRef, draftContents, onComparisonChange, setSession])
 
   useEffect(() => {
-    if (activeSession == null) return
+    if (!active) return
     const handleKeyDown = (event: KeyboardEvent): void => {
       if (event.key.toLowerCase() !== 's' || !(event.metaKey || event.ctrlKey)) return
       event.preventDefault()
@@ -429,59 +411,129 @@ export function useFileEditing({
     }
     window.addEventListener('keydown', handleKeyDown, { capture: true })
     return () => window.removeEventListener('keydown', handleKeyDown, { capture: true })
-  }, [activeSession, save])
+  }, [active, save])
 
+  return { saving, revert, save, handleEditorBlur, keepDraft, reloadFromDisk }
+}
+
+export function useFileEditing({
+  root,
+  comparison,
+  selectedPath,
+  workspaceView,
+  repositoryReview,
+  autosaveOnBlur,
+  onSelectPath,
+  onComparisonChange,
+  onError
+}: UseFileEditingOptions): FileEditingController {
+  const [session, setSession] = useState<FileEditSession | null>(null)
+  const [documentView, setDocumentView] = useState<DocumentView>('split')
+  const { dirtyPaths, draftContents, applyDrafts, workingDrafts } = useDraftStore({ root, onSelectPath, onComparisonChange })
+
+  const onScreen = sessionOnScreen(session, comparison, selectedPath, workspaceView)
+  if (onScreen.ended) setSession(null)
+  const { activeSession, diskState } = onScreen
+  const conflictComparison = diskState === 'conflict' ? comparison : null
+  const conflict = useMemo<EditConflict | null>(
+    () => conflictComparison == null ? null : { path: conflictComparison.path, comparison: conflictComparison },
+    [conflictComparison]
+  )
+  const sessionRef = useRef<FileEditSession | null>(activeSession)
+  const conflictRef = useRef<EditConflict | null>(conflict)
   useEffect(() => {
-    if (dirtyPaths.length === 0 || restoredDraftRoots.has(root)) return
-    restoredDraftRoots.add(root)
-    const firstPath = dirtyPaths[0]!
-    showToast(`${dirtyPaths.length} unsaved ${dirtyPaths.length === 1 ? 'draft' : 'drafts'} restored`, {
-      label: 'Open',
-      run: () => onSelectPath(firstPath)
+    sessionRef.current = activeSession
+    conflictRef.current = conflict
+  }, [activeSession, conflict])
+  const { editorRef, pendingCaretRef, attachedPathsRef, attachEditor, getEditor } = useEditorAttachment(sessionRef, draftContents)
+
+  const sessionComparison = useSessionComparison(activeSession, draftContents)
+
+  const renderedComparison = activeSession == null ? readableComparison(comparison) : sessionComparison
+  const { canRequestEdit, unavailableReason } = editAvailability(comparison, selectedPath, workspaceView, repositoryReview)
+
+
+  const updateDraftFile = useCallback((file: FileContents) => {
+    const current = sessionRef.current
+    if (current == null || current.path !== file.name) return
+    // Keyed by the disk revision the text is typed against — after a save that
+    // is the saved file, not the one the session opened on, or leaving and
+    // coming back would find the draft stale and drop it.
+    draftContents.set(current.path, {
+      baseCacheKey: current.sourceCacheKey,
+      contents: file.contents
     })
-  }, [dirtyPaths, onSelectPath, root])
+    typedRenderKeys.add(current.renderKey)
+    const dirty = file.contents !== current.sourceContents
+    setSession((previous) => withDirty(previous, current.path, dirty))
+    applyDrafts((previous) => dirty
+      ? putDraft(previous, {
+        path: current.path,
+        sourceCacheKey: current.sourceCacheKey,
+        contents: file.contents,
+        savedAt: Date.now()
+      })
+      : removeDraft(previous, current.path))
+  }, [applyDrafts, draftContents])
+
+  // Editing starts where the reader clicks: nothing about reading a file — its
+  // render, its fold state, the editor module — changes until then.
+  const startEditing = useCallback(async (position?: EditCaretPosition) => {
+    if (!canRequestEdit || comparison == null || session?.path === comparison.path) return
+    pendingCaretRef.current = position ?? null
+    try {
+      await preloadDiffEditor()
+      const nextSession = createSession(comparison, draftContents.get(comparison.path))
+      if (nextSession != null) setSession((current) => current ?? nextSession)
+    } catch (error) {
+      onError(getErrorMessage(error))
+    }
+  }, [canRequestEdit, comparison, draftContents, onError, pendingCaretRef, session])
+
+  // A file that still has a draft opens straight into it, so the unsaved text is
+  // what is on screen rather than the disk copy behind a button.
+  const resumesDraft = session == null && canRequestEdit && hasDraftToResume(comparison, draftContents)
+  useEffect(() => {
+    if (resumesDraft) void startEditing()
+  }, [resumesDraft, startEditing])
 
   useEffect(() => {
-    if (dirtyPaths.length === 0) return
-    const confirmClose = (event: BeforeUnloadEvent): void => {
-      event.preventDefault()
-      event.returnValue = ''
-    }
-    window.addEventListener('beforeunload', confirmClose)
-    return () => window.removeEventListener('beforeunload', confirmClose)
-  }, [dirtyPaths.length])
+    if (activeSession == null) editorRef.current = null
+  }, [activeSession, editorRef])
 
-  useEffect(() => () => {
-    if (persistTimerRef.current != null) window.clearTimeout(persistTimerRef.current)
-  }, [])
-
-  const getEditor = useCallback(() => editorRef.current, [])
+  const { saving, revert, save, handleEditorBlur, keepDraft, reloadFromDisk } = useSessionCommands({
+    active: activeSession != null,
+    sessionRef,
+    conflictRef,
+    editorRef,
+    attachedPathsRef,
+    draftContents,
+    applyDrafts,
+    setSession,
+    autosaveOnBlur,
+    onComparisonChange,
+    onError
+  })
 
   const controls = useMemo<FileEditControls>(() => ({
-    available: canRequestEdit || session != null,
-    unavailableReason: canRequestEdit || session != null ? null : unavailableReason,
-    startLabel: session != null && activeSession == null ? 'Resume draft' : 'Edit',
-    mode: activeSession?.mode ?? 'read',
+    available: canRequestEdit || activeSession != null,
+    unavailableReason: canRequestEdit || activeSession != null ? null : unavailableReason,
+    mode: activeSession == null ? 'read' : 'edit',
     documentView,
     dirty: activeSession?.dirty ?? false,
     saving,
-    canUndo: activeSession?.mode === 'edit' && history.canUndo,
-    canRedo: activeSession?.mode === 'edit' && history.canRedo,
     unsavedPaths: dirtyPaths,
-    onStart: () => { void startEditing() },
-    onModeChange: setMode,
+    onStart: (position) => { void startEditing(position) },
     onDocumentViewChange: setDocumentView,
-    onUndo: undo,
-    onRedo: redo,
-    onCancel: close,
     onRevert: revert,
     onSave: () => { void save() },
     onOpenPath: onSelectPath
-  }), [activeSession, canRequestEdit, close, dirtyPaths, documentView, history, onSelectPath, redo,
-    revert, save, saving, session, setMode, startEditing, unavailableReason, undo])
+  }), [activeSession, canRequestEdit, dirtyPaths, documentView, onSelectPath, revert, save, saving,
+    startEditing, unavailableReason])
 
   return {
     hasSession: session != null,
+    workingDrafts,
     activeSession,
     renderedComparison,
     controls,
@@ -493,8 +545,4 @@ export function useFileEditing({
     handleEditorBlur,
     getEditor
   }
-}
-
-function samePaths(left: readonly string[], right: readonly string[]): boolean {
-  return left.length === right.length && left.every((path, index) => path === right[index])
 }

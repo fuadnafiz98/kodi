@@ -22,6 +22,51 @@ export interface GitCommitComposerProps {
   onCommit(options: CommitOptions): Promise<boolean>
 }
 
+function commitPlaceholder(amend: boolean, lastCommitSubject: string | null, branch: string | null): string {
+  return amend
+    ? `Leave empty to keep “${lastCommitSubject ?? 'the last message'}”`
+    : `Message (⌘↵ to commit${branch == null ? '' : ` on “${branch}”`})`
+}
+
+function CommitMenu({ amend, label, available, canAmend, onPush, onToggleAmend }: {
+  amend: boolean
+  label: string
+  available: boolean
+  canAmend: boolean
+  onPush(): void
+  onToggleAmend(): void
+}): React.JSX.Element {
+  return (
+    <div className="scm-commit-menu" role="menu" aria-label="Commit actions">
+      <button type="button" role="menuitem" disabled={!available} onClick={onPush}>
+        <span>{amend ? 'Amend & Push' : `${label} & Push`}</span><kbd>⇧⌘↵</kbd>
+      </button>
+      <button
+        type="button"
+        role="menuitemcheckbox"
+        aria-checked={amend}
+        disabled={!canAmend}
+        onClick={onToggleAmend}
+      >
+        <span>Amend Last Commit</span>{amend ? <IconCheck aria-hidden="true" /> : null}
+      </button>
+    </div>
+  )
+}
+
+function CommitButtonContent({ committing, amend, label }: {
+  committing: boolean
+  amend: boolean
+  label: string
+}): React.JSX.Element {
+  return (
+    <>
+      <span className="action-icon-slot">{committing ? <IconRefresh className="spin" /> : <IconCheck />}</span>
+      {committing ? (amend ? 'Amending…' : 'Committing…') : label}
+    </>
+  )
+}
+
 export function GitCommitComposer({
   root,
   branch,
@@ -74,9 +119,7 @@ export function GitCommitComposer({
     setAmend(false)
   }
 
-  const placeholder = amend
-    ? `Leave empty to keep “${lastCommitSubject ?? 'the last message'}”`
-    : `Message (⌘↵ to commit${branch == null ? '' : ` on “${branch}”`})`
+  const placeholder = commitPlaceholder(amend, lastCommitSubject, branch)
 
   return (
     <form
@@ -116,8 +159,7 @@ export function GitCommitComposer({
       ) : null}
       <div className="scm-commit-split" ref={splitRef}>
         <button className="scm-commit-button" type="submit" disabled={!available} aria-busy={committing}>
-          <span className="action-icon-slot">{committing ? <IconRefresh className="spin" /> : <IconCheck />}</span>
-          {committing ? (amend ? 'Amending…' : 'Committing…') : label}
+          <CommitButtonContent committing={committing} amend={amend} label={label} />
         </button>
         <button
           className="scm-commit-more"
@@ -131,23 +173,12 @@ export function GitCommitComposer({
           <IconChevronSm />
         </button>
         {menuOpen ? (
-          <div className="scm-commit-menu" role="menu" aria-label="Commit actions">
-            <button type="button" role="menuitem" disabled={!available} onClick={() => void submit(true)}>
-              <span>{amend ? 'Amend & Push' : `${label} & Push`}</span><kbd>⇧⌘↵</kbd>
-            </button>
-            <button
-              type="button"
-              role="menuitemcheckbox"
-              aria-checked={amend}
-              disabled={lastCommitSubject == null}
-              onClick={() => {
-                setAmend((current) => !current)
-                setMenuOpen(false)
-              }}
-            >
-              <span>Amend Last Commit</span>{amend ? <IconCheck aria-hidden="true" /> : null}
-            </button>
-          </div>
+          <CommitMenu amend={amend} label={label} available={available} canAmend={lastCommitSubject != null}
+            onPush={() => void submit(true)}
+            onToggleAmend={() => {
+              setAmend((current) => !current)
+              setMenuOpen(false)
+            }} />
         ) : null}
       </div>
     </form>

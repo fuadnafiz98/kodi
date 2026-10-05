@@ -64,12 +64,14 @@ function visibleReviews(
 
 type HunkLineKind = 'header' | 'add' | 'del' | 'ctx'
 
-function hunkLines(diffHunk: string): Array<{ kind: HunkLineKind; text: string }> {
-  return diffHunk.split('\n').map((text) => ({
+// A captured hunk never changes, so a line's place in it is its identity.
+function hunkLines(diffHunk: string): Array<{ kind: HunkLineKind; text: string; position: number }> {
+  return diffHunk.split('\n').map((text, position) => ({
     kind: text.startsWith('@@') ? 'header'
       : text.startsWith('+') ? 'add'
         : text.startsWith('-') ? 'del' : 'ctx',
-    text
+    text,
+    position
   }))
 }
 
@@ -99,8 +101,8 @@ function OutdatedThread({ thread, now }: {
       </header>
       {thread.diffHunk === '' ? null : (
         <ol className="pr-context-outdated-hunk" aria-label="Code this comment was written on">
-          {hunkLines(thread.diffHunk).map((entry, index) => (
-            <li key={index} data-kind={entry.kind}>{entry.text}</li>
+          {hunkLines(thread.diffHunk).map((entry) => (
+            <li key={entry.position} data-kind={entry.kind}>{entry.text}</li>
           ))}
         </ol>
       )}
@@ -170,7 +172,6 @@ function useHeightGlide(ref: React.RefObject<HTMLDivElement | null>, contentKey:
   const pinned = useRef(false)
   // Read at content changes only; opening and closing are the stylesheet's job.
   const enabledRef = useRef(enabled)
-  enabledRef.current = enabled
 
   useLayoutEffect(() => {
     const element = ref.current
@@ -194,7 +195,10 @@ function useHeightGlide(ref: React.RefObject<HTMLDivElement | null>, contentKey:
     }
   }, [ref])
 
+  // Runs ahead of the content effect below, so a commit that changes both reads
+  // the new value there.
   useLayoutEffect(() => {
+    enabledRef.current = enabled
     const element = ref.current
     if (element == null || !pinned.current) return
     pinned.current = false
@@ -223,6 +227,99 @@ function useHeightGlide(ref: React.RefObject<HTMLDivElement | null>, contentKey:
   }, [contentKey, ref])
 }
 
+/** The reviews submitted so far, each as a sentence under its author's avatar. */
+function SubmittedReviews({ reviews, now }: {
+  reviews: readonly RemoteReviewSummary[]
+  now: number
+}): React.JSX.Element | null {
+  const shown = visibleReviews(reviews)
+  if (shown.length === 0) return null
+  return (
+    <ol className="pr-context-reviews" aria-label="Submitted reviews">
+      {shown.map(({ review, superseded }) => {
+        const meta = reviewStateMeta(review.state)
+        const StateIcon = meta.icon
+        return (
+          <li className="pr-context-review" key={review.id} data-tone={meta.tone}
+            data-superseded={superseded ? '' : undefined}>
+            <div className="pr-context-review-byline">
+              <span className="pr-context-review-glyph" aria-hidden="true"><StateIcon /></span>
+              <RemoteAvatar url={review.authorAvatarUrl} login={review.authorLogin} />
+              <p className="pr-context-review-sentence">
+                <strong>{review.authorLogin}</strong> {meta.verb}
+              </p>
+              {review.submittedAt == null ? null : (
+                <span className="pr-context-review-age">{formatCommentAge(review.submittedAt, now)}</span>
+              )}
+            </div>
+            {review.body.trim() === '' ? null : (
+              <GitHubMarkdownContent source={review.body} className="pr-context-review-body" />
+            )}
+          </li>
+        )
+      })}
+    </ol>
+  )
+}
+
+function OutdatedThreads({ threads, now }: {
+  threads: readonly RemoteReviewThread[]
+  now: number
+}): React.JSX.Element | null {
+  if (threads.length === 0) return null
+  return (
+    <details className="pr-context-outdated">
+      <summary>
+        <IconClockArrow aria-hidden="true" />
+        {threads.length} outdated {threads.length === 1 ? 'comment' : 'comments'}
+        <span>no longer on the current diff</span>
+      </summary>
+      <ol aria-label="Outdated review comments">
+        {threads.map((thread) => (
+          <OutdatedThread key={thread.id} thread={thread} now={now} />
+        ))}
+      </ol>
+    </details>
+  )
+}
+
+/** A long description folds away; a short one reads inline. */
+function Description({ body }: { body: string }): React.JSX.Element | null {
+  if (body === '') return null
+  const description = <GitHubMarkdownContent source={body} className="pr-context-markdown" />
+  const longBody = body.split('\n').length > 10 || body.length > 1_200
+  return longBody ? <DescriptionDisclosure>{description}</DescriptionDisclosure> : description
+}
+
+function ContextHeader({ conversation, empty, expanded, contentId, onToggle }: {
+  conversation: PullRequestConversation | null
+  empty: boolean
+  expanded: boolean
+  contentId: string
+  onToggle(): void
+}): React.JSX.Element {
+  return (
+    <header>
+      {/* An empty pull request keeps the strip it reserved, so nothing below moves
+          up, but there is nothing to open. */}
+      {empty ? (
+        <div className="pr-context-toggle" data-empty="">
+          <IconBrandGithub aria-hidden="true" />
+          <strong>Pull request context</strong>
+          <span className="pr-context-note">{conversation?.available === false ? 'Unavailable' : 'No description'}</span>
+        </div>
+      ) : (
+        <button type="button" className="pr-context-toggle" aria-expanded={expanded}
+          aria-controls={contentId} onClick={onToggle}>
+          <IconChevronSm className="pr-context-chevron" aria-hidden="true" />
+          <IconBrandGithub aria-hidden="true" />
+          <strong>Pull request context</strong>
+        </button>
+      )}
+    </header>
+  )
+}
+
 export function PullRequestContext({ conversation, pullRequest = false }: {
   conversation: PullRequestConversation | null
   /**
@@ -247,32 +344,10 @@ export function PullRequestContext({ conversation, pullRequest = false }: {
   useHeightGlide(bodyRef, loading ? null : conversation, expanded)
   if (empty && !pullRequest) return null
 
-  const longBody = body.split('\n').length > 10 || body.length > 1_200
-  const description = body === '' ? null : (
-    <GitHubMarkdownContent source={body} className="pr-context-markdown" />
-  )
-  const shown = visibleReviews(reviews)
-
   return (
     <section className="pr-context" aria-label="Pull request context">
-      <header>
-        {/* An empty pull request keeps the strip it reserved, so nothing below moves
-            up, but there is nothing to open. */}
-        {empty ? (
-          <div className="pr-context-toggle" data-empty="">
-            <IconBrandGithub aria-hidden="true" />
-            <strong>Pull request context</strong>
-            <span className="pr-context-note">{conversation?.available === false ? 'Unavailable' : 'No description'}</span>
-          </div>
-        ) : (
-          <button type="button" className="pr-context-toggle" aria-expanded={expanded}
-            aria-controls={contentId} onClick={() => setExpanded((current) => !current)}>
-            <IconChevronSm className="pr-context-chevron" aria-hidden="true" />
-            <IconBrandGithub aria-hidden="true" />
-            <strong>Pull request context</strong>
-          </button>
-        )}
-      </header>
+      <ContextHeader conversation={conversation} empty={empty} expanded={expanded} contentId={contentId}
+        onToggle={() => setExpanded((current) => !current)} />
       {/* The body stays mounted so its height can animate: this section lives in
           the review viewer's header slot, whose ResizeObserver re-anchors the
           diff below on every observed change, and a height that moves frame by
@@ -283,49 +358,9 @@ export function PullRequestContext({ conversation, pullRequest = false }: {
       <div id={contentId} className="pr-context-body" ref={bodyRef}
         data-collapsed={expanded && !empty ? undefined : ''} inert={!expanded || empty}>
         {loading ? <ContextPlaceholder /> : null}
-        {longBody ? (
-          <DescriptionDisclosure>{description}</DescriptionDisclosure>
-        ) : description}
-        {shown.length > 0 ? (
-          <ol className="pr-context-reviews" aria-label="Submitted reviews">
-            {shown.map(({ review, superseded }) => {
-              const meta = reviewStateMeta(review.state)
-              const StateIcon = meta.icon
-              return (
-                <li className="pr-context-review" key={review.id} data-tone={meta.tone}
-                  data-superseded={superseded ? '' : undefined}>
-                  <div className="pr-context-review-byline">
-                    <span className="pr-context-review-glyph" aria-hidden="true"><StateIcon /></span>
-                    <RemoteAvatar url={review.authorAvatarUrl} login={review.authorLogin} />
-                    <p className="pr-context-review-sentence">
-                      <strong>{review.authorLogin}</strong> {meta.verb}
-                    </p>
-                    {review.submittedAt == null ? null : (
-                      <span className="pr-context-review-age">{formatCommentAge(review.submittedAt, now)}</span>
-                    )}
-                  </div>
-                  {review.body.trim() === '' ? null : (
-                    <GitHubMarkdownContent source={review.body} className="pr-context-review-body" />
-                  )}
-                </li>
-              )
-            })}
-          </ol>
-        ) : null}
-        {outdated.length === 0 ? null : (
-          <details className="pr-context-outdated">
-            <summary>
-              <IconClockArrow aria-hidden="true" />
-              {outdated.length} outdated {outdated.length === 1 ? 'comment' : 'comments'}
-              <span>no longer on the current diff</span>
-            </summary>
-            <ol aria-label="Outdated review comments">
-              {outdated.map((thread) => (
-                <OutdatedThread key={thread.id} thread={thread} now={now} />
-              ))}
-            </ol>
-          </details>
-        )}
+        <Description body={body} />
+        <SubmittedReviews reviews={reviews} now={now} />
+        <OutdatedThreads threads={outdated} now={now} />
       </div>
     </section>
   )

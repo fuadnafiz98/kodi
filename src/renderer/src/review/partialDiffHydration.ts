@@ -193,7 +193,7 @@ export function createPartialDiffLoader(
   }
 }
 
-function exceedsLineLimit(contents: string | undefined): boolean {
+export function exceedsLineLimit(contents: string | undefined): boolean {
   if (contents == null) return false
   let newlines = 0
   for (let index = contents.indexOf('\n'); index !== -1; index = contents.indexOf('\n', index + 1)) {
@@ -235,6 +235,21 @@ async function hydrateWhenHighlighted(
   if (target.fileDiff === fileDiff && fileDiff.isPartial) target.loadFilesIfNecessary?.()
   else loader.discard(fileDiff)
   return true
+}
+
+// The items the viewer has mounted (one instance each), for work that only
+// matters to what the reader can see.
+const renderedItems = new Map<object, string>()
+
+/** Call from `onPostRender`. */
+export function noteReviewItemRender(instance: object, phase: PostRenderPhase, id: string): void {
+  if (phase === 'unmount') renderedItems.delete(instance)
+  else renderedItems.set(instance, id)
+}
+
+export function isReviewItemRendered(id: string): boolean {
+  for (const rendered of renderedItems.values()) if (rendered === id) return true
+  return false
 }
 
 const settleTimers = new WeakMap<object, ReturnType<typeof setTimeout>>()

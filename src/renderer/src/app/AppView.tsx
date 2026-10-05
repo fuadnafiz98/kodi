@@ -9,24 +9,24 @@ import type { DocumentView } from '../review/documentView'
 export type DiffStyle = 'split' | 'unified'
 export type WorkspaceView = 'file' | 'multi'
 
+/** Where a click in the code put the caret: one-based line, zero-based column. */
+export interface EditCaretPosition {
+  lineNumber: number
+  character: number
+}
+
 export interface FileEditControls {
+  /** The open file can be edited in place: a click in its code starts editing. */
   available: boolean
-  /** Why the Edit button is disabled: binary, oversized, or a review is open. */
+  /** Why it cannot: binary, oversized, or a review is open. */
   unavailableReason: string | null
-  startLabel: 'Edit' | 'Resume draft'
-  mode: 'read' | 'edit' | 'preview'
+  mode: 'read' | 'edit'
   documentView: DocumentView
   dirty: boolean
   saving: boolean
-  canUndo: boolean
-  canRedo: boolean
   unsavedPaths: readonly string[]
-  onStart(): void
-  onModeChange(mode: 'edit' | 'preview'): void
+  onStart(position?: EditCaretPosition): void
   onDocumentViewChange(view: DocumentView): void
-  onUndo(): void
-  onRedo(): void
-  onCancel(): void
   onRevert(): void
   onSave(): void
   onOpenPath(path: string): void

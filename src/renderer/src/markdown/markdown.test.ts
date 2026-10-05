@@ -6,10 +6,21 @@ import {
   EMPTY_STREAMING_MARKDOWN,
   keyForBlock,
   parseInline,
-  parseMarkdown
+  parseMarkdown,
+  splitCodeSpans,
+  splitTableRow
 } from './markdown'
 
 describe('parseInline', () => {
+  it('keeps underscores inside a name as part of it', () => {
+    expect(parseInline('call data_platform_file_id first')).toEqual([
+      { kind: 'text', text: 'call data_platform_file_id first' }
+    ])
+    expect(parseInline('an _aside_ here')).toEqual([
+      { kind: 'text', text: 'an ' }, { kind: 'emphasis', text: 'aside' }, { kind: 'text', text: ' here' }
+    ])
+  })
+
   it('splits inline code, strong, and emphasis runs', () => {
     expect(parseInline('use `git diff` for **big** and _small_ changes')).toEqual([
       { kind: 'text', text: 'use ' },
@@ -188,5 +199,78 @@ describe('keyForBlock', () => {
       keyForBlock(parseMarkdown(source)[0]!, new Map<string, number>())
     expect(keyAfter('- first item')).toBe(keyAfter('- first item\n- second item'))
     expect(keyAfter('- first item')).toBe(keyAfter('- first item\n- second\n- third'))
+  })
+})
+
+describe('splitCodeSpans', () => {
+  // Observed live: **Yes, `[1]` is safe.** drew its backticks.
+  it('splits the code out of a bold run', () => {
+    expect(parseInline('**Yes, `[1]` is safe.**')).toEqual([{ kind: 'strong', text: 'Yes, `[1]` is safe.' }])
+    expect(splitCodeSpans('Yes, `[1]` is safe.')).toEqual([
+      { code: false, text: 'Yes, ' }, { code: true, text: '[1]' }, { code: false, text: ' is safe.' }
+    ])
+  })
+
+  it('leaves text without code alone', () => {
+    expect(splitCodeSpans('plain')).toEqual([{ code: false, text: 'plain' }])
+    expect(splitCodeSpans('a `` b')).toEqual([{ code: false, text: 'a `` b' }])
+  })
+})
+
+describe('tables', () => {
+  const cellText = (cells: { text: string }[][]) => cells.map((cell) => cell.map((inline) => inline.text).join(''))
+
+  it('parses a GFM table with header, delimiter and body rows', () => {
+    const [table] = parseMarkdown('| Input | Matched |\n|---|---|\n| consists of 2 phases | 2 phases |\n| 3 phase supply | 3 phase |')
+    expect(table?.kind).toBe('table')
+    if (table?.kind !== 'table') return
+    expect(cellText(table.header)).toEqual(['Input', 'Matched'])
+    expect(table.rows.map(cellText)).toEqual([['consists of 2 phases', '2 phases'], ['3 phase supply', '3 phase']])
+    expect(table.align).toEqual([null, null])
+  })
+
+  it('reads alignment and works without outer pipes', () => {
+    const [table] = parseMarkdown('a | b | c | d\n:-- | --: | :-: | ---\n1 | 2 | 3 | 4')
+    expect(table?.kind === 'table' && table.align).toEqual(['left', 'right', 'center', null])
+    expect(table?.kind === 'table' && table.rows.map(cellText)).toEqual([['1', '2', '3', '4']])
+  })
+
+  it('keeps an escaped pipe and a pipe inside a code span in the cell', () => {
+    expect(splitTableRow('| \\|Ni phase\\| | `a | b` |')).toEqual(['|Ni phase|', '`a | b`'])
+    const [table] = parseMarkdown('| Pattern | Note |\n|---|---|\n| `x|y` | **bold** |')
+    if (table?.kind !== 'table') throw new Error('not a table')
+    expect(table.rows[0]?.[0]).toEqual([{ kind: 'code', text: 'x|y' }])
+    expect(table.rows[0]?.[1]).toEqual([{ kind: 'strong', text: 'bold' }])
+  })
+
+  it('pads short rows and cuts long ones to the header width', () => {
+    const [table] = parseMarkdown('| a | b |\n|---|---|\n| 1 |\n| 1 | 2 | 3 |')
+    expect(table?.kind === 'table' && table.rows.map(cellText)).toEqual([['1', ''], ['1', '2']])
+  })
+
+  it('is not a table when the delimiter does not match the header', () => {
+    expect(parseMarkdown('| a | b |\n|---|\n| 1 | 2 |')[0]?.kind).toBe('paragraph')
+    expect(parseMarkdown('a | b')[0]?.kind).toBe('paragraph')
+    expect(parseMarkdown('| x\n---')[0]?.kind).toBe('paragraph')
+    expect(parseMarkdown('| x |\n| --- |\n| 1 |')[0]?.kind).toBe('table')
+  })
+
+  it('ends at a blank line or a line without a pipe, and what follows parses as usual', () => {
+    const blocks = parseMarkdown('Intro.\n| a | b |\n|---|---|\n| 1 | 2 |\nAfter it.\n\n- item')
+    expect(blocks.map((block) => block.kind)).toEqual(['paragraph', 'table', 'paragraph', 'list'])
+  })
+
+  it('streams to the same blocks as a one-shot parse, however it is chunked', () => {
+    const answer = '### Verified\n\n| Input | Matched |\n|:---|---:|\n| consists of 2 phases | 2 phases |\n| `a|b` | \\|Ni\\| |\n\nAfter the table.\n'
+    const expected = parseMarkdown(answer)
+    expect(expected.map((block) => block.kind)).toEqual(['heading', 'table', 'paragraph'])
+    for (const size of [1, 2, 5, 11, 4096]) expect(streamInChunks(answer, size).blocks).toEqual(expected)
+  })
+
+  it('keys a table by its header, so rows streaming in keep its identity', () => {
+    const seen = () => new Map<string, number>()
+    const before = parseMarkdown('| a | b |\n|---|---|\n| 1 | 2 |')[0]!
+    const after = parseMarkdown('| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |')[0]!
+    expect(keyForBlock(after, seen())).toBe(keyForBlock(before, seen()))
   })
 })

@@ -1716,9 +1716,10 @@ export class RepositoryService {
   #workingFileCache = new Map<string, { read: WorkingFileRead; bytes: number }>()
   #workingFileCacheBytes = 0
   #pendingComparisons = new Map<string, Promise<FileComparison>>()
+  #revisionFetches = new Map<string, Promise<boolean>>()
   #pendingWorkingTreePatches = new Map<string, ReviewFlight<WorkingTreePatch, WorkingTreePatch[]>>()
   #pendingLocalReviews = new Map<string, ReviewFlight<LocalReviewProgress, LocalReviewResult>>()
-  #selfWriteObserver: ((path: string) => void) | null = null
+  #selfWriteObserver: ((path: string, stillOurs?: () => Promise<boolean>) => void) | null = null
   #indexWritesInFlight = 0
   #indexWriteHeartbeat: ReturnType<typeof setInterval> | null = null
   #snapshotObserver: ((snapshot: RepositorySnapshot) => void) | null = null
@@ -1751,7 +1752,7 @@ export class RepositoryService {
 
   // The watcher needs to know a write is ours before it lands, or it refreshes
   // the whole tree for a file the app just wrote and already has the contents of.
-  setSelfWriteObserver(observe: ((path: string) => void) | null): void {
+  setSelfWriteObserver(observe: ((path: string, stillOurs?: () => Promise<boolean>) => void) | null): void {
     this.#selfWriteObserver = observe
   }
 
@@ -2163,6 +2164,49 @@ export class RepositoryService {
     return read != null && !read.missing
   }
 
+  /**
+   * Makes both ends of a pull request readable, fetching them when the clone
+   * has never seen them — a branch nobody pulled, or a push since the last
+   * fetch. Without them the review can only show the patch: no expanding
+   * context, and every hunk tokenized on its own, so a docstring that opens
+   * above a hunk reads as code inside it. GitHub serves any commit reachable
+   * from the repository by id; `refs/pull/N/head` covers a head that only a
+   * fork's branch reaches. Nothing is written but objects: no ref, no
+   * FETCH_HEAD.
+   */
+  async ensurePullRequestRevisions(pullRequestUrl: unknown, baseOid: unknown, headOid: unknown): Promise<boolean> {
+    this.#requireGitRepository()
+    if (typeof baseOid !== 'string' || !GIT_REVISION_PATTERN.test(baseOid)
+      || typeof headOid !== 'string' || !GIT_REVISION_PATTERN.test(headOid)
+      || typeof pullRequestUrl !== 'string') return false
+    const readable = async (): Promise<boolean> =>
+      (await Promise.all([this.hasRevision(baseOid), this.hasRevision(headOid)])).every(Boolean)
+    if (await readable()) return true
+    const number = /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/(\d+)(?:\/.*)?$/i
+      .exec(pullRequestUrl.trim())?.[1]
+    if (number == null) return false
+    const key = `${baseOid}:${headOid}`
+    const inFlight = this.#revisionFetches.get(key)
+    if (inFlight != null) return await inFlight
+    const run = (async () => {
+      const remote = (await this.getRemotes().catch(() => []))
+        .find((candidate) => pullRequestTargetsRemotes([candidate], pullRequestUrl))
+      if (remote == null) return false
+      const fetch = (refs: string[]): Promise<unknown> => this.#gitAllowFailure(
+        ['fetch', '--quiet', '--no-tags', '--no-write-fetch-head', remote.name, ...refs])
+      await fetch([headOid, baseOid])
+      if (await readable()) return true
+      await fetch([`refs/pull/${number}/head`, baseOid])
+      return await readable()
+    })()
+    this.#revisionFetches.set(key, run)
+    try {
+      return await run
+    } finally {
+      this.#revisionFetches.delete(key)
+    }
+  }
+
   async #loadComparison(path: string): Promise<FileComparison> {
     const root = this.#requireRoot()
     const snapshot = this.#requireSnapshot()
@@ -2258,7 +2302,13 @@ export class RepositoryService {
     const temporaryPath = resolve(dirname(resolvedPath), `.kodi-save-${randomUUID()}`)
     try {
       await writeFile(temporaryPath, contents, { encoding: 'utf8', flag: 'wx', mode: metadata.mode })
-      this.#selfWriteObserver?.(path)
+      this.#selfWriteObserver?.(path, async () => {
+        try {
+          return await readFile(resolvedPath, 'utf8') === contents
+        } catch {
+          return false
+        }
+      })
       await rename(temporaryPath, resolvedPath)
     } finally {
       await unlink(temporaryPath).catch(() => {})
@@ -2926,7 +2976,7 @@ export class RepositoryService {
     }
     const opened = await this.#pullRequestCache?.readIndex(details.url) ?? null
     if (opened != null && (opened.baseRefOid !== details.baseRefOid || opened.headRefOid !== details.headRefOid)) {
-      throw new Error('This pull request changed after you opened it. Reload the review before merging.')
+      throw new Error('This pull request has new commits since you opened it. Load the new commits, then merge.')
     }
     await runGitHubMutation(() => runCommand(
       ghExecutable,
@@ -4240,7 +4290,7 @@ export class RepositoryService {
       author: { login: string }
     }>(targetResult, 'GitHub CLI')
     if (targetDetails.headRefOid !== commitIdValue) {
-      throw new Error('This pull request changed after you opened it. Reload the review before submitting comments.')
+      throw new Error('This pull request has new commits since you opened it. Load the new commits from the toolbar, then submit again — your review and comments are kept.')
     }
     if (typeof targetDetails.id !== 'string' || targetDetails.id === '' || targetDetails.id.length > 256) {
       throw new Error('GitHub returned an invalid pull request ID.')

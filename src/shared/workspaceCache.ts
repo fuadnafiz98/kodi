@@ -222,18 +222,25 @@ export function idleFileComparison(path: string): FileComparison {
   }
 }
 
+export const CACHED_TEXT_KEY_PREFIX = 'workspace-cache:'
+
+/**
+ * The text a launch paints before the session answers. It stands in for the
+ * file on screen only: its cacheKey is not the disk's, so it is neither cached
+ * as the file nor typed into.
+ */
 export function comparisonFromCachedText(fileText: CachedFileText | null): FileComparison | null {
   if (fileText == null || fileText.text === '') return null
-  const name = fileText.path.slice(fileText.path.lastIndexOf('/') + 1) || fileText.path
   return {
     path: fileText.path,
     mode: 'file',
     status: 'unchanged',
     oldFile: null,
     newFile: {
-      name,
+      // The path, as main names every file: the editor reports its changes by it.
+      name: fileText.path,
       contents: fileText.text,
-      cacheKey: `workspace-cache:${fileText.path}`
+      cacheKey: `${CACHED_TEXT_KEY_PREFIX}${fileText.path}`
     },
     binary: false,
     oversized: false

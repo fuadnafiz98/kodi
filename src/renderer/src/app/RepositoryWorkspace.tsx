@@ -46,7 +46,7 @@ import { setExplorerRevealHandler, setWorkspaceFileOpener } from '../explorer/ex
 import { markWorkspaceRender } from '../perf/workspaceRenderMetric'
 import { countKodiMetric } from '../perf/kodiCounters'
 import { useCodeZoomGesture } from '../diff/useCodeZoomGesture'
-import { useFileEditing } from '../diff/useFileEditing'
+import { useFileEditing, type WorkingDrafts } from '../diff/useFileEditing'
 import { EditorStatusBar } from '../editor/EditorStatusBar'
 import { useViewerContext } from '../editor/ViewerProviders'
 import { retainReviewItems } from '../review/reviewItems'
@@ -90,9 +90,9 @@ function toTreeStatus(status: RepositoryFileStatus): TreeFileStatus {
 }
 
 const TREE_STYLES = `
-  /* Named rather than a bare \`*\`: the document rule cannot cross the shadow
+  ${/* Named rather than a bare \`*\`: the document rule cannot cross the shadow
      boundary, and these are the only corners the tree rounds. The row's own
-     ::before is the focus ring, so it has to match the row it traces. */
+     ::before is the focus ring, so it has to match the row it traces. */ ''}
   button,
   [data-type="item"],
   [data-type="item"]::before,
@@ -102,7 +102,7 @@ const TREE_STYLES = `
     corner-shape: squircle;
   }
 
-  /* The status letter carries the colour; the filename stays readable text. */
+  ${/* The status letter carries the colour; the filename stays readable text. */ ''}
   [data-item-git-status] > [data-item-section="content"] {
     color: inherit;
   }
@@ -113,7 +113,7 @@ const TREE_STYLES = `
     letter-spacing: var(--track-caps-11);
   }
 
-  /* In a review every folder contains a change, so the dot says nothing. */
+  ${/* In a review every folder contains a change, so the dot says nothing. */ ''}
   :host([data-review-mode="true"]) [data-item-type="folder"] > [data-item-section="git"] {
     visibility: hidden;
   }
@@ -128,7 +128,7 @@ const TREE_STYLES = `
     transition-duration: 0s, 100ms;
   }
 
-  /* No row scales on press. The ratio above is a 1px squeeze on a 22px icon
+  ${/* No row scales on press. The ratio above is a 1px squeeze on a 22px icon
      button and a ~10px collapse on a 250px row, which reads as the row being
      crushed — a tree row is a button by markup, not by size.
      The selected-row exemption used to carry this rule, which left the scale in
@@ -137,7 +137,7 @@ const TREE_STYLES = `
      stand in for a fill the row does not have yet.
 
      :not(:disabled) is not decoration — it is what carries this past the
-     button:active rule above, whose own :not() counts toward its specificity. */
+     button:active rule above, whose own :not() counts toward its specificity. */ ''}
   [data-type="item"]:active:not(:disabled) {
     scale: 1;
   }
@@ -148,12 +148,12 @@ const TREE_STYLES = `
 
   [data-type="item"] {
     border-radius: var(--corner-compact);
-    /* Rows have nothing to say with scale, so it cannot be transitioned back in. */
+    ${/* Rows have nothing to say with scale, so it cannot be transitioned back in. */ ''}
     transition: background-color 100ms var(--ease-out);
   }
 
-  /* A stationary pointer must not paint every virtualized row that passes under
-     it during wheel or trackpad scrolling. The selected row stays visible. */
+  ${/* A stationary pointer must not paint every virtualized row that passes under
+     it during wheel or trackpad scrolling. The selected row stays visible. */ ''}
   [data-file-tree-virtualized-root="true"][data-is-scrolling] [data-type="item"] {
     pointer-events: none;
     transition: none;
@@ -167,11 +167,11 @@ const TREE_STYLES = `
     --truncate-marker-background-overlay-color: transparent;
   }
 
-  /* The tree marks pointer-focused rows with data-item-focused, which makes its
+  ${/* The tree marks pointer-focused rows with data-item-focused, which makes its
      focus outline jump between rows on every click. Keep the outline for
      keyboard navigation, where it communicates focus, and let pointer clicks
      use the stable selection fill. Pseudo-elements skip the selector list
-     above, so the ring declares its curve next to the suppression. */
+     above, so the ring declares its curve next to the suppression. */ ''}
   [data-type="item"]::before {
     corner-shape: squircle;
   }
@@ -180,8 +180,8 @@ const TREE_STYLES = `
     content: none;
   }
 
-  /* The menu itself is portaled onto .app-shell so the sidebar cannot clip it
-     and light-theme tokens still apply. Only the row trigger lives here. */
+  ${/* The menu itself is portaled onto .app-shell so the sidebar cannot clip it
+     and light-theme tokens still apply. Only the row trigger lives here. */ ''}
   [data-type="context-menu-trigger"] {
     width: 22px;
     height: 22px;
@@ -686,8 +686,9 @@ interface RepositoryDiffPanelProps {
   reviewCommand: { command: ReviewCommand; path: string; revision: number } | null
   surfaceComparison: FileComparison | null
   surfaceLoading: boolean
-  editMode: 'edit' | 'preview' | 'read'
+  editMode: 'edit' | 'read'
   documentView: FileEditControls['documentView']
+  onStartEdit?: FileEditControls['onStart']
   onDraftFileChange(file: FileContents): void
   onEditorAttach(editor: Editor<ReviewAnnotationMetadata>): void
   onEditorBlur(): void
@@ -696,6 +697,8 @@ interface RepositoryDiffPanelProps {
   dirty: boolean
   getEditor(): Editor<ReviewAnnotationMetadata> | null
   onError(message: string | null): void
+  workingDrafts: WorkingDrafts
+  autosaveOnBlur: boolean
 }
 
 function useRepositoryReviewHeader({
@@ -868,6 +871,7 @@ const RepositoryDiffPanel = memo(function RepositoryDiffPanel({
   surfaceLoading,
   editMode,
   documentView,
+  onStartEdit,
   onDraftFileChange,
   onEditorAttach,
   onEditorBlur,
@@ -875,7 +879,9 @@ const RepositoryDiffPanel = memo(function RepositoryDiffPanel({
   fileExtension,
   dirty,
   getEditor,
-  onError
+  onError,
+  workingDrafts,
+  autosaveOnBlur
 }: RepositoryDiffPanelProps): React.JSX.Element {
   const DiffSurface = useSyncExternalStore(
     subscribeDiffSurface,
@@ -906,6 +912,9 @@ const RepositoryDiffPanel = memo(function RepositoryDiffPanel({
             <MultiFileReview
               key={reviewSessionRevision}
               worldId={reviewWorldId}
+              workingDrafts={workingDrafts}
+              autosaveOnBlur={autosaveOnBlur}
+              onError={onError}
               paths={reviewPaths}
               diffStyle={diffStyle}
               preferences={viewerPreferences}
@@ -938,7 +947,7 @@ const RepositoryDiffPanel = memo(function RepositoryDiffPanel({
         DiffSurface == null ? <WorkspaceCodeSkeleton /> : (
             <DiffSurface comparison={surfaceComparison} loading={surfaceLoading} diffStyle={diffStyle}
               preferences={viewerPreferences} editMode={editMode} documentView={documentView}
-              getEditor={getEditor}
+              onStartEdit={onStartEdit} getEditor={getEditor}
               onDraftFileChange={onDraftFileChange} onEditorAttach={onEditorAttach}
               onEditorBlur={onEditorBlur}
               onAttachToAgent={onAttachToAgent}
@@ -1001,7 +1010,8 @@ function usePullRequestReviewSubmission(
   orphanedCommentCount: number,
   reviewComments: PullRequestReviewComment[],
   setThreadsByPath: Dispatch<SetStateAction<Record<string, ReviewThread[]>>>,
-  submit: RepositoryWorkspaceProps['onSubmitPullRequestReview']
+  submit: RepositoryWorkspaceProps['onSubmitPullRequestReview'],
+  onSubmitFailed: () => void
 ): {
   reviewSessionRevision: number
   submitReview(event: PullRequestReviewEvent, body: string): Promise<boolean>
@@ -1013,9 +1023,14 @@ function usePullRequestReviewSubmission(
     if (submitted) {
       setThreadsByPath({})
       setReviewSessionRevision((revision) => revision + 1)
+    } else {
+      // The usual refusal is a push since the review opened. Reading the
+      // conversation now brings the new head in, and with it "Load new commits",
+      // instead of leaving the reader at a dead end for up to a poll interval.
+      onSubmitFailed()
     }
     return submitted
-  }, [orphanedCommentCount, reviewComments, setThreadsByPath, submit])
+  }, [onSubmitFailed, orphanedCommentCount, reviewComments, setThreadsByPath, submit])
   return { reviewSessionRevision, submitReview }
 }
 
@@ -1158,7 +1173,6 @@ function useRepositoryExplorer({
   selectedPath,
   workspaceView,
   reviewPathSet,
-  hasFileSession,
   collisionPathsRef,
   markInstantTreeFollowTarget,
   consumeInstantTreeFollowTarget,
@@ -1176,7 +1190,6 @@ function useRepositoryExplorer({
   selectedPath: string | null
   workspaceView: WorkspaceView
   reviewPathSet: ReadonlySet<string>
-  hasFileSession: boolean
   collisionPathsRef: { current: ReadonlySet<string> }
   markInstantTreeFollowTarget(path: string): void
   consumeInstantTreeFollowTarget(path: string): string | null
@@ -1214,10 +1227,10 @@ function useRepositoryExplorer({
     if (!pathSet.has(path)) return
     markInstantTreeFollowTarget(path)
     onSelectPath(path)
-    const nextView = workspaceViewForTreePath(workspaceView, reviewPathSet.has(path), hasFileSession)
+    const nextView = workspaceViewForTreePath(reviewPathSet.has(path))
     if (nextView !== workspaceView) onWorkspaceViewChange(nextView)
     if (nextView === 'multi') advanceMultiFileNavigation()
-  }, [advanceMultiFileNavigation, hasFileSession, markInstantTreeFollowTarget, onSelectPath,
+  }, [advanceMultiFileNavigation, markInstantTreeFollowTarget, onSelectPath,
     onWorkspaceViewChange, pathSet, reviewPathSet, workspaceView])
 
   // The palette's way in (see openInWorkspace). A path that is already
@@ -1225,12 +1238,18 @@ function useRepositoryExplorer({
   // review itself; a new path is handled there too, and a second bump of the
   // navigation revision in the same commit is one jump.
   const navigatedSelectionRef = useRef(selectedPath)
+  // A pick is a request to go there, even to the file the review last reported
+  // as on screen: that report is debounced, so straight after a jump from A to B
+  // it still said A, and picking A again read as "already there" and did nothing.
+  const pickedPathRef = useRef<string | null>(null)
   const openFromPalette = useCallback((path: string) => {
+    pickedPathRef.current = path
     onSelectPath(path)
     // A new path moves through the effect below; only the one it will not see
     // changing is moved here. Doing both left a second instant-follow mark that
     // turned a later scroll's tree follow into a jump.
     if (path !== navigatedSelectionRef.current) return
+    pickedPathRef.current = null
     if (workspaceView !== 'multi' || !reviewPathSet.has(path) || !pathSet.has(path)) return
     markInstantTreeFollowTarget(path)
     advanceMultiFileNavigation()
@@ -1279,6 +1298,8 @@ function useRepositoryExplorer({
   useEffect(() => {
     const previous = navigatedSelectionRef.current
     navigatedSelectionRef.current = selectedPath
+    const picked = pickedPathRef.current != null && pickedPathRef.current === selectedPath
+    pickedPathRef.current = null
     const worldChanged = navigatedWorldIdRef.current !== reviewWorldId
     navigatedWorldIdRef.current = reviewWorldId
     if (worldChanged && initialReviewScrollTop > 0) return
@@ -1292,7 +1313,7 @@ function useRepositoryExplorer({
       onWorkspaceViewChange('file')
       return
     }
-    if (selectedPath === visibleMultiFilePathRef.current) return
+    if (!picked && selectedPath === visibleMultiFilePathRef.current) return
     if (!pathSet.has(selectedPath)) return
     markInstantTreeFollowTarget(selectedPath)
     advanceMultiFileNavigation()
@@ -1385,11 +1406,23 @@ function useRepositoryExplorer({
   useTreeContentSync(model, snapshot.root, snapshot.kind === 'git', explorerPaths, explorerStatuses,
     directoryPaths, changedDirectoryPaths)
 
+  // A file opened from anywhere — ⌘K, a search result, a restore — is opened
+  // out to in the tree: a row inside a closed folder does not exist, so it was
+  // neither shown nor selected. Once per file, so a folder the reader closes
+  // afterwards stays closed through the ticks that follow.
+  const revealedSelectionRef = useRef<string | null>(null)
   useLayoutEffect(() => {
     if (selectedPath == null) return
+    if (revealedSelectionRef.current !== selectedPath) {
+      for (const directoryPath of collectDirectoryPaths([selectedPath])) {
+        const item = model.getItem(directoryPath)
+        if (item != null && 'expand' in item) item.expand()
+      }
+      if (model.getItem(selectedPath) != null) revealedSelectionRef.current = selectedPath
+    }
     mirrorTreeSelection(selectedPath)
     scrollTreeToPath(selectedPath, 'nearest')
-  }, [explorerPaths, mirrorTreeSelection, scrollTreeToPath, selectedPath])
+  }, [explorerPaths, mirrorTreeSelection, model, scrollTreeToPath, selectedPath])
 
   // A fling through the review crosses a file every few milliseconds, and each
   // report used to cost the tree three notifications (deselect, select,
@@ -1540,7 +1573,6 @@ const RepositoryWorkspace = memo(function RepositoryWorkspace({
     workspaceView,
     repositoryReview,
     autosaveOnBlur: preferences.autosaveOnBlur,
-    onWorkspaceViewChange,
     onSelectPath,
     onComparisonChange: onComparisonSaved,
     onError
@@ -1602,7 +1634,8 @@ const RepositoryWorkspace = memo(function RepositoryWorkspace({
       orphanedCommentCount,
       reviewComments,
       setThreadsByPath,
-      onSubmitPullRequestReview
+      onSubmitPullRequestReview,
+      conversation.refresh
     )
 
   const { model, explorerPaths, activateTreeRow, handleVisibleMultiFilePathChange } =
@@ -1616,7 +1649,6 @@ const RepositoryWorkspace = memo(function RepositoryWorkspace({
       selectedPath,
       workspaceView,
       reviewPathSet,
-      hasFileSession: fileEditing.hasSession,
       collisionPathsRef,
       markInstantTreeFollowTarget,
       consumeInstantTreeFollowTarget,
@@ -1731,10 +1763,13 @@ const RepositoryWorkspace = memo(function RepositoryWorkspace({
         reviewCommand={reviewCommand}
         surfaceComparison={surfaceComparison}
         surfaceLoading={surfaceLoading}
-        editMode={fileEditing.activeSession?.mode ?? 'read'}
+        editMode={fileEditing.controls.mode}
         documentView={selectedPath != null && isMarkdownPath(selectedPath)
           ? fileEditing.controls.documentView
           : 'source'}
+        onStartEdit={fileEditing.controls.available && fileEditing.controls.mode === 'read'
+          ? fileEditing.controls.onStart
+          : undefined}
         onDraftFileChange={fileEditing.updateDraftFile}
         onEditorAttach={fileEditing.attachEditor}
         onEditorBlur={fileEditing.handleEditorBlur}
@@ -1743,6 +1778,8 @@ const RepositoryWorkspace = memo(function RepositoryWorkspace({
         dirty={fileEditing.controls.dirty}
         getEditor={fileEditing.getEditor}
         onError={onError}
+        workingDrafts={fileEditing.workingDrafts}
+        autosaveOnBlur={preferences.autosaveOnBlur}
       />
     </>
   )

@@ -1,10 +1,11 @@
-import { describe, expect, it } from 'bun:test'
+import { beforeAll, describe, expect, it } from 'bun:test'
 
 import type { AgentStreamEvent } from '../../../shared/contracts'
 import {
   appendTurnToHistory,
   EMPTY_ANSWER,
   mergeActivity,
+  loadAgentMarkdown,
   reduceAgentEvents,
   type AgentAnswerState,
   type AgentTurnRecord
@@ -104,6 +105,8 @@ describe('mergeActivity', () => {
 })
 
 describe('reduceAgentEvents', () => {
+  beforeAll(loadAgentMarkdown)
+
   it('folds a batch exactly like the events folded one at a time', () => {
     const events = [
       { id: 'r', kind: 'text' as const, text: 'Hello ' },

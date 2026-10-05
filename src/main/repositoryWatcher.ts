@@ -56,17 +56,30 @@ export function resolveLinkedGitDirectory(root: string): string | null {
   }
 }
 
+/** A save the app announced: until `expiry`, events for its path are its own. */
+export interface SelfWrite {
+  expiry: number
+  /** Set when an event for the path was dropped as the app's own. */
+  dropped: boolean
+  /** Whether the file still holds exactly what the app wrote. */
+  stillOurs?: () => Promise<boolean>
+}
+
 // The app's own saves are announced before the rename lands, so the event they
 // produce carries no news. The window expires so a genuine external write to the
-// same path moments later is still reported.
+// same path moments later is still reported — and one that lands inside it (a
+// formatter on save, an agent) is caught when it closes (see expectSelfWrite).
 export function dropSelfWrites(
   pendingPaths: Set<string>,
-  selfWrites: Map<string, number>,
+  selfWrites: Map<string, SelfWrite>,
   now: number
 ): void {
-  for (const [path, expiry] of selfWrites) {
-    if (expiry <= now) selfWrites.delete(path)
-    else pendingPaths.delete(path)
+  for (const [path, write] of selfWrites) {
+    if (write.expiry <= now) {
+      selfWrites.delete(path)
+    } else if (pendingPaths.delete(path)) {
+      write.dropped = true
+    }
   }
 }
 
@@ -243,7 +256,8 @@ export class RepositoryWatcher {
   #watcher: FSWatcher | null = null
   #gitDirectoryWatcher: FSWatcher | null = null
   #gitDirectory: string | null = null
-  #selfWrites = new Map<string, number>()
+  #selfWrites = new Map<string, SelfWrite>()
+  #selfWriteTimers = new Set<ReturnType<typeof setTimeout>>()
   #deferredSince = 0
   #snapshot: RepositorySnapshot | null = null
   #publishedPaths: string[] | null = null
@@ -324,8 +338,27 @@ export class RepositoryWatcher {
   // Called before the rename that completes a save: the app already knows what it
   // wrote, so refreshing on its own write costs a whole-tree status walk for
   // nothing. The window is short so a genuine external edit is never swallowed.
-  expectSelfWrite(path: string): void {
-    this.#selfWrites.set(path, Date.now() + SELF_WRITE_WINDOW_MS)
+  //
+  // Everything dropped inside the window is checked once it closes: a file that
+  // no longer holds what the app wrote was written by someone else in that
+  // second, and swallowing it left the reader on the app's own text for good.
+  expectSelfWrite(path: string, stillOurs?: () => Promise<boolean>): void {
+    const write: SelfWrite = { expiry: Date.now() + SELF_WRITE_WINDOW_MS, dropped: false, stillOurs }
+    this.#selfWrites.set(path, write)
+    if (stillOurs == null) return
+    const generation = this.#generation
+    const timer = setTimeout(() => {
+      this.#selfWriteTimers.delete(timer)
+      if (generation !== this.#generation) return
+      if (this.#selfWrites.get(path) === write) this.#selfWrites.delete(path)
+      if (!write.dropped) return
+      void stillOurs().then((ours) => {
+        if (ours || generation !== this.#generation) return
+        this.#pendingPaths.add(path)
+        this.#schedule(generation)
+      }, () => {})
+    }, SELF_WRITE_WINDOW_MS)
+    this.#selfWriteTimers.add(timer)
   }
 
   sync(snapshot: RepositorySnapshot): void {
@@ -384,6 +417,8 @@ export class RepositoryWatcher {
     this.#pendingPaths.clear()
     this.#pendingContentCount = 0
     this.#selfWrites.clear()
+    for (const timer of this.#selfWriteTimers) clearTimeout(timer)
+    this.#selfWriteTimers.clear()
     this.#deferredSince = 0
     if (this.#timer != null) clearTimeout(this.#timer)
     this.#timer = null

@@ -4,7 +4,7 @@ import { stat } from 'node:fs/promises'
 import { readFile, writeFile } from 'node:fs/promises'
 import { existsSync, renameSync, rmSync } from 'node:fs'
 
-import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, nativeTheme, powerMonitor, screen, shell, type RenderProcessGoneDetails, type WebContents } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, nativeTheme, powerMonitor, screen, session, shell, type RenderProcessGoneDetails, type WebContents } from 'electron'
 
 import {
   IPC_CHANNELS,
@@ -174,6 +174,9 @@ let externalReviewGeneration = 0
 let pendingFolderOpen: Promise<unknown> = Promise.resolve(null)
 const queuedExternalReviews: KodiReviewRequest[] = []
 const queuedFolderOpens: string[] = []
+// The folder a `kodi <folder>` opened while the app was up, until the window
+// takes it.
+let pendingExternalFolderRoot: string | null = null
 const warmupFlights = new Map<string, Promise<void>>()
 const recentlyWarmedAt = new Map<string, number>()
 let clipboardWarmupTimer: ReturnType<typeof setInterval> | null = null
@@ -288,11 +291,22 @@ function acceptExternalReview(value: string): void {
  * a gate). The open lands through openRepository so the renderer learns about
  * it through the usual snapshot publish.
  */
-async function applyExternalFolder(folderPath: string): Promise<void> {
+async function applyExternalFolder(folderPath: string, announce = true): Promise<void> {
   const resolved = resolveExistingRoot(resolve(folderPath))
   if (resolved == null) throw new Error('That folder is no longer on disk.')
   if (!(await stat(resolved)).isDirectory()) throw new Error('Choose a folder, not a file.')
-  await openRepository(resolved)
+  const snapshot = await openRepository(resolved)
+  // A window drops change events for every root but its own, so it has to be
+  // told. It takes the folder rather than being sent it: one still booting has
+  // already asked for its startup snapshot and may not be listening yet, so it
+  // takes the folder once that snapshot has settled. A launch's own folder
+  // (`announce` false) is the startup snapshot.
+  if (announce) {
+    pendingExternalFolderRoot = snapshot.root
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (!window.isDestroyed()) window.webContents.send(IPC_CHANNELS.openExternalFolder)
+    }
+  }
   if (!probeHidden && !startHidden) revealMainWindow()
 }
 
@@ -655,6 +669,13 @@ function createMainWindow(): BrowserWindow {
   // while a draft is unsaved. preventDefault here means "ignore the objection
   // and close", so it is the discard branch.
   window.webContents.on('will-prevent-unload', (event) => {
+    // Nobody is there to answer a quit by signal, and a synchronous dialog
+    // would hold it forever. Drafts are in storage, flushed on the way out,
+    // and offered back on the next launch.
+    if (quitOnSignal) {
+      event.preventDefault()
+      return
+    }
     const choice = dialog.showMessageBoxSync(window, {
       type: 'warning',
       buttons: ['Discard changes', 'Keep editing'],
@@ -1015,6 +1036,11 @@ function registerIpcHandlers(): void {
     if (recovered != null) startLiveRefresh(recovered.root)
     return recovered
   })
+  ipcMain.handle(IPC_CHANNELS.takeExternalFolder, () => {
+    const root = pendingExternalFolderRoot
+    pendingExternalFolderRoot = null
+    return root == null ? null : repositorySessions.tryGet(root)?.getSessionSnapshot() ?? null
+  })
   ipcMain.handle(IPC_CHANNELS.openFolder, async () => {
     const result = await dialog.showOpenDialog({
       title: 'Open folder',
@@ -1102,8 +1128,9 @@ function registerIpcHandlers(): void {
   })
   ipcMain.handle(IPC_CHANNELS.getRevisionFile, (_event, revision: unknown, path: unknown) =>
     repositorySessions.requireActive().getRevisionFile(revision, path))
-  ipcMain.handle(IPC_CHANNELS.hasRevision, (_event, revision: unknown) =>
-    repositorySessions.tryGetActive()?.hasRevision(revision) ?? false)
+  ipcMain.handle(IPC_CHANNELS.ensurePullRequestRevisions,
+    (_event, pullRequestUrl: unknown, baseOid: unknown, headOid: unknown) =>
+      repositorySessions.tryGetActive()?.ensurePullRequestRevisions(pullRequestUrl, baseOid, headOid) ?? false)
   ipcMain.handle(IPC_CHANNELS.saveWorkingFile, async (_event, request: unknown) => {
     const repository = repositorySessions.requireActive()
     const comparison = await repository.saveWorkingFile(request)
@@ -1550,6 +1577,10 @@ app.whenReady().then(() => {
   // Half-bounce first. Hydrating 20k cached paths must not delay window.show()
   // or the pending PR URL that Cmd+H / kodi:// already queued.
   createMainWindow()
+  // An unbundled run (`electron .`, the e2e harness) is Electron's own app
+  // bundle, so its dock tile and About panel showed Electron's atom under
+  // Kodi's name. The About panel draws the application icon, which this sets.
+  if (!app.isPackaged) setImmediate(() => app.dock?.setIcon(join(app.getAppPath(), 'build', 'icon.png')))
   for (const request of initialReviews) void applyExternalReview(request)
   const initialFolder = queuedFolderOpens.splice(0).at(-1) ?? null
   if (initialFolder != null) {
@@ -1561,7 +1592,7 @@ app.whenReady().then(() => {
       setImmediate(() => {
         workspaceCacheStore = loadWorkspaceCache(userDataPath)
         workspaceCacheLoaded = true
-        void applyExternalFolder(initialFolder)
+        void applyExternalFolder(initialFolder, false)
           .catch((error: unknown) => {
             console.warn(`Could not open folder ${initialFolder}:`, error)
           })
@@ -1586,6 +1617,11 @@ app.whenReady().then(() => {
   powerMonitor.on('lock-screen', () => setAppVisible(false, 'lock-screen'))
   powerMonitor.on('resume', () => setAppVisible(true, 'power-resume'))
   powerMonitor.on('unlock-screen', () => setAppVisible(true, 'unlock-screen'))
+  // Electron replaces Node's SIGTERM handler with its own while it starts (a
+  // plain quit, prompt and all, no failsafe), so a listener added as this module
+  // loaded never ran. Node installs its handler with the first listener, and
+  // the first one is added here, after Electron's.
+  process.on('SIGTERM', quitOnTerminationSignal)
   app.on('second-instance', (_event, argv) => {
     const request = findKodiReviewRequest(argv)
     if (request != null) {
@@ -1616,6 +1652,19 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
 })
 
+// An install (`pkill Kodi`) or a test harness ends the app with SIGTERM. It is
+// a quit like any other, flushing the session and localStorage, but with nobody
+// there to answer an unsaved-draft prompt; one that hangs, or a second signal,
+// still exits.
+const QUIT_ON_SIGNAL_TIMEOUT_MS = 3_000
+let quitOnSignal = false
+function quitOnTerminationSignal(): void {
+  if (quitOnSignal) app.exit(0)
+  quitOnSignal = true
+  setTimeout(() => app.exit(0), QUIT_ON_SIGNAL_TIMEOUT_MS).unref()
+  app.quit()
+}
+
 let sessionFlushedOnQuit = false
 app.on('before-quit', (event) => {
   terminalService.killAll()
@@ -1624,9 +1673,18 @@ app.on('before-quit', (event) => {
   agentService.cancelAll()
   if (sessionFlushedOnQuit) return
   event.preventDefault()
+  // Chromium commits localStorage (drafts, viewed files, agent chats) up to a
+  // few seconds after a write; a quit inside that window — an install, a
+  // SIGTERM — dropped it.
+  session.defaultSession.flushStorageData()
   flushPendingWorkspaceCache()
   void Promise.all([flushSessionState(), flushWorkspaceCache()]).finally(() => {
     sessionFlushedOnQuit = true
-    app.quit()
+    // Never from this handler's own microtasks: with nothing left to write they
+    // run before the quit that emitted before-quit has returned, and that quit
+    // then marks itself cancelled once the inner one has closed the windows.
+    // The app stayed up with no window, holding the single-instance lock, so
+    // every later launch and `kodi .` went to a process that showed nothing.
+    setImmediate(() => app.quit())
   })
 })

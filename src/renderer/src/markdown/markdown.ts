@@ -10,12 +10,82 @@ export type MarkdownBlock =
   | { kind: 'code'; language: string | null; text: string }
   | { kind: 'list'; ordered: boolean; items: MarkdownInline[][] }
   | { kind: 'quote'; content: MarkdownInline[] }
+  | { kind: 'table'; align: TableAlign[]; header: MarkdownInline[][]; rows: MarkdownInline[][][] }
 
-const INLINE_PATTERN = /(`[^`]+`|\*\*[^*]+\*\*|__[^_]+__|\*[^*]+\*|_[^_]+_)/
+export type TableAlign = 'left' | 'center' | 'right' | null
+
+// An underscore inside a word is part of it, as CommonMark has it:
+// `data_platform_file_id` is a name, not "data *platform* file_id".
+const INLINE_PATTERN = /(`[^`]+`|\*\*[^*]+\*\*|(?<!\w)__[^_]+__(?!\w)|\*[^*]+\*|(?<!\w)_[^_]+_(?!\w))/
+const CODE_SPAN = /(`[^`]+`)/
 // Shared with the incremental scanner below so the two can never disagree about
 // where a fenced block starts and ends.
 const FENCE_OPEN = /^```(\w*)\s*$/
 const FENCE_CLOSE = /^```\s*$/
+// A GFM delimiter row: `---`, `:--`, `--:` or `:-:` cells, outer pipes optional.
+const TABLE_DELIMITER = /^\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?$/
+
+// Cells of a GFM table row. `\|` is a literal pipe and a pipe inside a code
+// span does not split, as on GitHub; one leading and one trailing pipe are
+// optional.
+export function splitTableRow(line: string): string[] {
+  const text = line.trim()
+  const cells: string[] = []
+  let cell = ''
+  let code = false
+  let trailing = false
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index]!
+    trailing = false
+    if (char === '\\' && text[index + 1] === '|') {
+      cell += '|'
+      index += 1
+      continue
+    }
+    if (char === '`') code = !code
+    if (char === '|' && !code) {
+      cells.push(cell)
+      cell = ''
+      trailing = true
+      continue
+    }
+    cell += char
+  }
+  if (!trailing) cells.push(cell)
+  if (text.startsWith('|')) cells.shift()
+  return cells.map((part) => part.trim())
+}
+
+function tableAlign(cell: string): TableAlign {
+  const left = cell.startsWith(':')
+  const right = cell.endsWith(':')
+  return left && right ? 'center' : right ? 'right' : left ? 'left' : null
+}
+
+// A header row and a delimiter row with as many cells start a table; its body
+// runs to the first blank line or line without a pipe. Rows are padded or cut
+// to the header's width, as GitHub draws them.
+function parseTable(lines: string[], start: number): { block: MarkdownBlock; end: number } | null {
+  const headerLine = lines[start] ?? ''
+  const delimiterLine = (lines[start + 1] ?? '').trim()
+  // A bare `---` under a line with a pipe is a rule, not a one-column table.
+  if (!headerLine.includes('|') || !delimiterLine.includes('|') || !TABLE_DELIMITER.test(delimiterLine)) return null
+  const header = splitTableRow(headerLine)
+  const delimiter = splitTableRow(delimiterLine)
+  if (header.length !== delimiter.length) return null
+  const width = header.length
+  const rows: MarkdownInline[][][] = []
+  let end = start + 2
+  while (end < lines.length && (lines[end] ?? '').trim() !== '' && (lines[end] ?? '').includes('|')) {
+    const cells = splitTableRow(lines[end] ?? '')
+    rows.push(Array.from({ length: width }, (_unused, column) => parseInline(cells[column] ?? '')))
+    end += 1
+  }
+  return {
+    block: { kind: 'table', align: delimiter.map(tableAlign), header: header.map(parseInline), rows },
+    end
+  }
+}
 
 export function parseInline(text: string): MarkdownInline[] {
   if (text === '') return []
@@ -33,6 +103,18 @@ export function parseInline(text: string): MarkdownInline[] {
     }
   }
   return inlines
+}
+
+/**
+ * Bold and italic runs hold their text as written; a code span inside one
+ * (`**Yes, `[1]` is safe.**`) is split out here so it renders as code rather
+ * than as literal backticks.
+ */
+export function splitCodeSpans(text: string): { code: boolean; text: string }[] {
+  return text.split(CODE_SPAN).filter((part) => part !== '').map((part) =>
+    part.length > 2 && part.startsWith('`') && part.endsWith('`')
+      ? { code: true, text: part.slice(1, -1) }
+      : { code: false, text: part })
 }
 
 // Streaming answers arrive mid-token, so an unterminated fence still has to render
@@ -69,6 +151,15 @@ export function parseMarkdown(source: string): MarkdownBlock[] {
         index += 1
       }
       blocks.push({ kind: 'code', language, text: codeLines.join('\n') })
+      continue
+    }
+
+    const table = parseTable(lines, index)
+    if (table != null) {
+      flushParagraph()
+      flushList()
+      blocks.push(table.block)
+      index = table.end - 1
       continue
     }
 
@@ -235,7 +326,10 @@ export function keyForBlock(block: MarkdownBlock, seen: Map<string, number>): st
       // Deliberately excludes items.length: a list streams in item by item, so a
       // length in the key would change on every chunk and remount the whole list.
       ? `${block.ordered ? 'ol' : 'ul'}:${block.items[0]?.[0]?.text.slice(0, 24) ?? ''}`
-      : block.content[0]?.text.slice(0, 24) ?? ''
+      // Header only, for the same reason: rows stream in one at a time.
+      : block.kind === 'table'
+        ? block.header.map((cell) => cell[0]?.text ?? '').join('|').slice(0, 24)
+        : block.content[0]?.text.slice(0, 24) ?? ''
   const base = `${block.kind}:${sample}`
   const count = (seen.get(base) ?? 0) + 1
   seen.set(base, count)

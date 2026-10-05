@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test'
-import { cleanup, render, screen } from '@testing-library/react'
+import { cleanup, render, screen, within } from '@testing-library/react'
 
 import type { DiffStyle, FileEditControls } from '../app/AppView'
 import { DiffToolbar } from './DiffToolbar'
@@ -11,20 +11,13 @@ function editControls(overrides: Partial<FileEditControls> = {}): FileEditContro
   return {
     available: false,
     unavailableReason: 'Editing is unavailable for this file.',
-    startLabel: 'Edit',
     mode: 'read',
     documentView: 'split',
     dirty: false,
     saving: false,
-    canUndo: false,
-    canRedo: false,
     unsavedPaths: [],
     onStart: () => {},
-    onModeChange: () => {},
     onDocumentViewChange: () => {},
-    onUndo: () => {},
-    onRedo: () => {},
-    onCancel: () => {},
     onRevert: () => {},
     onSave: () => {},
     onOpenPath: () => {},
@@ -32,63 +25,59 @@ function editControls(overrides: Partial<FileEditControls> = {}): FileEditContro
   }
 }
 
-test('DiffToolbar explains why editing is unavailable', () => {
+test('DiffToolbar says why a file is read-only', () => {
   render(<DiffToolbar comparison={null} selectedPath="image.png" isGitRepository isFilePreview
     diffStyle="split" workspaceView="file" reviewFileCount={0} wordWrap={false} foldUnchanged
     fileEdit={editControls({ unavailableReason: 'Binary files cannot be edited.' })}
     onDiffStyleChange={() => {}} onWordWrapToggle={() => {}} onFoldUnchangedToggle={() => {}} />)
 
-  const button = screen.getByRole('button', { name: 'Edit' })
-  expect((button as HTMLButtonElement).disabled).toBe(true)
-  expect(button.getAttribute('title')).toBe('Binary files cannot be edited.')
+  const badge = screen.getByText('Read-only')
+  expect(badge.getAttribute('title')).toBe('Binary files cannot be edited.')
+  expect(screen.queryByRole('button', { name: 'Edit' })).toBeNull()
 })
 
 describe('DiffToolbar editing controls', () => {
-  test('keeps Save disabled until the draft is dirty', () => {
-    render(<DiffToolbar comparison={null} selectedPath="src/app.ts" isGitRepository isFilePreview={false}
+  const toolbar = (fileEdit: FileEditControls) => (
+    <DiffToolbar comparison={null} selectedPath="src/app.ts" isGitRepository isFilePreview={false}
       diffStyle="split" workspaceView="file" reviewFileCount={1} wordWrap={false} foldUnchanged
-      fileEdit={editControls({ available: true, mode: 'edit' })}
-      onDiffStyleChange={() => {}} onWordWrapToggle={() => {}} onFoldUnchangedToggle={() => {}} />)
+      fileEdit={fileEdit}
+      onDiffStyleChange={() => {}} onWordWrapToggle={() => {}} onFoldUnchangedToggle={() => {}} />
+  )
 
-    const save = screen.getByRole('button', { name: /Save/ }) as HTMLButtonElement
-    expect(save.disabled).toBe(true)
+  // Scoped to the container: other suites in the same run can leave their own
+  // Save buttons in the shared document.
+  test('an editable file shows no editing controls until something is unsaved', () => {
+    const { container, rerender } = render(toolbar(editControls({ available: true })))
+    const view = within(container)
+    expect(view.queryByRole('button', { name: /Save/ })).toBeNull()
+    rerender(toolbar(editControls({ available: true, mode: 'edit' })))
+    expect(view.queryByRole('button', { name: /Save/ })).toBeNull()
+    expect(view.queryByRole('status')).toBeNull()
+    // The space Save will need is held from the start, so typing never moves the title.
+    expect(view.getByRole('group', { name: 'File editing' }).hasAttribute('data-editable')).toBe(true)
+  })
+
+  test('unsaved changes bring Save and Discard', () => {
+    let saved = false
+    let reverted = false
+    const { container } = render(toolbar(editControls({ available: true, mode: 'edit', dirty: true,
+      onSave: () => { saved = true }, onRevert: () => { reverted = true } })))
+    const view = within(container)
+    const save = view.getByRole('button', { name: /Save/ }) as HTMLButtonElement
+    expect(save.disabled).toBe(false)
     expect(save.textContent).toContain(formatEditorShortcut('cmdOrCtrl+s'))
-    expect(screen.getByRole('button', { name: `Undo (${formatEditorShortcut('cmdOrCtrl+z')})` })).toBeTruthy()
-    expect(screen.getByRole('button', { name: `Redo (${formatEditorShortcut('cmdOrCtrl+shift+z')})` })).toBeTruthy()
+    expect(view.getByRole('status').textContent).toBe('Unsaved')
+    save.click()
+    view.getByRole('button', { name: 'Discard changes' }).click()
+    expect(saved).toBe(true)
+    expect(reverted).toBe(true)
   })
 
-  test('Save takes the fill only when there is something to save', () => {
-    const { rerender } = render(<DiffToolbar comparison={null} selectedPath="src/app.ts" isGitRepository
-      isFilePreview={false} diffStyle="split" workspaceView="file" reviewFileCount={1} wordWrap={false} foldUnchanged
-      fileEdit={editControls({ available: true, mode: 'edit' })}
-      onDiffStyleChange={() => {}} onWordWrapToggle={() => {}} onFoldUnchangedToggle={() => {}} />)
-    const save = screen.getByRole('button', { name: /Save/ })
-    expect(save.hasAttribute('data-dirty')).toBe(false)
-    expect((screen.getByRole('button', { name: 'Discard changes' }) as HTMLButtonElement).disabled).toBe(true)
-
-    rerender(<DiffToolbar comparison={null} selectedPath="src/app.ts" isGitRepository
-      isFilePreview={false} diffStyle="split" workspaceView="file" reviewFileCount={1} wordWrap={false} foldUnchanged
-      fileEdit={editControls({ available: true, mode: 'edit', dirty: true })}
-      onDiffStyleChange={() => {}} onWordWrapToggle={() => {}} onFoldUnchangedToggle={() => {}} />)
-    expect(save.hasAttribute('data-dirty')).toBe(true)
-    expect((save as HTMLButtonElement).disabled).toBe(false)
-    expect((screen.getByRole('button', { name: 'Discard changes' }) as HTMLButtonElement).disabled).toBe(false)
-  })
-
-  test('preview is one toggle that goes back to editing', () => {
-    const modes: string[] = []
-    let closed = false
-    render(<DiffToolbar comparison={null} selectedPath="src/app.ts" isGitRepository isFilePreview={false}
-      diffStyle="split" workspaceView="file" reviewFileCount={1} wordWrap={false} foldUnchanged
-      fileEdit={editControls({ available: true, mode: 'preview', onModeChange: (mode) => { modes.push(mode) },
-        onCancel: () => { closed = true } })}
-      onDiffStyleChange={() => {}} onWordWrapToggle={() => {}} onFoldUnchangedToggle={() => {}} />)
-    const preview = screen.getByRole('button', { name: 'Preview draft' })
-    expect(preview.getAttribute('aria-pressed')).toBe('true')
-    preview.click()
-    expect(modes).toEqual(['edit'])
-    screen.getByRole('button', { name: 'Close editor' }).click()
-    expect(closed).toBe(true)
+  test('drafts in other files are offered from any file', () => {
+    const opened: string[] = []
+    render(toolbar(editControls({ unsavedPaths: ['src/other.ts'], onOpenPath: (path) => { opened.push(path) } })))
+    screen.getByRole('button', { name: '1 unsaved' }).click()
+    expect(opened).toEqual(['src/other.ts'])
   })
 })
 

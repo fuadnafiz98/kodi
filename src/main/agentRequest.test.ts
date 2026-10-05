@@ -6,6 +6,7 @@ import {
   interpretAgentLine,
   parseAgentAskRequest
 } from './agentRequest.js'
+import { CODEX_AGENT_MESSAGE_DELTA, interpretCodexNotification } from './codexProtocol.js'
 
 function readAll(lines: readonly string[]): string {
   const read = createAgentTextReader()
@@ -37,6 +38,49 @@ describe('createAgentTextReader', () => {
 
   it('keeps plain non-JSON output, which is how Codex writes', () => {
     expect(readAll(['plain line'])).toBe('plain line\n')
+  })
+
+  // Observed live: "…the parse_file_uri function.Now let me check…" and
+  // "…blob.py.## Review" — each text block of a turn streamed straight onto
+  // the last, so a heading that opened a block never parsed.
+  it('starts each text block of a Claude turn on its own paragraph', () => {
+    const toolUse = JSON.stringify({
+      type: 'assistant',
+      message: { content: [{ type: 'tool_use', id: 'tool_1', name: 'Read', input: { file_path: 'blob.py' } }] }
+    })
+    const lines = [
+      delta('Let me check '), delta('the patch.'), assembled('Let me check the patch.'), toolUse,
+      delta('Now let me read blob.py.'), assembled('Now let me read blob.py.'), toolUse,
+      delta('## Review\n\n'), delta('Yes.'), assembled('## Review\n\nYes.')
+    ]
+    expect(readAll(lines)).toBe('Let me check the patch.\n\nNow let me read blob.py.\n\n## Review\n\nYes.')
+  })
+
+  it('does not double a break a block already ended with', () => {
+    expect(readAll([delta('One.\n'), assembled('One.\n'), delta('Two.')])).toBe('One.\n\nTwo.')
+    expect(readAll([delta('One.\n\n'), assembled('One.\n\n'), delta('Two.')])).toBe('One.\n\nTwo.')
+  })
+
+  it('separates whole messages when no deltas arrive', () => {
+    expect(readAll([assembled('First.'), assembled('Second.')])).toBe('First.\n\nSecond.')
+  })
+
+  it('separates the messages of a Codex app-server turn', () => {
+    const read = createAgentTextReader()
+    const notifications = [
+      { method: CODEX_AGENT_MESSAGE_DELTA, params: { itemId: 'msg_1', delta: 'Checking the ' } },
+      { method: CODEX_AGENT_MESSAGE_DELTA, params: { itemId: 'msg_1', delta: 'patch.' } },
+      { method: 'item/completed', params: { item: { type: 'agentMessage', id: 'msg_1', text: 'Checking the patch.' } } },
+      { method: CODEX_AGENT_MESSAGE_DELTA, params: { itemId: 'msg_2', delta: '## Verdict' } },
+      { method: 'item/completed', params: { item: { type: 'agentMessage', id: 'msg_2', text: '## Verdict' } } }
+    ]
+    let answer = ''
+    for (const notification of notifications) {
+      const chunk = interpretCodexNotification(notification)
+      const text = chunk == null ? null : read(chunk)
+      if (text != null) answer += text
+    }
+    expect(answer).toBe('Checking the patch.\n\n## Verdict')
   })
 
   it('ignores the result envelope so a summary is not appended twice', () => {

@@ -2,18 +2,21 @@ import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useStat
 import type { DiffLineAnnotation, FileContents, LineAnnotation, SelectedLineRange } from '@pierre/diffs'
 import type { Editor } from '@pierre/diffs/edit'
 import type { FileComparison } from '../../../shared/contracts'
+import { isMarkdownPath } from '../../../shared/markdownPreview'
 import { DiffCodeView } from './DiffCodeView'
 import { DiffStateScreen } from './DiffStateScreen'
 import { diffSurfaceState } from './diffSurfaceState'
 import { MarkdownFilePreview } from '../markdown/MarkdownFilePreview'
+import { createDraftTextChannel } from '../markdown/draftTextChannel'
+import { createLazyModule, useLazyModule } from '../app/lazyModule'
 import { markdownPreviewSource, markdownSurface, type DocumentView } from '../review/documentView'
 import { MarkdownSplitResizer } from '../markdown/MarkdownSplitResizer'
 import type { AgentSelection } from '../agent/agentAttachments'
-import type { DiffStyle } from '../app/AppView'
+import type { DiffStyle, EditCaretPosition } from '../app/AppView'
+import { createSelectionBar, preloadDiffEditor } from './useFileEditing'
 import { contentSearchMarkers, markersEqual, type EditorMarker } from '../editor/markers'
 import { useSearchResults } from '../palette/searchResultsStore'
 import {
-  createSelectionActionElement,
   selectionLineRange,
   type SelectionActionContext
 } from '../editor/selectionAction'
@@ -38,8 +41,10 @@ export interface DiffSurfaceProps {
   loading: boolean
   diffStyle: DiffStyle
   preferences: AppPreferences
-  editMode: 'read' | 'edit' | 'preview'
+  editMode: 'read' | 'edit'
   documentView: DocumentView
+  /** Present while the file can be edited and is not yet: a click in its text starts. */
+  onStartEdit?(position: EditCaretPosition): void
   getEditor(): Editor<ReviewAnnotationMetadata> | null
   onDraftFileChange(file: FileContents): void
   onEditorAttach(editor: Editor<ReviewAnnotationMetadata>): void
@@ -189,6 +194,7 @@ function DiffContents({
   onDraftFileChange,
   onEditorAttach,
   onEditorBlur,
+  onStartEdit,
   onAttachToAgent,
   threads,
   setThreadsByPath
@@ -234,12 +240,14 @@ function DiffContents({
   }, [comparisonPath, setThreadsByPath])
 
   const lastAnnotationsRef = useRef<EditorAnnotations>(undefined)
+  const [draftChannel] = useState(createDraftTextChannel)
   const handleEditorChange = useCallback((file: FileContents, annotations: EditorAnnotations) => {
     onDraftFileChange(file)
+    draftChannel.publish(file.contents)
     if (annotations === lastAnnotationsRef.current) return
     lastAnnotationsRef.current = annotations
     publishRemappedAnnotations(annotations)
-  }, [onDraftFileChange, publishRemappedAnnotations])
+  }, [draftChannel, onDraftFileChange, publishRemappedAnnotations])
 
   const askAgentAboutSelection = useCallback((context: SelectionActionContext) => {
     if (comparisonPath == null || comparison == null) return
@@ -276,10 +284,11 @@ function DiffContents({
   }, [comparisonPath])
 
   const renderSelectionAction = useCallback((context: SelectionActionContext) => (
-    createSelectionActionElement([
-      { label: 'Comment', run: commentOnSelection },
-      { label: 'Add to chat', run: askAgentAboutSelection },
-      { label: 'Copy', run: copySelection }
+    // The same three, in the same order, as the review's selection bar.
+    createSelectionBar([
+      { label: 'Copy selection with file path', tooltip: 'Copy with path', icon: 'copy', run: copySelection },
+      { label: 'Add selection to Chat', tooltip: 'Add to Chat ⌘I', icon: 'chat', run: askAgentAboutSelection },
+      { label: 'Comment', icon: 'comment', primary: true, run: commentOnSelection }
     ], context)
   ), [askAgentAboutSelection, commentOnSelection, copySelection])
 
@@ -330,6 +339,8 @@ function DiffContents({
 
   const editorOptions = viewer?.editorOptions
   const editing = editMode === 'edit'
+  const liveMarkdown = useLazyModule(liveMarkdownModule,
+    editing && documentView !== 'source' && comparison != null && isMarkdownPath(comparison.path))
 
   const state = diffSurfaceState(comparison, loading)
   if (state !== 'code' || comparison == null) {
@@ -357,6 +368,7 @@ function DiffContents({
       renderDiffAnnotation={renderDiffAnnotation}
       beginComment={beginComment}
       setReviewCursor={setReviewCursor}
+      onPlaceEditCaret={onStartEdit}
     />
   )
 
@@ -365,7 +377,9 @@ function DiffContents({
       <div className="markdown-split">
         <div className="markdown-split-source">{codeView}</div>
         <MarkdownSplitResizer />
-        <MarkdownFilePreview source={previewText} />
+        {editing && liveMarkdown != null
+          ? <liveMarkdown.LiveMarkdownPreview source={previewText} channel={draftChannel} />
+          : <MarkdownFilePreview source={previewText} />}
       </div>
     )
   }
@@ -373,7 +387,15 @@ function DiffContents({
   return codeView
 }
 
+// Only a markdown split being edited draws a live preview.
+const liveMarkdownModule = createLazyModule(() => import('../markdown/LiveMarkdownPreview'))
+
 const MemoizedDiffContents = memo(DiffContents)
+
+function preloadEditorQuietly(): void {
+  // A failed fetch surfaces again, with its message, on the click that needs it.
+  preloadDiffEditor().catch(() => {})
+}
 
 const DiffSurface = memo(function DiffSurface({
   threadsByPath,
@@ -399,8 +421,10 @@ const DiffSurface = memo(function DiffSurface({
   // always belongs to the file that is actually on screen while dimming.
   const renderedPath = renderedComparison?.path
   const threads = (renderedPath == null ? undefined : threadsByPath[renderedPath]) ?? NO_THREADS
+  // The editor module is ~1 MB of script: fetched as the pointer arrives over a
+  // file it could edit, it is parsed by the time the click lands.
   return (
-    <div className="diff-stale-host">
+    <div className="diff-stale-host" onPointerEnter={props.onStartEdit == null ? undefined : preloadEditorQuietly}>
       {dimming ? <div className="diff-loading-bar" aria-hidden="true" /> : null}
       <div className="diff-stale" data-dim={dimming ? '' : undefined}>
         <MemoizedDiffContents

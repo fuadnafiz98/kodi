@@ -1,7 +1,7 @@
 export const COLLAPSED_SEPARATOR_CSS = `
-  /* Pierre mounts the same separator in the gutter and the content column, then
+  ${/* Pierre mounts the same separator in the gutter and the content column, then
      hides the content copy. The label belongs in the content column, which is
-     always a real track. */
+     always a real track. */ ''}
 
   [data-separator="line-info-basic"] {
     border-block: 0;
@@ -30,25 +30,25 @@ export const COLLAPSED_SEPARATOR_CSS = `
     grid-template-columns: 28px 28px minmax(0, 1fr);
   }
 
-  /* Pierre pins the label to column 2. With one button that is the code column;
+  ${/* Pierre pins the label to column 2. With one button that is the code column;
      with two it is the second button's 28px track, so the count and the down
      chevron shared one cell — the count clipped to nothing and the seam
      hairlines drew across the chevron. The label belongs in the last track
      either way, and naming it beats auto-placement: a hidden button is not a
      grid item, so the label used to slide a track left in the pane that hides
-     its controls. */
+     its controls. */ ''}
   [data-content] [data-separator="line-info-basic"] [data-separator-content] {
     grid-row: 1;
     grid-column: -2 / -1;
   }
 
-  /* Nothing occupies the button tracks in the pane whose controls are hidden, so
-     the seam runs the full width and the row reads across the divider. */
+  ${/* Nothing occupies the button tracks in the pane whose controls are hidden, so
+     the seam runs the full width and the row reads across the divider. */ ''}
   [data-diff-type="split"] [data-additions] [data-content] [data-separator="line-info-basic"] [data-separator-content] {
     grid-column: 1 / -1;
   }
 
-  /* A collapsed run of lines reads as a seam in the file: the count, then a
+  ${/* A collapsed run of lines reads as a seam in the file: the count, then a
      hairline across the code.
 
      The count used to be centred, which only ever worked on a file whose longest
@@ -56,7 +56,7 @@ export const COLLAPSED_SEPARATOR_CSS = `
      its width is the longest line's — on anything wider the centre is hundreds of
      pixels past the right edge and the reader saw a hairline running off the pane
      with no count on it. Leading with the count puts it where the eye already is,
-     next to the expand controls, at any line length. */
+     next to the expand controls, at any line length. */ ''}
   [data-separator="line-info-basic"] [data-separator-content] {
     min-width: 0;
     width: 100%;
@@ -89,8 +89,8 @@ export const COLLAPSED_SEPARATOR_CSS = `
     font-variant-numeric: tabular-nums;
   }
 
-  /* Split mounts the same hunk in both panes. One count and one set of controls;
-     the new pane keeps the hairline so the row still reads across the divider. */
+  ${/* Split mounts the same hunk in both panes. One count and one set of controls;
+     the new pane keeps the hairline so the row still reads across the divider. */ ''}
   [data-diff-type="split"] [data-additions] [data-unmodified-lines],
   [data-diff-type="split"] [data-additions] [data-expand-button] {
     display: none;

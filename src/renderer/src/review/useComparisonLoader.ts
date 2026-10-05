@@ -65,11 +65,9 @@ export function useComparisonLoader({
   const lastPathRef = useRef<string | null>(
     initialComparison?.path === selectedPath ? selectedPath : null
   )
-  const [cache] = useState(() => {
-    const next = createComparisonCache()
-    if (initialComparison != null) next.set(initialComparison)
-    return next
-  })
+  // The painted text is on screen, not in the cache: cached, it answered for
+  // the file until something changed it, and nothing typed into it was kept.
+  const [cache] = useState(createComparisonCache)
 
   const save = useCallback((nextComparison: FileComparison) => {
     cache.set(nextComparison)

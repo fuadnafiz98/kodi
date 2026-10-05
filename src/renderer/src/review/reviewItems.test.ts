@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test'
 import type { CodeViewItem } from '@pierre/diffs'
 
-import { createPatchReviewItems, mergeReviewItems, pathFromReviewItemId } from './reviewItems'
+import { createPatchReviewItems, mergeReviewItems, pathFromReviewItemId, primeReviewHighlights } from './reviewItems'
 
 // The viewer looks a diff up by cacheKey alone — no content comparison — so a
 // positional key served one file's highlighted lines against another file's
@@ -65,4 +65,27 @@ test('a reload keeps the item on screen for every file whose diff did not change
   expect(merged[0]).toBe(first[0])
   expect(merged[1]).toBe(reload[1])
   expect(merged[1]).not.toBe(first[1])
+})
+
+test('a reload highlights only the files it rewrote before they replace the ones on screen', async () => {
+  const patch = (lines: string) => `diff --git a/x.ts b/x.ts\n--- a/x.ts\n+++ b/x.ts\n@@ -0,0 +1,${lines.split('\n').length} @@\n${lines.split('\n').map((line) => `+${line}`).join('\n')}\n`
+  const held = createPatchReviewItems(patch('alpha'), 'v1')
+  const unchanged = createPatchReviewItems(patch('alpha'), 'v2')
+  const rewritten = createPatchReviewItems(patch('alpha\nbeta'), 'v2')
+  const primed: string[] = []
+  const pool = {
+    isWorkingPool: () => true,
+    primeDiffHighlightCache: async (diff: { cacheKey?: string }) => { primed.push(diff.cacheKey ?? '') }
+  }
+
+  await primeReviewHighlights(pool, unchanged, held)
+  expect(primed).toEqual([])
+  await primeReviewHighlights(pool, rewritten, held)
+  expect(primed).toEqual([rewritten[0]!.type === 'diff' ? rewritten[0]!.fileDiff.cacheKey! : ''])
+
+  // A worker that never answers holds the swap back only briefly.
+  const started = performance.now()
+  await primeReviewHighlights({ isWorkingPool: () => true, primeDiffHighlightCache: () => new Promise<void>(() => {}) },
+    rewritten, held, 30)
+  expect(performance.now() - started).toBeLessThan(500)
 })

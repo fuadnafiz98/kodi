@@ -36,7 +36,18 @@ trap cleanup EXIT
 
 mkdir -p "$user_applications" "$trash_dir"
 
-pkill -x "Kodi" 2>/dev/null || true
+# The main process first, on its own: it quits on SIGTERM and flushes the
+# session and localStorage on the way out, which it cannot do once its helper
+# processes are gone. The helpers follow once it has exited (or after 4 s).
+if pkill -x "Kodi" 2>/dev/null; then
+  for _ in $(seq 1 40); do pgrep -x "Kodi" >/dev/null || break; sleep 0.1; done
+  # One still up by now never finished quitting. A main process left without a
+  # window kept the single-instance lock, and every launch and `kodi .` after
+  # the install was handed to the old build.
+  if pkill -9 -x "Kodi" 2>/dev/null; then
+    for _ in $(seq 1 20); do pgrep -x "Kodi" >/dev/null || break; sleep 0.1; done
+  fi
+fi
 pkill -x "Kodi Helper" 2>/dev/null || true
 pkill -x "Kodi Helper (Renderer)" 2>/dev/null || true
 pkill -x "Horus" 2>/dev/null || true

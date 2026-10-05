@@ -10,6 +10,8 @@ import { transformAsync } from '@babel/core'
 // workspace renders per keystroke.
 const HOT_COMPONENTS: ReadonlyArray<readonly [string, readonly string[]]> = [
   ['app/App.tsx', ['App', 'AppLayout', 'AgentSessionLayout']],
+  // Split out of App.tsx: App calls it on every render.
+  ['app/useRepositoryChangeSync.ts', ['useRepositoryChangeSync']],
   // Split out of App.tsx: the chrome and the stage render on every app render.
   ['app/AppChrome.tsx', ['AppChrome']],
   ['app/WorkspaceStage.tsx', ['WorkspaceStage']],

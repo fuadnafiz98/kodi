@@ -11,7 +11,7 @@
 //     "Open a repository before using this action", and the loader dropped the
 //     answer: the file sat selected over "Select a file in the explorer".
 import { mkdir, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 
 import { createRepository, git, launchApp, press, removeLater, runSuite, writeTree } from './harness.mjs'
 
@@ -25,6 +25,10 @@ const deepAll = (selector) => `(() => {
   return found
 })()`
 const fileRow = (path) => `${deepAll(`[data-item-path="${path}"][data-item-type="file"]`)}[0]`
+const multiFileView = `document.querySelector('.multi-file-code-view') != null`
+// A tab switch keeps the other tab's tree mounted out of sight.
+const visibleRow = (path, type) => `${deepAll(`[data-item-path="${path}"][data-item-type="${type}"]`)}
+  .find((row) => row.getBoundingClientRect().width > 0)`
 const reviewTop = `(() => {
   const scroller = document.querySelector('.multi-file-code-view')
   if (scroller == null) return null
@@ -139,6 +143,13 @@ await runSuite('file-contents', async (suite, cleanup) => {
     await cdp.enter()
     return { slowestMs: performance.now() - started }
   }, { ...BUDGET, timedAction: false, done: showsContents('docs/clean.md'), check: showsContents('docs/clean.md') })
+  // Its folder was closed: the tree opens out to it and highlights the row.
+  const treeShows = (path) => `${deepAll(`[data-item-path="${path}"][data-item-selected="true"]`)}.some((row) => {
+    const rect = row.getBoundingClientRect()
+    return rect.height > 0 && rect.top >= 0 && rect.bottom <= window.innerHeight
+  })`
+  const shownInTree = await cdp.waitFor(treeShows('docs/clean.md'), 3_000, 16)
+  suite.record('a file opened with ⌘K is shown and selected in the tree', !shownInTree.timedOut)
 
   // Back into the review from the single-file view, while the review's own
   // remembered offset sits on another file: the click wins. The review reloads
@@ -158,6 +169,72 @@ await runSuite('file-contents', async (suite, cleanup) => {
   await suite.watch(app, 'a second return from the single-file view lands on the clicked file, not the last offset',
     () => press(cdp, `${fileRow('plans/f.ts')}.click()`),
     { ...BUDGET, done: inReview('plans/f.ts'), check: inReview('plans/f.ts') })
+
+  // A new tab has no session, and coming back from it activates the folder's
+  // again. The loader was still told there was none: every file clicked after
+  // that sat over "Select a file in the explorer".
+  await press(cdp, `document.querySelector('[aria-label="New tab"]').click()`)
+  await cdp.waitFor(`[...document.querySelectorAll('[role=tab]')].some((tab) =>
+    tab.getAttribute('aria-selected') === 'true' && tab.textContent.includes('New tab'))`, 5_000, 16)
+  await press(cdp, `[...document.querySelectorAll('[role=tab]')]
+    .find((tab) => tab.textContent.includes(${JSON.stringify(basename(fixture))}))?.click()`)
+  await cdp.waitFor(`${multiFileView} && ${visibleRow('plans/f.ts', 'file')} != null`, 8_000, 16)
+  await Bun.sleep(500)
+  await press(cdp, `${visibleRow('docs/clean.md', 'file')} == null && ${visibleRow('docs/', 'folder')}?.click()`)
+  await cdp.waitFor(`${visibleRow('docs/clean.md', 'file')} != null`, 5_000, 16)
+  await suite.watch(app, 'a file clicked after coming back from a new tab shows its contents',
+    () => press(cdp, `${visibleRow('docs/clean.md', 'file')}.click()`),
+    { ...BUDGET, done: showsContents('docs/clean.md'), check: showsContents('docs/clean.md') })
+
+  // ⌃Tab / ⌃⇧Tab cycle the tabs and ⌘1–9 pick one, as in a browser or an
+  // editor — also with the caret in the file, where Tab is the editor's.
+  const selectedTab = `([...document.querySelectorAll('.world-tabs [role=tab]')].find((tab) => tab.getAttribute('aria-selected') === 'true')?.textContent ?? '')`
+  const key = async (keyName, code, keyCode, modifiers) => {
+    await cdp.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: keyName, code, windowsVirtualKeyCode: keyCode, modifiers })
+    await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: keyName, code, windowsVirtualKeyCode: keyCode, modifiers })
+  }
+  await press(cdp, `document.querySelector('[aria-label="New tab"]').click()`)
+  await cdp.waitFor(`${selectedTab}.includes('New tab')`, 5_000, 16)
+  await key('Tab', 'Tab', 9, 2)
+  const cycled = await cdp.waitFor(`${selectedTab}.includes(${JSON.stringify(basename(fixture))})`, 5_000, 16)
+  suite.record('⌃Tab moves to the next tab', !cycled.timedOut, { selected: await cdp.eval(selectedTab) })
+  await cdp.waitFor(showsContents('docs/clean.md'), 8_000, 16)
+  const text = await cdp.eval(`(() => {
+    const walk = (root) => {
+      for (const element of root.querySelectorAll('[data-content] [data-line]')) {
+        const rect = element.getBoundingClientRect()
+        if (rect.height > 0 && rect.top > 0) return { x: Math.round(rect.left + 4), y: Math.round(rect.top + rect.height / 2) }
+      }
+      for (const element of root.querySelectorAll('*')) {
+        if (element.shadowRoot == null) continue
+        const found = walk(element.shadowRoot)
+        if (found != null) return found
+      }
+      return null
+    }
+    return walk(document)
+  })()`)
+  if (text != null) {
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: text.x, y: text.y, button: 'left', clickCount: 1 })
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: text.x, y: text.y, button: 'left', clickCount: 1 })
+    await Bun.sleep(300)
+  }
+  await key('Tab', 'Tab', 9, 2 | 8)
+  const back = await cdp.waitFor(`${selectedTab}.includes('New tab')`, 5_000, 16)
+  suite.record('⌃⇧Tab moves back, even with the caret in the file', !back.timedOut && text != null,
+    { selected: await cdp.eval(selectedTab), clicked: text })
+  await key('1', 'Digit1', 49, 4)
+  const first = await cdp.waitFor(`${selectedTab}.includes(${JSON.stringify(basename(fixture))})`, 5_000, 16)
+  suite.record('⌘1 picks the first tab', !first.timedOut, { selected: await cdp.eval(selectedTab) })
+  // Two presses in a row move two tabs, however soon the second follows.
+  const tabIndex = `[...document.querySelectorAll('.world-tabs [role=tab]')].findIndex((tab) => tab.getAttribute('aria-selected') === 'true')`
+  const startIndex = await cdp.eval(tabIndex)
+  await key('Tab', 'Tab', 9, 2)
+  await key('Tab', 'Tab', 9, 2)
+  const twice = await cdp.waitFor(`${tabIndex} === 2`, 5_000, 16)
+  await Bun.sleep(500)
+  suite.record('two quick ⌃Tab presses move two tabs', startIndex === 0 && !twice.timedOut && await cdp.eval(tabIndex) === 2,
+    { startIndex, index: await cdp.eval(tabIndex) })
 
   const banner = await cdp.tryEval(`document.querySelector('.error-banner')?.textContent ?? null`)
   suite.record('no error banner', banner == null, { banner })

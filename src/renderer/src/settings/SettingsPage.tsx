@@ -42,6 +42,20 @@ type SettingsSection = 'appearance' | 'editor' | 'keyboard' | 'pull-requests'
 
 const SETTINGS_EXIT_MS = 160
 
+const SETTINGS_SECTION_COPY: Record<SettingsSection, { title: string; description: string }> = {
+  appearance: { title: 'Appearance', description: 'Choose how Kodi looks.' },
+  editor: { title: 'Editor', description: 'Configure code rendering and comparison behavior.' },
+  keyboard: { title: 'Keyboard', description: 'Customize shortcuts for frequent actions.' },
+  'pull-requests': { title: 'Pull requests', description: 'Choose which repositories feed your inbox.' }
+}
+
+type UpdatePreference = <Key extends keyof AppPreferences>(key: Key, value: AppPreferences[Key]) => void
+
+interface SettingsSectionProps {
+  preferences: AppPreferences
+  update: UpdatePreference
+}
+
 export function SettingsPage({ preferences, onChange, onClose }: SettingsPageProps): React.JSX.Element {
   const [activeSection, setActiveSection] = useState<SettingsSection>('appearance')
   const [closing, setClosing] = useState(false)
@@ -67,7 +81,7 @@ export function SettingsPage({ preferences, onChange, onClose }: SettingsPagePro
     closeTimerRef.current = window.setTimeout(onClose, SETTINGS_EXIT_MS)
   }, [onClose])
 
-  const update = <Key extends keyof AppPreferences>(key: Key, value: AppPreferences[Key]): void => {
+  const update: UpdatePreference = (key, value) => {
     const nextPreferences = { ...preferences, [key]: value }
     if (key !== 'editorTheme') {
       onChange(nextPreferences)
@@ -80,26 +94,6 @@ export function SettingsPage({ preferences, onChange, onClose }: SettingsPagePro
       delete document.documentElement.dataset.themeSwitching
     }))
   }
-
-  const codeStyle = {
-    fontFamily: CODE_FONTS[preferences.codeFont].fontFamily,
-    fontSize: `${preferences.codeFontSize}px`,
-    lineHeight: `${preferences.codeLineHeight}px`
-  }
-  const keybindingConflicts = useMemo(
-    () => findKeybindingConflicts(preferences.keybindings),
-    [preferences.keybindings]
-  )
-  // An app shortcut rebound onto ⌘F/⌘D/⌘⌥F/⌘Z/⌘/ only works outside the editor,
-  // because while the caret is in the editor its own command wins.
-  const editorConflicts = useMemo(() => {
-    const labels = new Map<AppCommand, string>()
-    for (const { command, shortcut, editorCommand } of findEditorKeymapConflicts(preferences.keybindings)) {
-      const hint = EDITOR_SHORTCUTS.find((entry) => entry.shortcut === shortcut)
-      labels.set(command, hint?.label ?? editorCommand)
-    }
-    return labels
-  }, [preferences.keybindings])
 
   return (
     <dialog
@@ -126,140 +120,168 @@ export function SettingsPage({ preferences, onChange, onClose }: SettingsPagePro
       <div className="settings-content">
         <header className="settings-header">
           <div>
-            <h1>{activeSection === 'appearance' ? 'Appearance' : activeSection === 'editor' ? 'Editor' : activeSection === 'pull-requests' ? 'Pull requests' : 'Keyboard'}</h1>
-            <p>{activeSection === 'appearance'
-              ? 'Choose how Kodi looks.'
-              : activeSection === 'editor'
-                ? 'Configure code rendering and comparison behavior.'
-                : activeSection === 'pull-requests'
-                  ? 'Choose which repositories feed your inbox.'
-                  : 'Customize shortcuts for frequent actions.'}</p>
+            <h1>{SETTINGS_SECTION_COPY[activeSection].title}</h1>
+            <p>{SETTINGS_SECTION_COPY[activeSection].description}</p>
           </div>
           <button className="icon-button" type="button" onClick={requestClose} aria-label="Close settings" title="Close Settings"><IconX /></button>
         </header>
 
         <div className="settings-scroll" key={activeSection}>
-          {activeSection === 'appearance' ? (
-            <div className="settings-section">
-              <section className="settings-block">
-                <div className="settings-block-heading"><h2>Theme</h2><p>Changes apply immediately and persist on this Mac.</p></div>
-                {EDITOR_THEME_GROUPS.map((group) => (
-                  <div className="theme-group" key={group.label}>
-                    <h3>{group.label}</h3>
-                    <div className="theme-gallery" role="radiogroup" aria-label={`${group.label} themes`}>
-                      {group.themes.map((theme) => (
-                        <ThemeCard key={theme} theme={theme} selected={preferences.editorTheme === theme} onSelect={() => update('editorTheme', theme)} />
-                      ))}
-                    </div>
-                  </div>
-                ))}
-              </section>
-              <section className="settings-block settings-list-block">
-                <div className="settings-block-heading"><h2>Interface</h2></div>
-                <SettingRow label="Accent color" description="Highlights, links, and focus rings across the app. Theme follows the palette you picked.">
-                  <div className="accent-swatches" role="radiogroup" aria-label="Accent color">
-                    <AccentSwatch value="theme" label="Theme" color={themeSeed(preferences.editorTheme).accent}
-                      selected={preferences.accentColor === 'theme'} onSelect={(value) => update('accentColor', value)} />
-                    {Object.entries(ACCENT_COLORS).map(([value, accent]) => (
-                      <AccentSwatch key={value} value={value as AccentColor} label={accent.label}
-                        color={accent[getEditorThemeType(preferences.editorTheme)]}
-                        selected={preferences.accentColor === value} onSelect={(next) => update('accentColor', next)} />
-                    ))}
-                  </div>
-                </SettingRow>
-                <SettingRow controlId="interface-font" label="Interface font" description="Used by the title bar, explorer, settings, and controls.">
-                  <SelectControl>
-                    <select id="interface-font" name="interface-font" value={preferences.interfaceFont} onChange={(event) => update('interfaceFont', event.target.value as InterfaceFont)}>
-                      {Object.entries(INTERFACE_FONTS).map(([value, font]) => <option key={value} value={value}>{font.label}</option>)}
-                    </select>
-                  </SelectControl>
-                </SettingRow>
-                <SettingRow controlId="interface-font-scale" label="Interface text size" description={`${preferences.interfaceFontScale}% — scales app text; code keeps its own font size.`}>
-                  <RangeControl name="interface-font-scale" label="Interface text size" min={90} max={110} step={5}
-                    value={preferences.interfaceFontScale} onChange={(value) => update('interfaceFontScale', value)} />
-                  <output>{preferences.interfaceFontScale}%</output>
-                </SettingRow>
-                <SettingRow controlId="restore-last-folder" label="Reopen the last folder on launch" description="Only if it still exists; otherwise Kodi starts on the welcome screen.">
-                  <Toggle id="restore-last-folder" checked={preferences.restoreLastFolder} label="Reopen the last folder on launch" onChange={(checked) => update('restoreLastFolder', checked)} />
-                </SettingRow>
-              </section>
-            </div>
-          ) : null}
-
-          {activeSection === 'editor' ? (
-            <div className="settings-section">
-              <section className="settings-preview">
-                <header><span>Live preview</span><strong>{CODE_FONTS[preferences.codeFont].label} · {preferences.codeFontSize}px</strong></header>
-                <pre style={codeStyle}><code><span>1</span> <i>const</i> review = <b>'diff-first'</b>{'\n'}<span>2</span> <i>if</i> (review) openComparison()</code></pre>
-              </section>
-              <section className="settings-block settings-list-block">
-                <div className="settings-block-heading"><h2>Typography</h2></div>
-                <SettingRow controlId="code-font" label="Code font" description="Fira Code is bundled with the app and does not depend on a system installation.">
-                  <SelectControl>
-                    <select id="code-font" name="code-font" value={preferences.codeFont} onChange={(event) => update('codeFont', event.target.value as CodeFont)}>
-                      {Object.entries(CODE_FONTS).map(([value, font]) => <option key={value} value={value}>{font.label}</option>)}
-                    </select>
-                  </SelectControl>
-                </SettingRow>
-                <SettingRow controlId="code-font-size" label="Font size" description={`${preferences.codeFontSize} pixels`}>
-                  <RangeControl name="code-font-size" label="Code font size" min={10} max={20}
-                    value={preferences.codeFontSize} onChange={(value) => update('codeFontSize', value)} />
-                  <output>{preferences.codeFontSize}</output>
-                </SettingRow>
-                <SettingRow controlId="code-line-height" label="Line height" description={`${preferences.codeLineHeight} pixels`}>
-                  <RangeControl name="code-line-height" label="Code line height" min={16} max={32}
-                    value={preferences.codeLineHeight} onChange={(value) => update('codeLineHeight', value)} />
-                  <output>{preferences.codeLineHeight}</output>
-                </SettingRow>
-              </section>
-              <section className="settings-block settings-list-block">
-                <div className="settings-block-heading"><h2>Comparison</h2></div>
-                <SettingRow controlId="show-line-numbers" label="Line numbers" description="Show line numbers in previews and comparisons."><Toggle id="show-line-numbers" checked={preferences.showLineNumbers} label="Show line numbers" onChange={(checked) => update('showLineNumbers', checked)} /></SettingRow>
-                <SettingRow controlId="word-wrap" label="Word wrap" description="Wrap long lines instead of using horizontal scrolling."><Toggle id="word-wrap" checked={preferences.wordWrap} label="Wrap long lines" onChange={(checked) => update('wordWrap', checked)} /></SettingRow>
-                <SettingRow controlId="fold-unchanged" label="Context folding" description="Collapse unchanged regions in Git comparisons."><Toggle id="fold-unchanged" checked={preferences.foldUnchanged} label="Fold unchanged regions" onChange={(checked) => update('foldUnchanged', checked)} /></SettingRow>
-                <SettingRow controlId="autosave-on-blur" label="Save when focus leaves the editor" description="Optional. Disk conflicts still require your decision."><Toggle id="autosave-on-blur" checked={preferences.autosaveOnBlur} label="Save when focus leaves the editor" onChange={(checked) => update('autosaveOnBlur', checked)} /></SettingRow>
-                <SettingRow controlId="terminal-scrollback" label="Terminal scrollback" description={`${preferences.terminalScrollback.toLocaleString()} lines`}>
-                  <RangeControl name="terminal-scrollback" label="Terminal scrollback lines" min={1_000} max={50_000}
-                    step={1_000} value={preferences.terminalScrollback} onChange={(value) => update('terminalScrollback', value)} />
-                  <output>{preferences.terminalScrollback.toLocaleString()}</output>
-                </SettingRow>
-              </section>
-            </div>
-          ) : null}
-
-          {activeSection === 'keyboard' ? (
-            <div className="settings-section">
-              <section className="settings-block settings-list-block">
-                <div className="settings-block-heading"><h2>Keyboard shortcuts</h2><p>Select a shortcut, then press a new key combination. Conflicts appear immediately.</p></div>
-                <div className="keybinding-list">
-                  {KEYBINDING_COMMANDS.map(({ command, label, description }) => (
-                    <SettingRow key={command} label={label} description={description}>
-                      <KeybindingRecorder command={command} keybinding={preferences.keybindings[command]}
-                        conflict={keybindingConflicts.has(command)}
-                        editorConflict={editorConflicts.get(command)}
-                        onChange={(keybinding) => update('keybindings', {
-                          ...preferences.keybindings, [command]: keybinding
-                        })} />
-                    </SettingRow>
-                  ))}
-                </div>
-              </section>
-            </div>
-          ) : null}
-          {activeSection === 'pull-requests' ? (
-            <div className="settings-section">
-              <section className="settings-block settings-list-block">
-                <div className="settings-block-heading">
-                  <h2>Repositories</h2>
-                  <p>The welcome-screen inbox only fetches pull requests from these repositories. Leave it empty to see everything GitHub sends you.</p>
-                </div>
-                <InboxRepoEditor repos={preferences.inboxRepos} onChange={(repos) => update('inboxRepos', repos)} />
-              </section>
-            </div>
-          ) : null}
+          {activeSection === 'appearance' ? <AppearanceSection preferences={preferences} update={update} /> : null}
+          {activeSection === 'editor' ? <EditorSection preferences={preferences} update={update} /> : null}
+          {activeSection === 'keyboard' ? <KeyboardSection preferences={preferences} update={update} /> : null}
+          {activeSection === 'pull-requests' ? <PullRequestsSection preferences={preferences} update={update} /> : null}
         </div>
       </div>
     </dialog>
+  )
+}
+
+function AppearanceSection({ preferences, update }: SettingsSectionProps): React.JSX.Element {
+  return (
+    <div className="settings-section">
+      <section className="settings-block">
+        <div className="settings-block-heading"><h2>Theme</h2><p>Changes apply immediately and persist on this Mac.</p></div>
+        {EDITOR_THEME_GROUPS.map((group) => (
+          <div className="theme-group" key={group.label}>
+            <h3>{group.label}</h3>
+            <div className="theme-gallery" role="radiogroup" aria-label={`${group.label} themes`}>
+              {group.themes.map((theme) => (
+                <ThemeCard key={theme} theme={theme} selected={preferences.editorTheme === theme} onSelect={() => update('editorTheme', theme)} />
+              ))}
+            </div>
+          </div>
+        ))}
+      </section>
+      <section className="settings-block settings-list-block">
+        <div className="settings-block-heading"><h2>Interface</h2></div>
+        <SettingRow label="Accent color" description="Highlights, links, and focus rings across the app. Theme follows the palette you picked.">
+          <div className="accent-swatches" role="radiogroup" aria-label="Accent color">
+            <AccentSwatch value="theme" label="Theme" color={themeSeed(preferences.editorTheme).accent}
+              selected={preferences.accentColor === 'theme'} onSelect={(value) => update('accentColor', value)} />
+            {Object.entries(ACCENT_COLORS).map(([value, accent]) => (
+              <AccentSwatch key={value} value={value as AccentColor} label={accent.label}
+                color={accent[getEditorThemeType(preferences.editorTheme)]}
+                selected={preferences.accentColor === value} onSelect={(next) => update('accentColor', next)} />
+            ))}
+          </div>
+        </SettingRow>
+        <SettingRow controlId="interface-font" label="Interface font" description="Used by the title bar, explorer, settings, and controls.">
+          <SelectControl>
+            <select id="interface-font" name="interface-font" value={preferences.interfaceFont} onChange={(event) => update('interfaceFont', event.target.value as InterfaceFont)}>
+              {Object.entries(INTERFACE_FONTS).map(([value, font]) => <option key={value} value={value}>{font.label}</option>)}
+            </select>
+          </SelectControl>
+        </SettingRow>
+        <SettingRow controlId="interface-font-scale" label="Interface text size" description={`${preferences.interfaceFontScale}% — scales app text; code keeps its own font size.`}>
+          <RangeControl name="interface-font-scale" label="Interface text size" min={90} max={110} step={5}
+            value={preferences.interfaceFontScale} onChange={(value) => update('interfaceFontScale', value)} />
+          <output>{preferences.interfaceFontScale}%</output>
+        </SettingRow>
+        <SettingRow controlId="restore-last-folder" label="Reopen the last folder on launch" description="Only if it still exists; otherwise Kodi starts on the welcome screen.">
+          <Toggle id="restore-last-folder" checked={preferences.restoreLastFolder} label="Reopen the last folder on launch" onChange={(checked) => update('restoreLastFolder', checked)} />
+        </SettingRow>
+      </section>
+    </div>
+  )
+}
+
+function EditorSection({ preferences, update }: SettingsSectionProps): React.JSX.Element {
+  const codeStyle = {
+    fontFamily: CODE_FONTS[preferences.codeFont].fontFamily,
+    fontSize: `${preferences.codeFontSize}px`,
+    lineHeight: `${preferences.codeLineHeight}px`
+  }
+  return (
+    <div className="settings-section">
+      <section className="settings-preview">
+        <header><span>Live preview</span><strong>{CODE_FONTS[preferences.codeFont].label} · {preferences.codeFontSize}px</strong></header>
+        <pre style={codeStyle}><code><span>1</span> <i>const</i> review = <b>'diff-first'</b>{'\n'}<span>2</span> <i>if</i> (review) openComparison()</code></pre>
+      </section>
+      <section className="settings-block settings-list-block">
+        <div className="settings-block-heading"><h2>Typography</h2></div>
+        <SettingRow controlId="code-font" label="Code font" description="Fira Code is bundled with the app and does not depend on a system installation.">
+          <SelectControl>
+            <select id="code-font" name="code-font" value={preferences.codeFont} onChange={(event) => update('codeFont', event.target.value as CodeFont)}>
+              {Object.entries(CODE_FONTS).map(([value, font]) => <option key={value} value={value}>{font.label}</option>)}
+            </select>
+          </SelectControl>
+        </SettingRow>
+        <SettingRow controlId="code-font-size" label="Font size" description={`${preferences.codeFontSize} pixels`}>
+          <RangeControl name="code-font-size" label="Code font size" min={10} max={20}
+            value={preferences.codeFontSize} onChange={(value) => update('codeFontSize', value)} />
+          <output>{preferences.codeFontSize}</output>
+        </SettingRow>
+        <SettingRow controlId="code-line-height" label="Line height" description={`${preferences.codeLineHeight} pixels`}>
+          <RangeControl name="code-line-height" label="Code line height" min={16} max={32}
+            value={preferences.codeLineHeight} onChange={(value) => update('codeLineHeight', value)} />
+          <output>{preferences.codeLineHeight}</output>
+        </SettingRow>
+      </section>
+      <section className="settings-block settings-list-block">
+        <div className="settings-block-heading"><h2>Comparison</h2></div>
+        <SettingRow controlId="show-line-numbers" label="Line numbers" description="Show line numbers in previews and comparisons."><Toggle id="show-line-numbers" checked={preferences.showLineNumbers} label="Show line numbers" onChange={(checked) => update('showLineNumbers', checked)} /></SettingRow>
+        <SettingRow controlId="word-wrap" label="Word wrap" description="Wrap long lines instead of using horizontal scrolling."><Toggle id="word-wrap" checked={preferences.wordWrap} label="Wrap long lines" onChange={(checked) => update('wordWrap', checked)} /></SettingRow>
+        <SettingRow controlId="fold-unchanged" label="Context folding" description="Collapse unchanged regions in Git comparisons."><Toggle id="fold-unchanged" checked={preferences.foldUnchanged} label="Fold unchanged regions" onChange={(checked) => update('foldUnchanged', checked)} /></SettingRow>
+        <SettingRow controlId="autosave-on-blur" label="Save when focus leaves the editor" description="Optional. Disk conflicts still require your decision."><Toggle id="autosave-on-blur" checked={preferences.autosaveOnBlur} label="Save when focus leaves the editor" onChange={(checked) => update('autosaveOnBlur', checked)} /></SettingRow>
+        <SettingRow controlId="terminal-scrollback" label="Terminal scrollback" description={`${preferences.terminalScrollback.toLocaleString()} lines`}>
+          <RangeControl name="terminal-scrollback" label="Terminal scrollback lines" min={1_000} max={50_000}
+            step={1_000} value={preferences.terminalScrollback} onChange={(value) => update('terminalScrollback', value)} />
+          <output>{preferences.terminalScrollback.toLocaleString()}</output>
+        </SettingRow>
+      </section>
+    </div>
+  )
+}
+
+function KeyboardSection({ preferences, update }: SettingsSectionProps): React.JSX.Element {
+  const keybindingConflicts = useMemo(
+    () => findKeybindingConflicts(preferences.keybindings),
+    [preferences.keybindings]
+  )
+  // An app shortcut rebound onto ⌘F/⌘D/⌘⌥F/⌘Z/⌘/ only works outside the editor,
+  // because while the caret is in the editor its own command wins.
+  const editorConflicts = useMemo(() => {
+    const labels = new Map<AppCommand, string>()
+    for (const { command, shortcut, editorCommand } of findEditorKeymapConflicts(preferences.keybindings)) {
+      const hint = EDITOR_SHORTCUTS.find((entry) => entry.shortcut === shortcut)
+      labels.set(command, hint?.label ?? editorCommand)
+    }
+    return labels
+  }, [preferences.keybindings])
+
+  return (
+    <div className="settings-section">
+      <section className="settings-block settings-list-block">
+        <div className="settings-block-heading"><h2>Keyboard shortcuts</h2><p>Select a shortcut, then press a new key combination. Conflicts appear immediately.</p></div>
+        <div className="keybinding-list">
+          {KEYBINDING_COMMANDS.map(({ command, label, description }) => (
+            <SettingRow key={command} label={label} description={description}>
+              <KeybindingRecorder command={command} keybinding={preferences.keybindings[command]}
+                conflict={keybindingConflicts.has(command)}
+                editorConflict={editorConflicts.get(command)}
+                onChange={(keybinding) => update('keybindings', {
+                  ...preferences.keybindings, [command]: keybinding
+                })} />
+            </SettingRow>
+          ))}
+        </div>
+      </section>
+    </div>
+  )
+}
+
+function PullRequestsSection({ preferences, update }: SettingsSectionProps): React.JSX.Element {
+  return (
+    <div className="settings-section">
+      <section className="settings-block settings-list-block">
+        <div className="settings-block-heading">
+          <h2>Repositories</h2>
+          <p>The welcome-screen inbox only fetches pull requests from these repositories. Leave it empty to see everything GitHub sends you.</p>
+        </div>
+        <InboxRepoEditor repos={preferences.inboxRepos} onChange={(repos) => update('inboxRepos', repos)} />
+      </section>
+    </div>
   )
 }
 
@@ -422,7 +444,8 @@ function InboxRepoEditor({ repos, onChange }: {
     onChange([...repos, next])
     setDraft('')
   }
-  const suggestions = readWelcomeInboxRepos().filter((repo) => !repos.includes(repo))
+  const chosen = new Set(repos)
+  const suggestions = readWelcomeInboxRepos().filter((repo) => !chosen.has(repo))
 
   return (
     <div className="inbox-repo-editor">

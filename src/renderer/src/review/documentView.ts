@@ -25,19 +25,24 @@ export function canRenderMarkdown(comparison: FileComparison): boolean {
     && markdownSource(comparison) != null
 }
 
+/**
+ * What a markdown file shows. Editing keeps the reader's choice — the split's
+ * preview follows the draft as it is typed — except preview-only, which has no
+ * source to type in: a draft resumed there opens beside its preview instead.
+ */
 export function markdownSurface(
   comparison: FileComparison,
-  editMode: 'read' | 'edit' | 'preview',
+  editMode: 'read' | 'edit',
   documentView: DocumentView
 ): DocumentView {
-  if (!canRenderMarkdown(comparison) || editMode === 'edit') return 'source'
-  if (editMode === 'preview') return 'preview'
+  if (!canRenderMarkdown(comparison)) return 'source'
+  if (editMode === 'edit' && documentView === 'preview') return 'split'
   return documentView
 }
 
 export function shouldShowMarkdownPreview(
   comparison: FileComparison,
-  editMode: 'read' | 'edit' | 'preview',
+  editMode: 'read' | 'edit',
   documentView: DocumentView
 ): boolean {
   return markdownSurface(comparison, editMode, documentView) === 'preview'

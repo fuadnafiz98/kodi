@@ -250,7 +250,7 @@ export class RepositorySessionRegistry {
       this.reportError
     )
     const session: RepositorySession = { repository, watcher, lastActiveAt: Date.now(), activation: null }
-    repository.setSelfWriteObserver((path) => watcher.expectSelfWrite(path))
+    repository.setSelfWriteObserver((path, stillOurs) => watcher.expectSelfWrite(path, stillOurs))
     // The gitignored set can land after the refresh that asked for it returned,
     // and it only ever adds paths, so it is published on its own with no
     // invalidated files.

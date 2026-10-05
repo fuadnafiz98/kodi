@@ -16,12 +16,12 @@ export function automaticWorkspaceView(
     : 'file'
 }
 
-export function workspaceViewForTreePath(
-  currentView: WorkspaceView,
-  pathIsInReview: boolean,
-  hasEditSession: boolean
-): WorkspaceView {
-  if (hasEditSession) return currentView
+/**
+ * A changed file opens in the review, anything else on its own. Editing is not
+ * a mode to protect: a file's draft outlives leaving it, and the review edits
+ * the same drafts in place.
+ */
+export function workspaceViewForTreePath(pathIsInReview: boolean): WorkspaceView {
   return pathIsInReview ? 'multi' : 'file'
 }
 

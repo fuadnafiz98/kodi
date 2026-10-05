@@ -710,6 +710,15 @@ export interface RepositoryApi {
    */
   onOpenExternalPullRequest(listener: (url: string, root: string | null) => void): () => void
   /**
+   * `kodi <folder>` (or Finder's Open With) while the app is up: main has opened
+   * the folder and made it the active one, and holds it until the window takes
+   * it. A window drops change events for any root but its own, so without this
+   * it stayed on the folder it was showing.
+   */
+  onOpenExternalFolder(listener: () => void): () => void
+  /** The folder a `kodi <folder>` opened, once; null when there is none waiting. */
+  takeExternalFolder(): Promise<RepositorySnapshot | null>
+  /**
    * Main asks the window to drop every review payload it is holding because the
    * app has been hidden long enough to snooze. The listener returns the reason
    * it could not, or null when it hibernated; main records the answer so the
@@ -722,7 +731,8 @@ export interface RepositoryApi {
   getComparison(path: string): Promise<FileComparison>
   /** A text file at a commit, or null when the object is missing, binary or oversized. */
   getRevisionFile(revision: string, path: string): Promise<DiffFileContents | null>
-  hasRevision(revision: string): Promise<boolean>
+  /** Fetches a pull request's base and head when the clone lacks them; true once both are readable. */
+  ensurePullRequestRevisions(pullRequestUrl: string, baseOid: string, headOid: string): Promise<boolean>
   saveWorkingFile(request: WorkingFileSaveRequest): Promise<FileComparison>
   /**
    * `root` names the repository the patch was asked for; without it main reads
@@ -837,6 +847,8 @@ export const IPC_CHANNELS = {
   resolvePullRequestRepository: 'repository:resolve-pull-request',
   getPendingExternalPullRequest: 'app:get-pending-external-pull-request',
   openExternalPullRequest: 'app:open-external-pull-request',
+  openExternalFolder: 'app:open-external-folder',
+  takeExternalFolder: 'app:take-external-folder',
   hibernateRequest: 'app:hibernate-request',
   hibernationState: 'app:hibernation-state',
   readClipboardText: 'app:clipboard-read-text',
@@ -844,7 +856,7 @@ export const IPC_CHANNELS = {
   refresh: 'repository:refresh',
   getComparison: 'repository:get-comparison',
   getRevisionFile: 'repository:get-revision-file',
-  hasRevision: 'repository:has-revision',
+  ensurePullRequestRevisions: 'repository:ensure-pull-request-revisions',
   saveWorkingFile: 'repository:save-working-file',
   getWorkingTreePatch: 'repository:get-working-tree-patch',
   searchContent: 'repository:search-content',

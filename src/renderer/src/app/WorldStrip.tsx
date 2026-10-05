@@ -241,7 +241,7 @@ export const WorldStrip = memo(function WorldStrip({
           className="world-new"
           type="button"
           aria-label="New tab"
-          title="New Tab (⌘T). Cycle tabs with ⌘⇧[ ]"
+          title="New Tab (⌘T). Switch tabs with ⌃Tab, ⌃⇧Tab or ⌘1–9"
           onClick={onNew}
         >
           <IconPlus />

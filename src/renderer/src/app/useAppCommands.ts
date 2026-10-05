@@ -153,8 +153,30 @@ function useAppShortcuts({
     runCommand(command)
   })
 
+  // Tab switching listens in the capture phase: the editor indents on Tab and
+  // the terminal takes every key it sees, and either would otherwise swallow
+  // ⌃Tab before it bubbled up here.
+  const handleTabKeyDown = useEffectEvent((event: KeyboardEvent): void => {
+    if (settingsOpen || event.altKey) return
+    if (event.ctrlKey && !event.metaKey && event.key === 'Tab') {
+      event.preventDefault()
+      event.stopPropagation()
+      gitWorkflow.cycleWorld(event.shiftKey ? -1 : 1)
+      return
+    }
+    if (event.metaKey && !event.ctrlKey && !event.shiftKey && /^Digit[1-9]$/.test(event.code)) {
+      event.preventDefault()
+      event.stopPropagation()
+      gitWorkflow.focusWorldAt(Number(event.code.slice(5)))
+    }
+  })
+
   useEffect(() => {
     window.addEventListener('keydown', handleKeyDown)
-    return () => window.removeEventListener('keydown', handleKeyDown)
+    window.addEventListener('keydown', handleTabKeyDown, { capture: true })
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown)
+      window.removeEventListener('keydown', handleTabKeyDown, { capture: true })
+    }
   }, [])
 }

@@ -4,7 +4,8 @@ export const DEFAULT_STORAGE_BUDGET = 3 * 1024 * 1024
 const MANAGED_PREFIXES = [
   'kodi:viewed-files:',
   'kodi:review-threads:',
-  'kodi:drafts:v1:'
+  'kodi:drafts:v1:',
+  'kodi:agent-chats:'
 ] as const
 
 // Keys a removed feature left behind. Nothing rewrites them, so they would sit

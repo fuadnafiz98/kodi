@@ -29,10 +29,10 @@ describe('markdownSurface', () => {
     expect(markdownSurface(comparison(), 'read', 'split')).toBe('split')
   })
 
-  test('forces source while editing and preview for a draft preview', () => {
-    expect(markdownSurface(comparison(), 'edit', 'split')).toBe('source')
-    expect(markdownSurface(comparison({ mode: 'diff', status: 'modified' }), 'preview', 'source'))
-      .toBe('preview')
+  test('editing keeps the view, and opens preview-only beside its source', () => {
+    expect(markdownSurface(comparison(), 'edit', 'split')).toBe('split')
+    expect(markdownSurface(comparison(), 'edit', 'source')).toBe('source')
+    expect(markdownSurface(comparison(), 'edit', 'preview')).toBe('split')
   })
 
   test('does not steal image, binary, or TypeScript surfaces', () => {

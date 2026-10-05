@@ -1,4 +1,4 @@
-import { afterEach, expect, mock, test } from 'bun:test'
+import { beforeAll, afterEach, expect, mock, test } from 'bun:test'
 import { act, cleanup, renderHook, waitFor } from '@testing-library/react'
 
 import type {
@@ -10,6 +10,10 @@ import type {
 } from '../../../shared/contracts'
 import type { AgentSelection } from './agentAttachments'
 import { useAgentSession } from './useAgentSession'
+
+import { loadAgentMarkdown } from './useAgentAnswer'
+
+beforeAll(loadAgentMarkdown)
 
 afterEach(() => {
   cleanup()

@@ -29,15 +29,11 @@ describe('automaticWorkspaceView', () => {
 
 describe('workspaceViewForTreePath', () => {
   it('opens files outside the current review as full-file previews', () => {
-    expect(workspaceViewForTreePath('multi', false, false)).toBe('file')
+    expect(workspaceViewForTreePath(false)).toBe('file')
   })
 
   it('returns to the review when a changed file is selected', () => {
-    expect(workspaceViewForTreePath('file', true, false)).toBe('multi')
-  })
-
-  it('does not interrupt an active edit session', () => {
-    expect(workspaceViewForTreePath('file', true, true)).toBe('file')
+    expect(workspaceViewForTreePath(true)).toBe('multi')
   })
 })
 

@@ -77,7 +77,16 @@ export function useNewRevisionWatch(
   { reviewIdentity = null, idleMs = REVIEW_IDLE_MS }: NewRevisionWatchOptions = {}
 ): NewRevisionWatch {
   const [pendingHeadOid, setPendingHeadOid] = useState<string | null>(null)
-  const lastInteractionRef = useRef(performance.now())
+  // A pending head belongs to the review it was read from; another review's tab
+  // must start clean rather than inherit it. Cleared while rendering, so the
+  // new review never paints a frame with the old one's banner.
+  const [pendingReviewIdentity, setPendingReviewIdentity] = useState(reviewIdentity)
+  if (pendingReviewIdentity !== reviewIdentity) {
+    setPendingReviewIdentity(reviewIdentity)
+    setPendingHeadOid(null)
+  }
+  // Stamped when the watch mounts, below; the clock is not read while rendering.
+  const lastInteractionRef = useRef(0)
   // The head a reload has already been asked for. Until the review catches up,
   // `reviewHeadOid` still lags and every poll would ask again.
   const requestedHeadRef = useRef<string | null>(null)
@@ -98,17 +107,17 @@ export function useNewRevisionWatch(
     })
   }, [])
 
-  // A pending head belongs to the review it was read from; another review's tab
-  // must start clean rather than inherit it.
+  // Nor does a reload asked for on another review answer for this one.
   useEffect(() => {
     requestedHeadRef.current = null
-    setPendingHeadOid(null)
   }, [reviewIdentity])
 
+  // Declared ahead of the head check, so its first run already has the stamp.
   useEffect(() => {
     const note = (): void => {
       lastInteractionRef.current = performance.now()
     }
+    note()
     for (const event of INTERACTION_EVENTS) {
       document.addEventListener(event, note, { capture: true, passive: true })
     }

@@ -36,10 +36,10 @@ const PATCH = [
 
 function installRepository(readable: boolean) {
   let answer!: (value: boolean) => void
-  const calls = { hasRevision: 0, getRevisionFile: 0 }
+  const calls = { ensurePullRequestRevisions: 0, getRevisionFile: 0 }
   window.repository = {
-    hasRevision: () => {
-      calls.hasRevision += 1
+    ensurePullRequestRevisions: () => {
+      calls.ensurePullRequestRevisions += 1
       return new Promise<boolean>((resolve) => { answer = resolve })
     },
     getRevisionFile: async (_revision: string, path: string) => {
@@ -67,7 +67,7 @@ test('loads wait for the head check and are refused when the head is not local',
   const { result } = renderHook(() => useReviewDiffLoader(review, noopPreview))
   const fileDiff = parsePatchFiles(PATCH, 'test')[0]!.files[0]!
   const pending = result.current!.load(fileDiff)
-  await waitFor(() => expect(repository.calls.hasRevision).toBe(1))
+  await waitFor(() => expect(repository.calls.ensurePullRequestRevisions).toBe(1))
   repository.answer()
   await expect(pending).rejects.toThrow('head-7')
   expect(repository.calls.getRevisionFile).toBe(0)
@@ -78,10 +78,10 @@ test('a readable head is asked about once and then read from', async () => {
   const { result } = renderHook(() => useReviewDiffLoader(review, noopPreview))
   const loader = result.current!
   const first = loader.load(parsePatchFiles(PATCH, 'one')[0]!.files[0]!)
-  await waitFor(() => expect(repository.calls.hasRevision).toBe(1))
+  await waitFor(() => expect(repository.calls.ensurePullRequestRevisions).toBe(1))
   repository.answer()
   const files = await first
   expect(files.newFile.contents).toBe('a\nB\n')
   await loader.load(parsePatchFiles(PATCH, 'two')[0]!.files[0]!)
-  expect(repository.calls.hasRevision).toBe(1)
+  expect(repository.calls.ensurePullRequestRevisions).toBe(1)
 })

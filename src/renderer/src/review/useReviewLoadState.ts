@@ -1,16 +1,26 @@
 import { startTransition, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { CodeViewItem } from '@pierre/diffs'
+import { hydratePartialDiff, type CodeViewItem } from '@pierre/diffs'
+import { useWorkerPool } from '@pierre/diffs/react'
 
 import { COMMAND_ABORTED_MESSAGE, type OmittedDiffFile, type RepositoryChangeEvent, type RepositoryReview } from '../../../shared/contracts'
 import { COMPARISON_FETCH_CONCURRENCY } from '../diff/diffWorkerConfig'
 import type { ReviewAnnotationMetadata } from './ReviewComments'
 import {
+  AUTO_HYDRATE_MAX_LINES,
+  canAutoHydrate,
+  exceedsLineLimit,
+  isReviewItemRendered,
+  loadPartialDiffFiles
+} from './partialDiffHydration'
+import {
+  adoptReviewDiff,
   createPatchReviewItems,
   createReviewItem,
   keepUnchangedReviewItem,
   mergeReviewItems,
   orderReviewItems,
   pathFromReviewItemId as pathFromItemId,
+  primeReviewHighlights,
   retainReviewItems,
   reviewItemId as itemId
 } from './reviewItems'
@@ -38,6 +48,55 @@ const EMPTY_LOAD_STATE: ReviewLoadState = {
 }
 
 export const FOLDER_REVIEW_PAGE_SIZE = 50
+
+// A rewrite waits this long for its whole file before it swaps in as a patch.
+const REWRITE_HYDRATION_TIMEOUT_MS = 300
+// Below the worker's four-entry highlight cache, so a primed result is still
+// there when the rewrite swaps in.
+const PRIMED_REWRITES_LIMIT = 3
+
+function exceedsHighlightBudget(item: CodeViewItem<ReviewAnnotationMetadata>): boolean {
+  return item.type === 'diff'
+    && Math.max(item.fileDiff.additionLines.length, item.fileDiff.deletionLines.length) > AUTO_HYDRATE_MAX_LINES
+}
+
+/**
+ * A reload hands back the patch alone. Swapping it in for a file the review had
+ * already hydrated shrank that file to its hunks under the reader (with folding
+ * off, from the whole file to its hunks), and hydration grew it back a moment
+ * later: two layout changes for one agent write, the second after the reader
+ * had moved on. A rewrite on screen is hydrated before it replaces the file.
+ */
+async function hydrateRewrites(
+  results: readonly { path: string; item: CodeViewItem<ReviewAnnotationMetadata> | null }[],
+  held: readonly CodeViewItem<ReviewAnnotationMetadata>[],
+  repository: Pick<NonNullable<typeof window.repository>, 'getComparison'>
+): Promise<{ path: string; item: CodeViewItem<ReviewAnnotationMetadata> | null }[]> {
+  const heldById = new Map(held.map((item) => [item.id, item]))
+  return Promise.all(results.map(async (result) => {
+    const { item } = result
+    const current = item == null ? undefined : heldById.get(item.id)
+    if (item?.type !== 'diff' || current?.type !== 'diff' || current.fileDiff.isPartial || !isReviewItemRendered(item.id)
+      || !canAutoHydrate(item.fileDiff) || keepUnchangedReviewItem(current, item) !== item) return result
+    countKodiMetric('autoHydrations')
+    const hydrated = (async () => {
+      const comparison = await repository.getComparison(result.path)
+      if (exceedsLineLimit(comparison.oldFile?.contents) || exceedsLineLimit(comparison.newFile?.contents)) return null
+      const files = await loadPartialDiffFiles(item.fileDiff, [
+        { side: 'new', load: async () => comparison.newFile },
+        { side: 'old', load: async () => comparison.oldFile }
+      ])
+      return hydratePartialDiff('clone', item.fileDiff, files)
+    })().catch(() => null)
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const fileDiff = await Promise.race([
+      hydrated,
+      new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), REWRITE_HYDRATION_TIMEOUT_MS) })
+    ])
+    clearTimeout(timer)
+    return fileDiff == null ? result : { path: result.path, item: adoptReviewDiff(item, fileDiff) }
+  }))
+}
 
 // A watcher refresh aborts a working-tree patch still being built for the
 // older snapshot. That is a git repository answering "ask again", not a plain
@@ -306,6 +365,11 @@ export function useReviewLoadState({
   // through the change event below, not through a path-set change.
   const servedPathsRef = useRef<ReadonlySet<string>>(new Set())
   const [folderLoadState, setFolderLoadState] = useState<ReviewLoadState>(EMPTY_LOAD_STATE)
+  const workerPool = useWorkerPool()
+  const pendingReloadPathsRef = useRef(new Set<string>())
+  // What the review holds now, for a reload to tell rewritten files from rewrites
+  // that changed nothing.
+  const heldItemsRef = useRef<readonly CodeViewItem<ReviewAnnotationMetadata>[]>([])
   const [pagination, setPagination] = useState({ key: '', limit: FOLDER_REVIEW_PAGE_SIZE })
   const loadLimit = pagination.key === pathsKey ? pagination.limit : FOLDER_REVIEW_PAGE_SIZE
   const streamingFileCount = repositoryReview?.expectedFileCount ?? null
@@ -637,7 +701,11 @@ export function useReviewLoadState({
   useEffect(() => {
     if (externalReviewItems != null || repositoryChange == null) return
     const visiblePaths = new Set(stablePaths)
-    const pathsToReload = repositoryChange.changedPaths.filter((path) => visiblePaths.has(path))
+    // A newer change cancels this run; whatever it had not committed yet rides
+    // along with the next one instead of staying stale until its next write.
+    const pending = pendingReloadPathsRef.current
+    for (const path of repositoryChange.changedPaths) pending.add(path)
+    const pathsToReload = [...pending].filter((path) => visiblePaths.has(path))
     if (pathsToReload.length === 0) return
     let cancelled = false
 
@@ -660,8 +728,17 @@ export function useReviewLoadState({
           }
         }))
       }
-    })().then((results) => {
+    })().then(async (fetched) => {
       if (cancelled) return
+      const results = await hydrateRewrites(fetched, heldItemsRef.current, window.repository!)
+      if (cancelled) return
+      // Only what the reader can see: the worker highlights one file at a time
+      // and caches four, so offscreen rewrites only queued ahead of the visible one.
+      const onScreen = results.flatMap((result) => result.item != null && isReviewItemRendered(result.item.id)
+        && !exceedsHighlightBudget(result.item) ? [result.item] : []).slice(0, PRIMED_REWRITES_LIMIT)
+      await primeReviewHighlights(workerPool, onScreen, heldItemsRef.current)
+      if (cancelled) return
+      for (const path of pathsToReload) pending.delete(path)
       startTransition(() => {
         setFolderLoadState((current) => {
           const replacements = new Map(results.map((result) => [itemId(result.path), result.item]))
@@ -680,7 +757,7 @@ export function useReviewLoadState({
     })
 
     return () => { cancelled = true }
-  }, [externalReviewItems, repositoryChange, root, stablePaths])
+  }, [externalReviewItems, repositoryChange, root, stablePaths, workerPool])
 
   useEffect(() => {
     resetReviewFileMetrics()
@@ -688,6 +765,7 @@ export function useReviewLoadState({
   }, [])
 
   useEffect(() => {
+    heldItemsRef.current = loadState.items
     setLoadedReviewItemCount(loadState.items.length)
   }, [loadState.items])
 

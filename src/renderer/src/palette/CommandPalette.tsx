@@ -14,7 +14,8 @@ import { IconRefresh, IconSearch } from '@pierre/icons'
 import type { RepositoryReview, RepositorySnapshot } from '../../../shared/contracts'
 import { formatKeybinding, type AppCommand, type KeybindingMap } from '../settings/keybindings'
 import { nextPaletteIndex } from './paletteCommands'
-import { usePaletteActions, type PaletteAction } from './paletteActions'
+import { openFileAt, usePaletteActions, type PaletteAction } from './paletteActions'
+import { parseFileLocation } from './fileLocation'
 import {
   isCommandOnlyQuery,
   paletteFilterQuery,
@@ -48,6 +49,8 @@ export interface CommandPaletteProps {
   onToggleTerminal(): void
   onRunCommand?(command: AppCommand): void
   onOpenFile?(path: string): void
+  /** The file in front: `:42` goes to its line 42. */
+  currentPath?: string | null
   /** Moves the explorer to a directory row the reader picked. */
   onRevealDirectory?(path: string): void
   onSwitchBranch?(branch: string): void
@@ -68,12 +71,13 @@ export const CommandPalette = memo(function CommandPalette({
   onToggleTerminal,
   onRunCommand,
   onOpenFile,
+  currentPath = null,
   onRevealDirectory,
   onSwitchBranch
 }: CommandPaletteProps): React.JSX.Element {
   // Search state lives here, not in the app layout: a keystroke must re-render
   // the palette and nothing else.
-  const { changeQuery, contentResults, fileResults, flushContentSearch, searchingContent } =
+  const { changeQuery, contentResults, fileResults, flushContentSearch, rankFiles, resultsQuery, searchingContent } =
     useRepositorySearch(snapshot, onError, repositoryReview, recentFiles)
   const gitRepositoryOpen = snapshot?.kind === 'git'
   const projectOpen = snapshot != null
@@ -85,9 +89,15 @@ export const CommandPalette = memo(function CommandPalette({
   const dialogRef = useRef<HTMLDialogElement>(null)
   const resultsRef = useRef<HTMLDivElement>(null)
   const scrollActiveRowRef = useRef(false)
+  // Where the pointer last really was. Rows re-render under a pointer that is
+  // resting where the palette opened, and Chromium reports a move for that; if
+  // those counted, typing moved the selection to whichever row slid under the
+  // cursor and Enter opened that file instead of the best match.
+  const lastPointerRef = useRef<{ x: number; y: number } | null>(null)
   const selector = parsePullRequestSelector(query)
   const filterQuery = paletteFilterQuery(query)
   const commandOnly = isCommandOnlyQuery(query)
+  const line = commandOnly ? null : parseFileLocation(query).line
 
   useLayoutEffect(() => {
     const dialog = dialogRef.current
@@ -139,6 +149,8 @@ export const CommandPalette = memo(function CommandPalette({
     commandOnly,
     hasPullRequestSelector: selector != null,
     fileResults,
+    line,
+    currentPath,
     contentResults,
     branches,
     keybindings,
@@ -189,7 +201,23 @@ export const CommandPalette = memo(function CommandPalette({
     onOpenPullRequest(selector)
   }
 
+  // File results are ranked a deferred render behind the input. Enter pressed in
+  // that gap ran the top of the list for the previous query — the palette closed
+  // on the file that was already open — so a stale list is ranked again, now,
+  // for what was actually typed; a search puts files first.
+  const resultsStale = !commandOnly && selector == null && filterQuery.trim() !== ''
+    && resultsQuery !== searchQueryForRepository(query)
   const runActive = (): void => {
+    const top = resultsStale ? rankFiles(searchQueryForRepository(query))[0] : undefined
+    if (top != null && onOpenFile != null) {
+      if (top.kind === 'dir') {
+        drillIntoDirectory(top.path)
+      } else {
+        onClose()
+        openFileAt(onOpenFile, top.path, line)
+      }
+      return
+    }
     if (selector != null) {
       displayPullRequest()
       return
@@ -215,6 +243,9 @@ export const CommandPalette = memo(function CommandPalette({
   // One handler for the whole list instead of one closure per row: crossing the
   // results with the pointer used to set state once per row it passed over.
   const trackPointer = (event: React.PointerEvent<HTMLDivElement>): void => {
+    const last = lastPointerRef.current
+    lastPointerRef.current = { x: event.screenX, y: event.screenY }
+    if (last == null || (last.x === event.screenX && last.y === event.screenY)) return
     if (!(event.target instanceof HTMLElement)) return
     const row = event.target.closest<HTMLElement>('[data-index]')
     if (row == null) return

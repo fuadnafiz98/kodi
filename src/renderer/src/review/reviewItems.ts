@@ -1,4 +1,4 @@
-import { parseDiffFromFile, parsePatchFiles, type CodeViewItem } from '@pierre/diffs'
+import { parseDiffFromFile, parsePatchFiles, type CodeViewItem, type FileDiffMetadata } from '@pierre/diffs'
 
 import type { FileComparison, FileImagePreview } from '../../../shared/contracts'
 import { hasImagePreview, imagePreviewCacheKey } from '../../../shared/imagePreview'
@@ -231,12 +231,58 @@ function sameContent<Metadata>(current: CodeViewItem<Metadata>, incoming: CodeVi
   return currentKey != null && currentKey === contentKeys.get(incoming.fileDiff)
 }
 
+/** `item` showing `fileDiff`, a hydrated copy of its patch, known by the same content. */
+export function adoptReviewDiff<Metadata>(
+  item: CodeViewItem<Metadata> & { type: 'diff' },
+  fileDiff: FileDiffMetadata
+): CodeViewItem<Metadata> {
+  const contentKey = contentKeys.get(item.fileDiff)
+  if (contentKey != null) contentKeys.set(fileDiff, contentKey)
+  return { ...item, fileDiff }
+}
+
 /** `incoming`, unless the item already held for it shows the same diff. */
 export function keepUnchangedReviewItem<Metadata>(
   current: CodeViewItem<Metadata> | undefined,
   incoming: CodeViewItem<Metadata>
 ): CodeViewItem<Metadata> {
   return current != null && current.id === incoming.id && sameContent(current, incoming) ? current : incoming
+}
+
+interface HighlightPool {
+  isWorkingPool(): boolean
+  primeDiffHighlightCache(diff: FileDiffMetadata): Promise<void>
+}
+
+// A rewrite waits at most this long for its highlight; past it the file swaps
+// in as plain text and colours in when the worker answers.
+const PRIME_HIGHLIGHT_TIMEOUT_MS = 250
+
+/**
+ * Highlights the files a reload rewrote before they replace the ones on screen.
+ * The viewer draws a diff it holds no highlight for as plain text until the
+ * worker answers, so every agent write flashed the file being read uncoloured
+ * for a few frames; with the result cached the swap draws highlighted at once.
+ */
+export async function primeReviewHighlights<Metadata>(
+  pool: HighlightPool | undefined,
+  incoming: readonly CodeViewItem<Metadata>[],
+  current: readonly CodeViewItem<Metadata>[],
+  timeoutMs = PRIME_HIGHLIGHT_TIMEOUT_MS
+): Promise<void> {
+  if (pool == null || !pool.isWorkingPool()) return
+  const currentById = new Map(current.map((item) => [item.id, item]))
+  const pending = incoming.flatMap((item) => item.type !== 'diff' || item.fileDiff.cacheKey == null
+    || keepUnchangedReviewItem(currentById.get(item.id), item) !== item
+    ? []
+    : [pool.primeDiffHighlightCache(item.fileDiff).catch(() => {})])
+  if (pending.length === 0) return
+  let timer: ReturnType<typeof setTimeout> | undefined
+  await Promise.race([
+    Promise.all(pending),
+    new Promise<void>((resolve) => { timer = setTimeout(resolve, timeoutMs) })
+  ])
+  clearTimeout(timer)
 }
 
 export function createPatchReviewItems<Metadata>(patch: string, version: string): CodeViewItem<Metadata>[] {

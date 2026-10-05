@@ -8,6 +8,14 @@
 /* Reads as the turn you sent, distinct from the answer below it. The tighter
    corner points back at the composer it came from, the way a sent bubble does. */
 .agent-question { width: fit-content; max-width: 92%; margin: 0 0 8px auto; border: 1px solid color-mix(in srgb, var(--accent) 18%, var(--border)); border-radius: var(--corner-surface) var(--corner-surface) var(--corner-inline) var(--corner-surface); padding: 8px 10px; background: var(--accent-soft); color: var(--text); font-size: var(--text-md); line-height: 1.5; overflow-wrap: anywhere; }
+.agent-question-group { display: grid; justify-items: end; gap: 5px; margin-bottom: 8px; }
+.agent-question-group .agent-question { margin: 0; }
+.agent-question-references { max-width: 92%; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px; margin: 0; padding: 0; list-style: none; }
+.agent-reference { max-width: 100%; display: inline-flex; align-items: center; border: 1px solid var(--border-strong); border-radius: var(--corner-compact); padding: 2px 7px; background: var(--control-recessed); color: var(--text-secondary); cursor: pointer; }
+.agent-reference code { min-width: 0; overflow: hidden; font-family: var(--font-mono); font-size: var(--text-2xs); white-space: nowrap; text-overflow: ellipsis; }
+@media (hover: hover) and (pointer: fine) { .agent-reference:hover { background: var(--control-fill-hover); color: var(--text); } }
+.agent-chat-running { color: var(--accent); }
+.agent-dock-header-actions button[aria-label="Chats"][data-running] { color: var(--accent); }
 /* A structured work log keeps long tool runs readable without giving every
    step the visual weight of a chat message. */
 .agent-activity { margin: 0; padding: 0 7px 6px; list-style: none; display: flex; flex-direction: column; gap: 0; }
@@ -86,17 +94,33 @@
 /* The panel is a narrow fixed column, so an unbroken run like obj['active'] has
    to wrap; without this it overflowed and was clipped by the dock. */
 .agent-answer { color: var(--text-secondary); font-size: var(--text-md); line-height: 1.55; overflow-wrap: anywhere; }
-.agent-answer > * + * { margin-top: 9px; }
-.agent-answer p { margin: 0; }
-.agent-answer h3, .agent-answer h4, .agent-answer h5, .agent-answer h6 { margin: 0; color: var(--text); font-size: var(--text-md); font-weight: var(--weight-bold); }
+/* The resets sit in :where() so they weigh nothing: as `.agent-answer p` they
+   outranked the block gap below and every block sat flush against the last. A
+   heading opens a section, so it keeps more room above than below. */
+.agent-answer :where(p, h3, h4, h5, h6, pre, ul, ol, blockquote) { margin: 0; }
+.agent-answer > * + * { margin-top: 10px; }
+.agent-answer > :is(h3, h4, h5, h6) + * { margin-top: 6px; }
+.agent-answer > * + :is(h3, h4, h5, h6) { margin-top: 18px; }
+.agent-answer h3, .agent-answer h4, .agent-answer h5, .agent-answer h6 { color: var(--text); font-size: var(--text-md); font-weight: var(--weight-bold); line-height: 1.35; text-wrap: balance; }
+.agent-answer h3 { font-size: var(--text-lg); }
 .agent-answer strong { color: var(--text); font-weight: var(--weight-bold); }
 .agent-answer code { border-radius: var(--corner-inline); padding: 1px 4px; background: var(--control-recessed); color: var(--text); font-family: var(--font-mono); font-size: var(--text-xs); }
-.agent-answer pre { position: relative; margin: 0; overflow-x: auto; border: 1px solid var(--border); border-radius: var(--corner-control); padding: 9px 10px; background: var(--control-recessed); }
-.agent-answer pre code { padding: 0; background: none; font-size: var(--text-sm); line-height: 1.55; }
-.agent-code-language { position: absolute; top: 6px; right: 8px; color: var(--faint); font-family: var(--font-mono); font-size: var(--text-2xs); text-transform: uppercase; letter-spacing: var(--track-caps-9); }
-.agent-answer ul, .agent-answer ol { min-width: 0; margin: 0; padding-left: 18px; }
-.agent-answer li + li { margin-top: 3px; }
-.agent-answer blockquote { margin: 0; border-left: 2px solid var(--border-strong); padding-left: 9px; color: var(--muted); }
+/* Code keeps its lines and scrolls sideways, on a scrollbar as thin as the
+   gap it sits in. Once scrollbar-width or scrollbar-color is set Chromium
+   ignores the webkit scrollbar rules and draws its own 11-15px bar, and a
+   scroller the dock sits in sets scrollbar-color, which inherits — so it is
+   put back to auto here. */
+.agent-answer pre { overflow-x: auto; overflow-wrap: normal; border: 1px solid var(--border); border-radius: var(--corner-control); padding: 8px 10px; background: var(--control-recessed); scrollbar-color: auto; }
+.agent-answer pre::-webkit-scrollbar { height: 6px; }
+.agent-answer pre::-webkit-scrollbar-track { background: transparent; }
+.agent-answer pre::-webkit-scrollbar-thumb { border-radius: 3px; corner-shape: squircle; background: var(--border-strong); }
+.agent-answer pre code { padding: 0; background: none; font-size: var(--text-sm); line-height: 1.55; white-space: pre; }
+/* Its own row above the code, pinned while the code scrolls sideways: laid
+   over the first line it covered the code whenever that line ran long. */
+.agent-code-language { position: sticky; left: 0; display: block; margin-bottom: 4px; color: var(--faint); font-family: var(--font-mono); font-size: var(--text-2xs); line-height: 1.4; text-align: right; text-transform: uppercase; letter-spacing: var(--track-caps-9); user-select: none; }
+.agent-answer ul, .agent-answer ol { min-width: 0; padding-left: 18px; }
+.agent-answer li + li { margin-top: 4px; }
+.agent-answer blockquote { border-left: 2px solid var(--border-strong); padding-left: 9px; color: var(--muted); }
 .agent-header-state { min-width: 0; display: inline-flex; align-items: center; gap: 5px; color: var(--muted); font-size: var(--text-2xs); }
 .agent-header-state i, .agent-connection-title i, .agent-live-dot {
   width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--faint);
@@ -232,3 +256,33 @@
 @media (prefers-contrast: more) {
   .agent-composer { background: var(--panel); }
 }
+
+/* Chat list: the header's history button and its popover. */
+.agent-chat-history { position: relative; display: grid; }
+/* A non-modal <dialog>: its UA inset, margin, padding and colours are put back. */
+.agent-chat-popover { width: 300px; max-height: min(420px, 70vh); position: absolute; z-index: var(--z-popover); inset: calc(100% + 6px) 0 auto auto; margin: 0; padding: 0; display: grid; color: inherit; overflow: hidden; border: 1px solid var(--border-strong); border-radius: var(--corner-surface); corner-shape: squircle; background: var(--popover); box-shadow: var(--elev-2); }
+.agent-chat-popover ul { min-height: 0; margin: 0; padding: 5px; overflow-y: auto; list-style: none; }
+.agent-chat-popover li { display: flex; align-items: stretch; gap: 2px; border-radius: var(--corner-control); }
+.agent-chat-popover li:hover, .agent-chat-popover li:focus-within { background: var(--control-fill-hover); }
+.agent-dock-header-actions .agent-chat-popover button.agent-chat-open { width: auto; height: auto; flex: 1; min-width: 0; display: grid; justify-items: start; gap: 1px; padding: 6px 8px; border-radius: var(--corner-control); background: transparent; color: var(--text-secondary); text-align: left; }
+.agent-chat-open span { max-width: 100%; overflow: hidden; font-size: var(--text-sm); white-space: nowrap; text-overflow: ellipsis; }
+.agent-chat-open small { color: var(--faint); font-size: var(--text-2xs); font-variant-numeric: tabular-nums; }
+.agent-dock-header-actions .agent-chat-popover button.agent-chat-open[data-current] { color: var(--text); }
+.agent-chat-open[data-current] span::before { content: ""; width: 6px; height: 6px; display: inline-block; margin-right: 6px; border-radius: 50%; corner-shape: squircle; background: var(--accent); vertical-align: 1px; }
+.agent-dock-header-actions .agent-chat-popover button.agent-chat-delete { align-self: center; flex: none; color: var(--faint); opacity: 0; }
+.agent-chat-popover li:hover .agent-chat-delete, .agent-chat-popover li:focus-within .agent-chat-delete { opacity: 1; }
+.agent-dock-header-actions .agent-chat-popover button.agent-chat-delete:hover { background: var(--control-fill-selected); color: var(--text); }
+.agent-dock-header-actions button:disabled { opacity: var(--disabled-opacity); cursor: default; }
+.agent-dock-header-actions .agent-chat-popover button.agent-chat-open:hover { background: transparent; color: var(--text); }
+/* Tables scroll sideways in their own box, never the dock, on the same thin bar
+   as code blocks (scrollbar-color put back to auto for the same reason). */
+.agent-table-scroll { max-width: 100%; overflow-x: auto; border: 1px solid var(--border); border-radius: var(--corner-control); scrollbar-color: auto; }
+.agent-table-scroll::-webkit-scrollbar { height: 6px; }
+.agent-table-scroll::-webkit-scrollbar-track { background: transparent; }
+.agent-table-scroll::-webkit-scrollbar-thumb { border-radius: 3px; corner-shape: squircle; background: var(--border-strong); }
+.agent-answer table { min-width: 100%; border-collapse: collapse; font-size: var(--text-sm); font-variant-numeric: tabular-nums; line-height: 1.45; }
+.agent-answer th, .agent-answer td { border: 1px solid var(--border); padding: 5px 8px; text-align: left; vertical-align: top; }
+.agent-answer tr > :first-child { border-left: 0; }
+.agent-answer tr > :last-child { border-right: 0; }
+.agent-answer thead th { border-top: 0; background: var(--control-recessed); color: var(--text); font-weight: var(--weight-bold); white-space: nowrap; }
+.agent-answer tbody tr:last-child td { border-bottom: 0; }

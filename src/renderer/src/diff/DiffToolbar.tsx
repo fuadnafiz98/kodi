@@ -96,7 +96,7 @@ export function DiffToolbar({
           wordWrap={wordWrap}
           foldUnchanged={foldUnchanged}
           showDiffLayout={layout.showDiffLayout}
-          showEditStart={layout.showEditStart}
+          showReadOnly={layout.showReadOnly}
           showMarkdownViewToggle={layout.showMarkdownViewToggle}
           markdownPreviewOnly={layout.markdownPreviewOnly}
           onDiffStyleChange={onDiffStyleChange}

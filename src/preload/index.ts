@@ -104,6 +104,12 @@ const repositoryApi: RepositoryApi = {
     ipcRenderer.on(IPC_CHANNELS.openExternalPullRequest, handler)
     return () => ipcRenderer.removeListener(IPC_CHANNELS.openExternalPullRequest, handler)
   },
+  onOpenExternalFolder: (listener) => {
+    const handler = (): void => listener()
+    ipcRenderer.on(IPC_CHANNELS.openExternalFolder, handler)
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.openExternalFolder, handler)
+  },
+  takeExternalFolder: () => rememberSnapshot(ipcRenderer.invoke(IPC_CHANNELS.takeExternalFolder)),
   onHibernateRequest: (listener) => {
     const handler = (): void => {
       // The answer rides straight back on its own channel: main has no reply
@@ -125,7 +131,8 @@ const repositoryApi: RepositoryApi = {
   refresh: () => invokeSnapshotMutation(IPC_CHANNELS.refresh),
   getComparison: (path) => ipcRenderer.invoke(IPC_CHANNELS.getComparison, path),
   getRevisionFile: (revision, path) => ipcRenderer.invoke(IPC_CHANNELS.getRevisionFile, revision, path),
-  hasRevision: (revision) => ipcRenderer.invoke(IPC_CHANNELS.hasRevision, revision),
+  ensurePullRequestRevisions: (pullRequestUrl, baseOid, headOid) =>
+    ipcRenderer.invoke(IPC_CHANNELS.ensurePullRequestRevisions, pullRequestUrl, baseOid, headOid),
   saveWorkingFile: (request) => ipcRenderer.invoke(IPC_CHANNELS.saveWorkingFile, request),
   getWorkingTreePatch: (paths, requestId, root) =>
     ipcRenderer.invoke(IPC_CHANNELS.getWorkingTreePatch, paths, requestId ?? null, root ?? null),

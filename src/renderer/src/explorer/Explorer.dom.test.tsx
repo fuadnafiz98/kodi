@@ -32,15 +32,17 @@ function Harness({
   fileFilter = EMPTY_REVIEW_FILE_FILTER,
   onFileFilterChange = () => {},
   filePaths = paths,
-  unfilteredFilePaths = paths
+  unfilteredFilePaths = paths,
+  treeModel = model
 }: {
   fileFilter?: ReviewFileFilter
   onFileFilterChange?(filter: ReviewFileFilter): void
   filePaths?: readonly string[]
   unfilteredFilePaths?: readonly string[]
+  treeModel?: FileTreeModel
 }): React.JSX.Element {
   return (
-    <Explorer filePaths={filePaths} model={model} theme="pierre-dark"
+    <Explorer filePaths={filePaths} model={treeModel} theme="pierre-dark"
       sidebarVisible onSidebarToggle={() => {}} sidebarShortcut="⌘B"
       isGit reviewMode={false} branchName="main" onBranchesOpen={() => {}}
       onRowActivate={() => {}} fileFilter={fileFilter}
@@ -107,4 +109,22 @@ test('folders collapse and expand from one control', () => {
 
   expect(screen.getByRole('button', { name: 'Expand all folders' })).toBeTruthy()
   expect(screen.queryByRole('button', { name: 'Collapse all folders' })).toBeNull()
+})
+
+// One open folder is an open tree: the control offers to close it, as every
+// editor's does, rather than to open the rest of the repository.
+test('one open folder makes the control Collapse all, and pressing it collapses', () => {
+  const resetPaths = mock(() => {})
+  const openFolder = { isExpanded: () => true, collapse: () => {} }
+  const closedFolder = { isExpanded: () => false, collapse: () => {} }
+  const treeModel = {
+    ...model,
+    getItem: (path: string) => path === 'src/' || path === 'src' ? openFolder : path.startsWith('src/api') ? closedFolder : null,
+    getVisibleCount: () => 4,
+    resetPaths
+  } as unknown as FileTreeModel
+  render(<Harness treeModel={treeModel} />)
+
+  fireEvent.click(screen.getByRole('button', { name: 'Collapse all folders' }))
+  expect(resetPaths).toHaveBeenCalledWith(paths, { initialExpandedPaths: [] })
 })

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -130,15 +130,15 @@ describe('normalizeChangedPath', () => {
 describe('dropSelfWrites', () => {
   it('drops a path the app announced and leaves everything else alone', () => {
     const pending = new Set(['src/saved.ts', 'src/other.ts'])
-    const selfWrites = new Map([['src/saved.ts', 2_000]])
+    const selfWrites = new Map([['src/saved.ts', { expiry: 2_000, dropped: false }]])
     dropSelfWrites(pending, selfWrites, 1_000)
     expect([...pending]).toEqual(['src/other.ts'])
-    expect(selfWrites.has('src/saved.ts')).toBe(true)
+    expect(selfWrites.get('src/saved.ts')?.dropped).toBe(true)
   })
 
   it('forgets an expired hint so a later external write is still reported', () => {
     const pending = new Set(['src/saved.ts'])
-    const selfWrites = new Map([['src/saved.ts', 2_000]])
+    const selfWrites = new Map([['src/saved.ts', { expiry: 2_000, dropped: false }]])
     dropSelfWrites(pending, selfWrites, 2_000)
     expect([...pending]).toEqual(['src/saved.ts'])
     expect(selfWrites.size).toBe(0)
@@ -417,6 +417,53 @@ describe('RepositoryWatcher', () => {
       watcher.expectSelfWrite('.git/index')
       expect(await rewriteMetadataUntil(headFile, () => refreshes > announced)).toBe(true)
       expect(errors).toEqual([])
+    } finally {
+      watcher.stop()
+      await rm(root, { recursive: true, force: true })
+    }
+  }, WATCH_TEST_TIMEOUT_MS)
+})
+
+describe('RepositoryWatcher self-writes', () => {
+  // The file exists and its creation has been reported, so what follows is only
+  // about the save.
+  async function watchedFile(label: string) {
+    const root = await mkdtemp(join(tmpdir(), `kodi-watcher-${label}-`))
+    const events: RepositoryChangeEvent[] = []
+    const current = snapshot({ root, paths: ['saved.ts'], statuses: [] })
+    const watcher = new RepositoryWatcher(async () => current, (event) => events.push(event), () => {})
+    const file = join(root, 'saved.ts')
+    watcher.start(current)
+    await writeFile(file, 'original\n', 'utf8')
+    await waitFor(() => events.some((event) => event.changedPaths.includes('saved.ts')))
+    await sleep(1_200)
+    events.length = 0
+    const reported = (): boolean => events.some((event) => event.changedPaths.includes('saved.ts'))
+    return { root, file, watcher, reported }
+  }
+
+  it('reports a write that lands inside the app\'s own save window once it closes', async () => {
+    const { root, file, watcher, reported } = await watchedFile('selfwrite')
+    try {
+      // The app saves; a formatter rewrites the file a moment later, inside the window.
+      watcher.expectSelfWrite('saved.ts', async () => (await readFile(file, 'utf8')) === 'saved\n')
+      await writeFile(file, 'saved\n', 'utf8')
+      await sleep(150)
+      await writeFile(file, 'formatted\n', 'utf8')
+      expect(await waitFor(reported)).toBe(true)
+    } finally {
+      watcher.stop()
+      await rm(root, { recursive: true, force: true })
+    }
+  }, WATCH_TEST_TIMEOUT_MS)
+
+  it('stays quiet about a save nobody else touched', async () => {
+    const { root, file, watcher, reported } = await watchedFile('selfwrite-quiet')
+    try {
+      watcher.expectSelfWrite('saved.ts', async () => (await readFile(file, 'utf8')) === 'saved\n')
+      await writeFile(file, 'saved\n', 'utf8')
+      await sleep(2_000)
+      expect(reported()).toBe(false)
     } finally {
       watcher.stop()
       await rm(root, { recursive: true, force: true })

@@ -308,16 +308,44 @@ function claudeRateLimitWindow(info: Record<string, unknown>): AgentRateLimitWin
 // renders every answer twice. Deltas win when they are present; the assembled
 // message stays as the fallback for CLI builds that do not support
 // --include-partial-messages, and for Codex, which only writes plain text.
+//
+// A turn is several text blocks — "Let me check the patch.", a tool call, "Now
+// let me read blob.py.", then the answer — and each block's deltas carry no
+// separator of their own. Joined as they came, "blob.py.## Review" was one line
+// and the heading never parsed. The assembled message marks where a block
+// ended (it follows that block's deltas), so the next block starts on a new
+// paragraph.
 export function createAgentTextReader(): (chunk: AgentStreamChunk) => string | null {
   let sawDelta = false
+  let blockEnded = false
+  let tail = ''
+  const emit = (text: string, newBlock: boolean): string => {
+    const joined = newBlock && tail !== '' ? `${paragraphBreakAfter(tail)}${text}` : text
+    tail = joined
+    return joined
+  }
   return (chunk) => {
     if (chunk.kind !== 'text' || chunk.text == null || chunk.text === '') return null
     if (chunk.source === 'delta') {
       sawDelta = true
-      return chunk.text
+      const newBlock = blockEnded
+      blockEnded = false
+      return emit(chunk.text, newBlock)
     }
-    return chunk.source === 'message' && sawDelta ? null : chunk.text
+    if (chunk.source === 'message') {
+      if (sawDelta) {
+        blockEnded = true
+        return null
+      }
+      return emit(chunk.text, true)
+    }
+    return emit(chunk.text, false)
   }
+}
+
+function paragraphBreakAfter(text: string): string {
+  if (text.endsWith('\n\n')) return ''
+  return text.endsWith('\n') ? '\n' : '\n\n'
 }
 
 // Codex wraps shell work in `bash -lc "…"`; the inner command is what is worth

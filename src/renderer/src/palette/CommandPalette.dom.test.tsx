@@ -6,6 +6,7 @@ import type { RepositoryApi, RepositorySnapshot } from '../../../shared/contract
 import { CommandPalette, type CommandPaletteProps } from './CommandPalette'
 import { DEFAULT_KEYBINDINGS } from '../settings/keybindings'
 import { clearSearchResults } from './searchResultsStore'
+import { pendingReveal } from '../app/revealLocation'
 
 const snapshot: RepositorySnapshot = {
   root: '/repo',
@@ -106,6 +107,37 @@ describe('CommandPalette', () => {
     expect(screen.queryByRole('dialog')).toBeNull()
   })
 
+  test('a path with a line opens the file at that line', async () => {
+    const onOpenFile = mock(() => {})
+    render(<PaletteHarness onOpenFile={onOpenFile} />)
+
+    fireEvent.change(paletteInput(), { target: { value: 'app.ts:12' } })
+    const row = await screen.findByRole('button', { name: /src\/app\.ts:12/ })
+    fireEvent.click(row)
+    expect(onOpenFile).toHaveBeenCalledWith('src/app.ts')
+    expect(pendingReveal('src/app.ts')?.line).toBe(12)
+  })
+
+  test('Enter straight after typing a path with a line lands on the line', () => {
+    const onOpenFile = mock(() => {})
+    render(<PaletteHarness onOpenFile={onOpenFile} />)
+
+    fireEvent.change(paletteInput(), { target: { value: 'src/other.ts#L7' } })
+    fireEvent.submit(paletteInput().closest('form')!)
+    expect(onOpenFile).toHaveBeenCalledWith('src/other.ts')
+    expect(pendingReveal('src/other.ts')?.line).toBe(7)
+  })
+
+  test('a bare line goes to that line of the open file', async () => {
+    const onOpenFile = mock(() => {})
+    render(<PaletteHarness onOpenFile={onOpenFile} currentPath="docs/guide.md" />)
+
+    fireEvent.change(paletteInput(), { target: { value: ':30' } })
+    fireEvent.click(await screen.findByRole('button', { name: /Go to line 30/ }))
+    expect(onOpenFile).toHaveBeenCalledWith('docs/guide.md')
+    expect(pendingReveal('docs/guide.md')?.line).toBe(30)
+  })
+
   test('adopts the query the shell collected before the chunk arrived', async () => {
     render(<PaletteHarness initialQuery="app" onOpenFile={() => {}} />)
 
@@ -201,11 +233,24 @@ describe('CommandPalette', () => {
 
     const row = screen.getByRole('button', { name: /Toggle explorer/ })
     expect(row.className ?? '').not.toContain('primary-result')
-    // Fire on a child: the handler lives on the list, not on the row.
-    fireEvent.pointerMove(row.querySelector('strong')!)
+    // Fire on a child: the handler lives on the list, not on the row. The first
+    // report only says where the pointer is; the move is what selects.
+    fireEvent.pointerMove(row.querySelector('strong')!, { screenX: 10, screenY: 10 })
+    fireEvent.pointerMove(row.querySelector('strong')!, { screenX: 14, screenY: 12 })
 
     expect(row.className).toContain('primary-result')
     expect(row.getAttribute('data-index')).not.toBeNull()
+  })
+
+  test('a pointer resting where the rows appear does not take the selection', () => {
+    render(<PaletteHarness onRunCommand={() => {}} onOpenFile={() => {}} />)
+
+    const row = screen.getByRole('button', { name: /Toggle explorer/ })
+    // Rows sliding under a still cursor are reported as moves at one position.
+    fireEvent.pointerMove(row.querySelector('strong')!, { screenX: 40, screenY: 40 })
+    fireEvent.pointerMove(row.querySelector('strong')!, { screenX: 40, screenY: 40 })
+
+    expect(row.className ?? '').not.toContain('primary-result')
   })
 
   test('a pointer down on the backdrop closes the palette', () => {

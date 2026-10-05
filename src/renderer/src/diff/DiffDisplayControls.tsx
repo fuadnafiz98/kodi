@@ -1,6 +1,6 @@
 import type { DiffStyle, FileEditControls, WorkspaceView } from '../app/AppView'
 import { EditorOptionControls } from '../settings/EditorOptionControls'
-import { FileEditStartButton } from './FileEditStartButton'
+import { ReadOnlyBadge } from './ReadOnlyBadge'
 
 export interface DiffDisplayControlsProps {
   fileEdit: FileEditControls
@@ -10,7 +10,7 @@ export interface DiffDisplayControlsProps {
   foldUnchanged: boolean
   /** Split/unified only makes sense for a git diff that is not a plain preview. */
   showDiffLayout: boolean
-  showEditStart: boolean
+  showReadOnly: boolean
   showMarkdownViewToggle: boolean
   markdownPreviewOnly: boolean
   onDiffStyleChange(style: DiffStyle): void
@@ -18,7 +18,7 @@ export interface DiffDisplayControlsProps {
   onFoldUnchangedToggle(): void
 }
 
-/** Everything on the right of the toolbar: edit entry and the view toggles. */
+/** Everything on the right of the toolbar: why a file is read-only, and the view toggles. */
 export function DiffDisplayControls({
   fileEdit,
   workspaceView,
@@ -26,7 +26,7 @@ export function DiffDisplayControls({
   wordWrap,
   foldUnchanged,
   showDiffLayout,
-  showEditStart,
+  showReadOnly,
   showMarkdownViewToggle,
   markdownPreviewOnly,
   onDiffStyleChange,
@@ -36,8 +36,8 @@ export function DiffDisplayControls({
   const showOptions = showMarkdownViewToggle || !markdownPreviewOnly || showDiffLayout
   return (
     <div className="diff-display-controls">
-      <FileEditStartButton fileEdit={fileEdit} workspaceView={workspaceView} />
-      {showEditStart && showOptions ? <span className="diff-control-divider" aria-hidden="true" /> : null}
+      <ReadOnlyBadge fileEdit={fileEdit} workspaceView={workspaceView} />
+      {showReadOnly && showOptions ? <span className="diff-control-divider" aria-hidden="true" /> : null}
       {showOptions ? (
         <EditorOptionControls
           documentView={fileEdit.documentView}

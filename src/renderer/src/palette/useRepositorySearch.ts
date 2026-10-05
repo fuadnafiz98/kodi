@@ -31,7 +31,11 @@ const NO_FILE_RESULTS: readonly RankedPath[] = Object.freeze([])
 
 export interface RepositorySearchController {
   query: string
+  /** The query `fileResults` answer: a deferred render behind `query` while typing. */
+  resultsQuery: string
   fileResults: readonly RankedPath[]
+  /** Ranks `query` now, for an Enter that lands before the deferred results do. */
+  rankFiles(query: string): readonly RankedPath[]
   contentResults: readonly ContentSearchResult[]
   searchingContent: boolean
   changeQuery(query: string): void
@@ -161,12 +165,18 @@ export function useRepositorySearch(
     clearSearchResults()
   }, [cancelOutstanding])
 
+  const rankFiles = useCallback((nextQuery: string) => hasSnapshot
+    ? rankFilePaths(indexedPaths, nextQuery, { limit: 1, priorityPaths, recentPaths: recentFiles })
+    : NO_FILE_RESULTS, [hasSnapshot, indexedPaths, priorityPaths, recentFiles])
+
   return useMemo(() => ({
     query,
+    resultsQuery: deferredQuery,
     fileResults,
+    rankFiles,
     contentResults,
     searchingContent,
     changeQuery,
     flushContentSearch
-  }), [changeQuery, contentResults, fileResults, flushContentSearch, query, searchingContent])
+  }), [changeQuery, contentResults, deferredQuery, fileResults, flushContentSearch, query, rankFiles, searchingContent])
 }

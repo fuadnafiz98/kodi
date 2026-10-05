@@ -1,11 +1,19 @@
 import { memo, useMemo } from 'react'
 
-import { keyForBlock, keyForInline, type MarkdownBlock, type MarkdownInline } from './markdown'
+import { keyForBlock, keyForInline, splitCodeSpans, type MarkdownBlock, type MarkdownInline } from './markdown'
+
+function WithCodeSpans({ text }: { text: string }): React.JSX.Element {
+  const seen = new Map<string, number>()
+  return <>{splitCodeSpans(text).map((part) => {
+    const key = keyForInline({ kind: part.code ? 'code' : 'text', text: part.text }, seen)
+    return part.code ? <code key={key}>{part.text}</code> : <span key={key}>{part.text}</span>
+  })}</>
+}
 
 function InlineRun({ inline }: { inline: MarkdownInline }): React.JSX.Element {
   if (inline.kind === 'code') return <code>{inline.text}</code>
-  if (inline.kind === 'strong') return <strong>{inline.text}</strong>
-  if (inline.kind === 'emphasis') return <em>{inline.text}</em>
+  if (inline.kind === 'strong') return <strong><WithCodeSpans text={inline.text} /></strong>
+  if (inline.kind === 'emphasis') return <em><WithCodeSpans text={inline.text} /></em>
   return <>{inline.text}</>
 }
 
@@ -38,6 +46,25 @@ const Block = memo(function Block({ block }: { block: MarkdownBlock }): React.JS
     return block.ordered
       ? <ol>{block.items.map((item) => <li key={keyForInline(item[0] ?? { kind: 'text', text: '' }, itemKeys)}><InlineContent content={item} /></li>)}</ol>
       : <ul>{block.items.map((item) => <li key={keyForInline(item[0] ?? { kind: 'text', text: '' }, itemKeys)}><InlineContent content={item} /></li>)}</ul>
+  }
+  if (block.kind === 'table') {
+    // Its own scroller: a wide table scrolls inside the answer, not the dock.
+    const align = (column: number): React.CSSProperties | undefined =>
+      block.align[column] == null ? undefined : { textAlign: block.align[column] }
+    return (
+      <div className="agent-table-scroll">
+        <table>
+          <thead>
+            <tr>{block.header.map((cell, column) => <th key={column} style={align(column)}><InlineContent content={cell} /></th>)}</tr>
+          </thead>
+          <tbody>
+            {block.rows.map((row, rowIndex) => (
+              <tr key={rowIndex}>{row.map((cell, column) => <td key={column} style={align(column)}><InlineContent content={cell} /></td>)}</tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    )
   }
   return <p><InlineContent content={block.content} /></p>
 })

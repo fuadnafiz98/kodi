@@ -133,20 +133,11 @@ export async function launchApp({ folder, port = Number(process.env.KODI_E2E_POR
   // A suite that restarts the app passes the same profile back in (see
   // `createProfile`) and removes it itself.
   const profile = reusedProfile ?? await mkdtemp(join(tmpdir(), 'kodi-e2e-profile-'))
-  // KODI_E2E_VISIBLE=1 shows a real window: a hidden one never paints, so paint
-  // and compositing cost — what a reader on a real display feels — only shows here.
   const visible = process.env.KODI_E2E_VISIBLE === '1'
-  const env = visible ? { ...process.env } : { ...process.env, KODI_PROBE: '1' }
-  if (visible) delete env.KODI_PROBE
+  const env = appEnvironment()
   // A directory of stand-in tools (a slow `git`) ahead of the real ones.
   if (pathPrefix != null) env.PATH = `${pathPrefix}:${env.PATH ?? ''}`
-  delete env.ELECTRON_RUN_AS_NODE
-  delete env.ELECTRON_NO_ASAR
-  // KODI_E2E_APP runs an installed build instead of `out/` — the way to get a
-  // baseline from the app as it was before a fix (the last `update:mac`).
-  // KODI_E2E_APP_DIR runs another checkout's `out/` (a `git worktree` of an
-  // older commit, built there) the same way.
-  const binary = process.env.KODI_E2E_APP == null ? [ELECTRON] : [process.env.KODI_E2E_APP]
+  const binary = appBinary()
   const child = Bun.spawn([
     ...binary, `--inspect=${mainPort}`, ...(process.env.KODI_E2E_APP == null ? ['.'] : []),
     `--remote-debugging-port=${port}`,
@@ -164,8 +155,11 @@ export async function launchApp({ folder, port = Number(process.env.KODI_E2E_POR
   const stop = async () => {
     if (stopped) return
     stopped = true
-    Bun.spawnSync(['pkill', '-f', profile])
+    // The main process first: it quits on SIGTERM and flushes localStorage and
+    // the session on the way out, which it cannot do once its helpers are dead.
     child.kill()
+    await Promise.race([child.exited, Bun.sleep(4_000)])
+    Bun.spawnSync(['pkill', '-f', profile])
     const exited = await Promise.race([child.exited.then(() => true, () => true), Bun.sleep(5_000).then(() => false)])
     // A packaged build's main process renames itself (argv reads just "Kodi"),
     // so the pattern misses it, and it can sit on SIGTERM behind its quit flow.
@@ -197,11 +191,52 @@ export async function launchApp({ folder, port = Number(process.env.KODI_E2E_POR
     // A packaged build may have the inspector fused off; the suite then
     // measures the renderer only.
     const main = await connectMain(mainPort).catch(() => null)
-    return { cdp, main, profile, stop, memory: () => memory(cdp, profile) }
+    // The main process is whoever serves the page's DevTools port.
+    const mainPid = () => listeningPids(port).find((pid) => pid !== process.pid) ?? null
+    return { cdp, main, profile, stop, mainPid, memory: () => memory(cdp, profile) }
   } catch (error) {
     await stop()
     throw error
   }
+}
+
+// KODI_E2E_VISIBLE=1 shows a real window: a hidden one never paints, so paint
+// and compositing cost — what a reader on a real display feels — only shows here.
+function appEnvironment() {
+  const env = process.env.KODI_E2E_VISIBLE === '1' ? { ...process.env } : { ...process.env, KODI_PROBE: '1' }
+  if (process.env.KODI_E2E_VISIBLE === '1') delete env.KODI_PROBE
+  delete env.ELECTRON_RUN_AS_NODE
+  delete env.ELECTRON_NO_ASAR
+  return env
+}
+
+// KODI_E2E_APP runs an installed build instead of `out/` — the way to get a
+// baseline from the app as it was before a fix (the last `update:mac`).
+// KODI_E2E_APP_DIR runs another checkout's `out/` (a `git worktree` of an
+// older commit, built there) the same way.
+function appBinary() {
+  return process.env.KODI_E2E_APP == null ? [ELECTRON] : [process.env.KODI_E2E_APP]
+}
+
+/**
+ * What `kodi <folder>` does while the app is up: a second launch on the same
+ * profile, which hands its arguments to the running app and exits. Resolves
+ * with its exit code, or null when it was still up after `timeoutMs` — nothing
+ * held the profile, so it became the app (and is killed).
+ */
+export async function launchSecondInstance(profile, folder, timeoutMs = 10_000) {
+  const child = Bun.spawn([
+    ...appBinary(), ...(process.env.KODI_E2E_APP == null ? ['.'] : []),
+    `--user-data-dir=${profile}`,
+    // One token, as the bundled `kodi` script passes it.
+    `--kodi-folder=${folder}`
+  ], { cwd: process.env.KODI_E2E_APP_DIR ?? REPO_ROOT, env: appEnvironment(), stdout: 'ignore', stderr: 'ignore' })
+  const code = await Promise.race([child.exited, Bun.sleep(timeoutMs).then(() => null)])
+  if (code == null) {
+    child.kill('SIGKILL')
+    Bun.spawnSync(['pkill', '-9', '-f', profile])
+  }
+  return code
 }
 
 function listeningPids(port) {

@@ -42,11 +42,20 @@ function FakeCodeView(props: FakeCodeViewProps): React.JSX.Element {
       document.body.append(host)
       hostsRef.current.set(item.id, host)
     }
-    const annotations = (item as { annotations?: unknown[] }).annotations ?? []
+    const annotations = (item as { annotations?: Array<{ lineNumber?: number; side?: string }> }).annotations ?? []
+    // Keyed by the line slot each one renders into, and which of that slot's
+    // annotations it is: stable while annotations elsewhere come and go.
+    const occurrences = new Map<string, number>()
+    const keyed = annotations.map((annotation) => {
+      const slot = `${annotation.side ?? 'file'}-${annotation.lineNumber ?? 0}`
+      const occurrence = occurrences.get(slot) ?? 0
+      occurrences.set(slot, occurrence + 1)
+      return { key: `${slot}#${occurrence}`, annotation }
+    })
     return createPortal(<>
       {renderHeaderPrefix(item)}
       {renderHeaderMetadata(item)}
-      {annotations.map((annotation, index) => <Fragment key={index}>{renderAnnotation(annotation, item)}</Fragment>)}
+      {keyed.map(({ key, annotation }) => <Fragment key={key}>{renderAnnotation(annotation, item)}</Fragment>)}
       {renderGutterUtility(() => undefined, item)}
     </>, host, item.id)
   // The stand-in keys on exactly what Pierre's `SlotPortals` keys on.

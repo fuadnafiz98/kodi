@@ -206,20 +206,88 @@ export const ANNOTATION_LAYOUT_CSS = `
   }
 `
 
+/*
+ * The gutter utility lives inside the number cell. Pierre's default slot is a
+ * zero-width box on the cell's right edge whose 1lh button hangs left into the
+ * 2ch padding lane via negative margin — and covers the digits on wide numbers.
+ * The lane is instead widened into a real utility lane and the slot becomes the
+ * lane itself: pinned to the cell's left edge, button parked at its right end so
+ * it sits beside the digits the way Pierre's button does, at any digit width.
+ * The lane keeps clear of the number text, so digits stay uncovered and
+ * selectable.
+ */
+const GUTTER_UTILITY_CSS = `
+  [data-column-number] {
+    padding-left: 26px;
+  }
+
+  [data-gutter-utility-slot] {
+    left: 0;
+    right: auto;
+    width: 26px;
+    box-sizing: border-box;
+    padding-right: 4px;
+    justify-content: flex-end;
+    align-items: center;
+  }
+`
+
+/*
+ * A unified diff numbers both sides, as GitHub does: the old line in the first
+ * column, the new line in the second. With one column a deleted 5 followed a
+ * context 5 and the reader could not tell which file a number counted. The old
+ * number rides data-old-line (patched into the renderer); a deleted row's own
+ * number is its old one, so the second column stays blank there. Both columns
+ * take the width of the longest number.
+ */
+const UNIFIED_LINE_NUMBERS_CSS = `
+  [data-diff-type="single"] [data-gutter] [data-column-number] {
+    --number-width: var(--diffs-min-number-column-width, var(--diffs-min-number-column-width-default, 3ch));
+    display: flex;
+    justify-content: flex-end;
+    gap: 1ch;
+
+    &::after {
+      content: attr(data-old-line);
+      order: -1;
+      min-width: var(--number-width);
+      text-align: right;
+    }
+
+    & [data-line-number-content] {
+      min-width: var(--number-width);
+    }
+
+    &[data-line-type="change-deletion"] [data-line-number-content] {
+      visibility: hidden;
+    }
+  }
+`
+
 /**
  * Rules every diff shadow root needs. The single-file and multi-file viewers
  * used to carry their own near-identical copy and had already drifted (the
  * expand button was 24% in one and 22% in the other); both now take the absolute
  * --corner-compact token, because a percentage radius on a non-square button
  * resolves to stretched ellipses rather than a squircle.
+ *
+ * The document's universal rule stops at the shadow boundary, so every corner
+ * the viewer actually rounds is named here. The list is explicit rather than a
+ * bare `*`: matching it against each token span and line of every virtual
+ * window was measurable, and only these carry a radius. Word-level diff spans
+ * are on the list — they round 3px and read as chips, so a round corner there
+ * is the one place the shape visibly breaks rank inside a diff. The editor
+ * appends its own stylesheet into this same shadow root, so its find panel, its
+ * inputs and the corners of a selection box are ours to shape too — they round
+ * 9, 6 and 3px otherwise.
+ *
+ * Custom properties cross the shadow boundary, so the press curve is the app's
+ * one curve rather than a fourth copy of the literal that drifts when it is
+ * retuned. Same press model as the light DOM: lands on pointer-down, eases on
+ * release, and rides the standalone scale property so a library transform
+ * cannot take the slot.
  */
 export const VIEWER_BASE_CSS = `
-  /* The document's universal rule stops at the shadow boundary, so every corner
-     the viewer actually rounds is named here. The list is explicit rather than a
-     bare \`*\`: matching it against each token span and line of every virtual
-     window was measurable, and only these carry a radius. Word-level diff spans
-     are on the list — they round 3px and read as chips, so a round corner there
-     is the one place the shape visibly breaks rank inside a diff. */
   button,
   [data-expand-button],
   [data-utility-button],
@@ -228,20 +296,12 @@ export const VIEWER_BASE_CSS = `
   [data-selection-action],
   [data-diff-span],
   [data-code]::-webkit-scrollbar-thumb,
-  /* The editor appends its own stylesheet into this same shadow root, so its
-     find panel, its inputs and the corners of a selection box are ours to shape
-     too — they round 9, 6 and 3px otherwise. */
   [data-editor-widget],
   [data-input-box] input,
   [data-rtl], [data-rtr], [data-rbl], [data-rbr] {
     corner-shape: squircle;
   }
 
-  /* Custom properties cross the shadow boundary, so the curve is the app's one
-     curve rather than a fourth copy of the literal that drifts when it is retuned.
-     Same press model as the light DOM: lands on pointer-down, eases on release,
-     and rides the standalone scale property so a library transform cannot take
-     the slot. */
   button {
     touch-action: manipulation;
     transition: scale var(--duration-fast) var(--ease-out), background-color var(--duration-fast) var(--ease-out);
@@ -257,31 +317,9 @@ export const VIEWER_BASE_CSS = `
     background: var(--control-fill);
   }
 
-  /* The gutter utility lives inside the number cell. Pierre's default slot is
-     a zero-width box on the cell's right edge whose 1lh button hangs left into
-     the 2ch padding lane via negative margin — and covers the digits on wide
-     numbers. The lane is instead widened into a real utility lane and the slot
-     becomes the lane itself: pinned to the cell's left edge, button parked at
-     its right end so it sits beside the digits the way Pierre's button does,
-     at any digit width. The lane keeps clear of the number text, so digits
-     stay uncovered and selectable. */
-  [data-column-number] {
-    padding-left: 26px;
-  }
+  ${GUTTER_UTILITY_CSS}
+  ${UNIFIED_LINE_NUMBERS_CSS}
 
-  [data-gutter-utility-slot] {
-    left: 0;
-    right: auto;
-    width: 26px;
-    box-sizing: border-box;
-    padding-right: 4px;
-    justify-content: flex-end;
-    align-items: center;
-  }
-
-  /* A percentage radius resolves horizontally against width and vertically
-     against height, so on this non-square button it drew stretched ellipses
-     rather than a squircle. */
   [data-expand-button] {
     border-radius: var(--corner-compact) !important;
     corner-shape: squircle !important;
@@ -302,41 +340,3 @@ export const VIEWER_BASE_CSS = `
   ${REDUCED_MOTION_CSS}
 `
 
-/** Styles the popover the editor renders for a ranged selection. */
-export const SELECTION_ACTION_CSS = `
-  [data-selection-action] {
-    display: flex;
-    gap: 4px;
-    padding: 4px;
-    border: 0;
-    border-radius: var(--corner-control);
-    background: var(--floating-surface);
-    box-shadow: 0 0 0 1px color-mix(in srgb, var(--text) 8%, transparent);
-  }
-
-  /* Concentric: the shell's radius minus its 4px inset. */
-  [data-selection-action] button {
-    border: 0;
-    border-radius: calc(var(--corner-control) - 4px);
-    padding: 6px 10px;
-    background: transparent;
-    color: var(--text-secondary);
-    font-family: var(--font-ui);
-    font-size: var(--text-sm);
-    cursor: pointer;
-  }
-
-  [data-selection-action] button:first-child {
-    background: var(--accent-soft);
-    color: var(--path-text);
-  }
-
-  [data-selection-action] button:hover {
-    background: var(--control-fill-hover);
-    color: var(--text);
-  }
-
-  [data-selection-action] button:active:not(:disabled) {
-    scale: 0.96;
-  }
-`

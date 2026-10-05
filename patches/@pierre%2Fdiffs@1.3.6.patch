@@ -1,0 +1,721 @@
+diff --git a/dist/components/CodeView.js b/dist/components/CodeView.js
+index 051e7d0..eb6d780 100644
+--- a/dist/components/CodeView.js
++++ b/dist/components/CodeView.js
+@@ -1590,8 +1590,7 @@ var CodeView = class CodeView {
+ 		this.renderState.stickyTop = stickyTop;
+ 		this.renderState.stickyBottom = stickyBottom;
+ 		this.stickyOffset.style.height = `${stickyTop}px`;
+-		const randomOffset = (Math.random() * itemMetrics.lineHeight >> 0) * -1;
+-		const stickyJitter = -Math.max(stickyContainerHeight + randomOffset, 0) + height;
++		const stickyJitter = -Math.max(stickyContainerHeight, 0) + height;
+ 		this.stickyContainer.style.top = `${stickyJitter}px`;
+ 		this.stickyContainer.style.bottom = `${stickyJitter + itemMetrics.diffHeaderHeight}px`;
+ 	}
+@@ -1737,11 +1736,23 @@ var CodeView = class CodeView {
+ 				skippedItem ??= item;
+ 				continue;
+ 			}
+-			if (absoluteItemTop >= scrollTop) return {
+-				type: "item",
+-				id: item.item.id,
+-				viewportOffset: absoluteItemTop - scrollTop
+-			};
++			if (absoluteItemTop >= scrollTop) {
++				const firstLine = item.type === "diff" ? item.instance.getNumericScrollAnchor(0, 0) : void 0;
++				return {
++					type: "item",
++					id: item.item.id,
++					viewportOffset: absoluteItemTop - scrollTop,
++					line: firstLine != null && absoluteItemTop + firstLine.top < scrollTop + viewportHeight ? {
++						type: "line",
++						id: item.item.id,
++						lineNumber: firstLine.lineNumber,
++						side: firstLine.side,
++						text: firstLine.text,
++						diff: firstLine.diff,
++						viewportOffset: absoluteItemTop + firstLine.top - scrollTop
++					} : void 0
++				};
++			}
+ 			const localViewportTop = this.getScrollAnchorViewportTop(absoluteItemTop, scrollTop) - absoluteItemTop;
+ 			const lineAnchor = item.instance.getNumericScrollAnchor(localViewportTop);
+ 			if (lineAnchor != null) {
+@@ -1751,6 +1762,8 @@ var CodeView = class CodeView {
+ 					id: item.item.id,
+ 					lineNumber: lineAnchor.lineNumber,
+ 					side: lineAnchor.side,
++					text: lineAnchor.text,
++					diff: lineAnchor.diff,
+ 					viewportOffset: absoluteLineTop - scrollTop
+ 				};
+ 			}
+@@ -1774,12 +1787,15 @@ var CodeView = class CodeView {
+ 	resolveAnchoredScrollTop(anchor) {
+ 		const item = this.idToItem.get(anchor.id);
+ 		if (item == null) return;
++		// A file whose header was on screen keeps its header still, unless its
++		// content was replaced: then the reader's first line is what stays.
++		if (anchor.type === "item" && anchor.line != null && item.type === "diff" && anchor.line.diff !== item.instance.fileDiff) return this.resolveAnchoredScrollTop(anchor.line);
+ 		const itemTopOffset = this.getItemTopOffset();
+ 		if (anchor.type === "item") {
+ 			const absoluteItemTop = itemTopOffset + item.top;
+ 			return this.clampScrollTop(absoluteItemTop - anchor.viewportOffset);
+ 		}
+-		const linePosition = item.type === "diff" ? item.instance.getLinePosition(anchor.lineNumber, anchor.side) : item.instance.getLinePosition(anchor.lineNumber);
++		const linePosition = item.type === "diff" ? item.instance.resolveAnchorLinePosition(anchor) : item.instance.getLinePosition(anchor.lineNumber);
+ 		if (linePosition == null) return;
+ 		const absoluteLineTop = itemTopOffset + item.top + linePosition.top;
+ 		return this.clampScrollTop(absoluteLineTop - anchor.viewportOffset);
+diff --git a/dist/components/FileDiff.js b/dist/components/FileDiff.js
+index 4ee3d95..a7d7ec5 100644
+--- a/dist/components/FileDiff.js
++++ b/dist/components/FileDiff.js
+@@ -114,8 +114,7 @@ var FileDiff = class {
+ 	createHunksRenderer(options) {
+ 		return new DiffHunksRenderer(this.getHunksRendererOptions(options), this.handleHighlightRender, this.workerManager);
+ 	}
+-	getLineIndex = (lineNumber, side = "additions") => {
+-		const fileDiff = this.fileDiffCache;
++	getLineIndex = (lineNumber, side = "additions", fileDiff = this.fileDiffCache) => {
+ 		if (fileDiff == null) return;
+ 		const lastHunk = fileDiff.hunks.at(-1);
+ 		let targetUnifiedIndex;
+diff --git a/dist/components/VirtualizedFileDiff.js b/dist/components/VirtualizedFileDiff.js
+index 0d9ee99..a4cf8a0 100644
+--- a/dist/components/VirtualizedFileDiff.js
++++ b/dist/components/VirtualizedFileDiff.js
+@@ -15,7 +15,32 @@ import { iterateOverDiff } from "../utils/iterateOverDiff.js";
+ import { FileDiff } from "./FileDiff.js";
+ //#region src/components/VirtualizedFileDiff.ts
+ const VIRTUALIZED_FILE_DIFF_LAYOUT_CHECKPOINT_INTERVAL = 3e3;
++const WRAP_MEMORY_ROW_LIMIT = 8e3;
++const WRAP_MEMORY_KEY_LIMIT = 4e4;
++const ANCHOR_LOOKAHEAD_ROWS = 8;
++const ANCHOR_REMAP_SLACK_ROWS = 24;
++const WRAP_MEMORY_WIDTH_LIMIT = 8;
+ let instanceId = -1;
++let wrapMemoryEpoch = 0;
++/**
++* Wrapped row heights a CodeView has measured, per diff style and code width,
++* keyed by the row's text: the same text in a column of the same width wraps to
++* the same height, whichever file it is in and however often that file is
++* rewritten or its layout reset. Every reset used to drop what had been measured
++* and start over from one row per line, so a long wrapped file re-grew under the
++* reader and the scroll position was corrected against their scrolling frame
++* after frame. Widths differ between files (a new file's split view is one
++* column, a long file's gutter is wider), so each width keeps its own entry.
++*/
++const wrapMemories = /* @__PURE__ */ new WeakMap();
++function getWrapMemory(owner) {
++	let memory = wrapMemories.get(owner);
++	if (memory == null) {
++		memory = /* @__PURE__ */ new Map();
++		wrapMemories.set(owner, memory);
++	}
++	return memory;
++}
+ var VirtualizedFileDiff = class extends FileDiff {
+ 	__id = `little-virtualized-file-diff:${++instanceId}`;
+ 	top;
+@@ -28,7 +53,12 @@ var VirtualizedFileDiff = class extends FileDiff {
+ 		estimatedUnifiedHeight: void 0,
+ 		checkpoints: [],
+ 		totalLines: 0,
+-		fileAnnotationHeight: 0
++		fileAnnotationHeight: 0,
++		measuredLines: /* @__PURE__ */ new Set(),
++		wrapSignatures: {},
++		seedEpoch: -1,
++		seedDiff: void 0,
++		wrapRows: void 0
+ 	};
+ 	isVisible = false;
+ 	isSetup = false;
+@@ -104,6 +134,7 @@ var VirtualizedFileDiff = class extends FileDiff {
+ 		this.cache.fileAnnotationHeight = 0;
+ 		if (this.cache.heightDeltas.size > 0) this.cache.heightDeltas.clear();
+ 		if (this.cache.measuredHeightDeltaTotal !== 0) this.cache.measuredHeightDeltaTotal = 0;
++		if (this.cache.measuredLines.size > 0) this.cache.measuredLines.clear();
+ 		this.invalidateDerivedLayoutCache(includeEstimatedHeights, resetRenderRange);
+ 		if (forceSimpleRecompute && this.isSimpleMode()) this.computeApproximateSize();
+ 	}
+@@ -111,6 +142,8 @@ var VirtualizedFileDiff = class extends FileDiff {
+ 		this.layoutDirty = true;
+ 		if (this.cache.checkpoints.length > 0) this.cache.checkpoints.length = 0;
+ 		if (this.cache.totalLines !== 0) this.cache.totalLines = 0;
++		this.cache.wrapRows = void 0;
++		this.cache.seedEpoch = -1;
+ 		if (includeEstimatedHeights) {
+ 			this.cache.estimatedSplitHeight = void 0;
+ 			this.cache.estimatedUnifiedHeight = void 0;
+@@ -134,6 +167,8 @@ var VirtualizedFileDiff = class extends FileDiff {
+ 			const nextFileAnnotationHeight = measureFileAnnotationHeight(codeGroups) ?? 0;
+ 			if (this.setFileAnnotationHeight(nextFileAnnotationHeight)) hasHeightChange = true;
+ 		} else if (!hasFileAnnotations && this.setFileAnnotationHeight(0)) hasHeightChange = true;
++		const rememberWraps = overflow === "wrap" && this.isAdvancedMode();
++		const measuredRows = rememberWraps ? [] : void 0;
+ 		for (const codeGroup of codeGroups) {
+ 			if (codeGroup == null) continue;
+ 			const content = codeGroup.children[1];
+@@ -145,10 +180,14 @@ var VirtualizedFileDiff = class extends FileDiff {
+ 				const lineIndex = parseLineIndex(lineIndexAttr, diffStyle);
+ 				let measuredHeight = line.getBoundingClientRect().height;
+ 				let hasMetadata = false;
++				let hasAnnotation = false;
+ 				if (line.nextElementSibling instanceof HTMLElement && ("lineAnnotation" in line.nextElementSibling.dataset || "noNewline" in line.nextElementSibling.dataset)) {
+ 					if ("noNewline" in line.nextElementSibling.dataset) hasMetadata = true;
++					else hasAnnotation = true;
+ 					measuredHeight += line.nextElementSibling.getBoundingClientRect().height;
+ 				}
++				this.cache.measuredLines.add(lineIndex);
++				measuredRows?.push(lineIndex, measuredHeight, hasAnnotation);
+ 				const estimatedHeight = this.getEstimatedLineHeight(hasMetadata);
+ 				const previousDelta = this.cache.heightDeltas.get(lineIndex) ?? 0;
+ 				const nextDelta = measuredHeight - estimatedHeight;
+@@ -159,9 +198,190 @@ var VirtualizedFileDiff = class extends FileDiff {
+ 				else this.cache.heightDeltas.set(lineIndex, nextDelta);
+ 			}
+ 		}
++		if (measuredRows != null && this.rememberWrappedRows(codeGroups, measuredRows)) hasHeightChange = true;
+ 		if (hasHeightChange || this.isResizeDebuggingEnabled()) this.computeApproximateSize(true);
+ 		return hasHeightChange;
+ 	}
++	/**
++	* Record the rows just measured under their text, for this style and this
++	* item's code width. When the item's own width changed (the window, a panel
++	* or the split divider moved, or a new font), what it measured before is
++	* wrong, so those rows fall back to the new width's memory and estimates.
++	*/
++	rememberWrappedRows(codeGroups, measuredRows) {
++		const { fileDiff } = this;
++		if (fileDiff == null || measuredRows.length === 0 || !areDiffTargetsEqual(this.hunksRenderer.diffCache, fileDiff)) return false;
++		const diffStyle = this.getDiffStyle();
++		const signature = getWrapSignature(codeGroups, this.metrics.lineHeight);
++		if (signature == null) return false;
++		const memory = getWrapMemory(this.virtualizer);
++		let styleMemory = memory.get(diffStyle);
++		let entry = styleMemory?.entries.get(signature);
++		let changed = false;
++		if (entry == null) {
++			const columns = measureWrapColumns(codeGroups);
++			if (columns == null) return false;
++			entry = {
++				signature,
++				lineHeight: this.metrics.lineHeight,
++				columns: columns.columns,
++				tabSize: columns.tabSize,
++				heights: /* @__PURE__ */ new Map(),
++				epoch: ++wrapMemoryEpoch
++			};
++			const first = styleMemory == null;
++			if (styleMemory == null) {
++				styleMemory = {
++					latest: [],
++					entries: /* @__PURE__ */ new Map()
++				};
++				memory.set(diffStyle, styleMemory);
++			}
++			if (styleMemory.entries.size >= WRAP_MEMORY_WIDTH_LIMIT) styleMemory.entries.delete(styleMemory.entries.keys().next().value);
++			if (first) {
++				const codeView = this.getAdvancedVirtualizer();
++				codeView?.markLayoutDirtyFromIndex(0);
++				codeView?.render();
++			}
++		} else styleMemory.entries.delete(signature);
++		styleMemory.entries.set(signature, entry);
++		styleMemory.latest[entry.columns.length] = entry;
++		const previousSignature = this.cache.wrapSignatures[diffStyle];
++		if (previousSignature != null && previousSignature !== signature && this.dropMeasurementsExcept(measuredRows)) changed = true;
++		this.cache.wrapSignatures[diffStyle] = signature;
++		const rows = this.getWrapRows(fileDiff);
++		if (rows == null) return changed;
++		if (entry.heights.size > WRAP_MEMORY_KEY_LIMIT) entry.heights.clear();
++		// Split rows are measured once per column; the row is as tall as its taller side.
++		const rowHeights = /* @__PURE__ */ new Map();
++		for (let index = 0; index < measuredRows.length; index += 3) {
++			const lineIndex = measuredRows[index];
++			if (measuredRows[index + 2]) rowHeights.set(lineIndex, -1);
++			else if (rowHeights.get(lineIndex) !== -1) rowHeights.set(lineIndex, Math.max(rowHeights.get(lineIndex) ?? 0, measuredRows[index + 1]));
++		}
++		for (const [lineIndex, height] of rowHeights) {
++			const key = height < 0 ? void 0 : rows.keys.get(lineIndex);
++			if (key != null) entry.heights.set(key, height);
++		}
++		if (this.seedWrappedRows(fileDiff, entry)) changed = true;
++		return changed;
++	}
++	/** Forget rows measured at an earlier width, keeping the ones just measured. */
++	dropMeasurementsExcept(measuredRows) {
++		const keep = /* @__PURE__ */ new Set();
++		for (let index = 0; index < measuredRows.length; index += 3) keep.add(measuredRows[index]);
++		const { heightDeltas, measuredLines } = this.cache;
++		let changed = false;
++		for (const lineIndex of [...measuredLines]) {
++			if (keep.has(lineIndex)) continue;
++			measuredLines.delete(lineIndex);
++			const delta = heightDeltas.get(lineIndex);
++			if (delta == null) continue;
++			heightDeltas.delete(lineIndex);
++			this.cache.measuredHeightDeltaTotal -= delta;
++			changed = true;
++		}
++		this.cache.seedEpoch = -1;
++		return changed;
++	}
++	/** The memory for this item's width in the current style, or the latest width measured in it. */
++	getWrapEntry() {
++		if ((this.options.overflow ?? "scroll") !== "wrap" || !this.isAdvancedMode()) return;
++		const diffStyle = this.getDiffStyle();
++		const styleMemory = wrapMemories.get(this.virtualizer)?.get(diffStyle);
++		if (styleMemory == null) return;
++		const signature = this.cache.wrapSignatures[diffStyle];
++		const own = signature == null ? void 0 : styleMemory.entries.get(signature);
++		// Never measured: the latest width for its shape (a new or deleted file in
++		// split is one full-width column, a changed file two halves).
++		const shape = diffStyle === "split" && this.fileDiff?.type !== "new" && this.fileDiff?.type !== "deleted" ? 2 : 1;
++		const entry = own ?? styleMemory.latest[shape] ?? styleMemory.latest.find((candidate) => candidate != null);
++		return entry?.lineHeight === this.metrics.lineHeight ? entry : void 0;
++	}
++	/** Each rendered row's index, memory key and texts, for the current style and expansion. */
++	getWrapRows(fileDiff = this.fileDiff) {
++		if (fileDiff == null) return;
++		const diffStyle = this.getDiffStyle();
++		const cached = this.cache.wrapRows;
++		if (cached != null && cached.fileDiff === fileDiff && cached.diffStyle === diffStyle) return cached.rows;
++		const { expandUnchanged = false, collapsedContextThreshold = 1 } = this.options;
++		const keys = /* @__PURE__ */ new Map();
++		const texts = [];
++		let overLimit = false;
++		iterateOverDiff({
++			diff: fileDiff,
++			diffStyle,
++			expandedHunks: expandUnchanged ? true : this.hunksRenderer.getExpandedHunksMap(),
++			collapsedContextThreshold,
++			callback: ({ deletionLine, additionLine }) => {
++				if (keys.size >= WRAP_MEMORY_ROW_LIMIT) {
++					overLimit = true;
++					return true;
++				}
++				const line = additionLine ?? deletionLine;
++				const lineIndex = diffStyle === "split" ? line.splitLineIndex : line.unifiedLineIndex;
++				const deletionText = deletionLine == null ? void 0 : fileDiff.deletionLines[deletionLine.lineIndex];
++				const additionText = additionLine == null ? void 0 : fileDiff.additionLines[additionLine.lineIndex];
++				const hasMetadata = (additionLine?.noEOFCR ?? false) || (deletionLine?.noEOFCR ?? false);
++				keys.set(lineIndex, getWrapRowKey(diffStyle, deletionText, additionText, hasMetadata));
++				texts.push(lineIndex, deletionText, additionText, hasMetadata);
++				return false;
++			}
++		});
++		const rows = overLimit ? void 0 : {
++			keys,
++			texts
++		};
++		this.cache.wrapRows = {
++			fileDiff,
++			diffStyle,
++			rows
++		};
++		return rows;
++	}
++	/**
++	* Give every row not measured on screen the height it had when it was, or a
++	* wrapped estimate from its length, instead of one row per line.
++	*/
++	seedWrappedRows(fileDiff, style) {
++		if (fileDiff == null || this.options.collapsed === true || this.cache.seedEpoch === style.epoch && this.cache.seedDiff === fileDiff) return false;
++		this.cache.seedEpoch = style.epoch;
++		this.cache.seedDiff = fileDiff;
++		const rows = this.getWrapRows(fileDiff);
++		if (rows == null) return false;
++		const { heightDeltas, measuredLines } = this.cache;
++		const { lineHeight } = this.metrics;
++		const diffStyle = this.getDiffStyle();
++		const columns = diffStyle === "split" ? style.columns : [style.columns[0] ?? 0];
++		const { texts } = rows;
++		let total = this.cache.measuredHeightDeltaTotal;
++		let changed = false;
++		for (let index = 0; index < texts.length; index += 4) {
++			const lineIndex = texts[index];
++			if (measuredLines.has(lineIndex)) continue;
++			const deletionText = texts[index + 1];
++			const additionText = texts[index + 2];
++			const hasMetadata = texts[index + 3];
++			let height = style.heights.get(rows.keys.get(lineIndex));
++			if (height == null) {
++				const wrappedRows = diffStyle === "split" ? Math.max(countWrappedRows(deletionText, columns[0], style.tabSize), countWrappedRows(additionText, columns[1] ?? columns[0], style.tabSize)) : countWrappedRows(additionText ?? deletionText, columns[0], style.tabSize);
++				height = wrappedRows * lineHeight + (hasMetadata ? lineHeight : 0);
++			}
++			const nextDelta = height - this.getEstimatedLineHeight(hasMetadata);
++			const previousDelta = heightDeltas.get(lineIndex) ?? 0;
++			if (nextDelta === previousDelta) continue;
++			changed = true;
++			total += nextDelta - previousDelta;
++			if (nextDelta === 0) heightDeltas.delete(lineIndex);
++			else heightDeltas.set(lineIndex, nextDelta);
++		}
++		this.cache.measuredHeightDeltaTotal = total;
++		if (changed) {
++			this.layoutDirty = true;
++			this.cache.checkpoints.length = 0;
++		}
++		return changed;
++	}
+ 	onRender = (dirty) => {
+ 		if (this.fileContainer == null) return false;
+ 		if (dirty) this.top = this.getVirtualizedTop();
+@@ -194,12 +414,14 @@ var VirtualizedFileDiff = class extends FileDiff {
+ 		if (shouldResetLayoutCache) this.resetLayoutCache({ includeEstimatedHeights });
+ 		this.fileDiff = fileDiff;
+ 		this.top = top;
++		const wrapEntry = this.getWrapEntry();
++		if (wrapEntry != null && this.seedWrappedRows(fileDiff, wrapEntry)) this.layoutDirty = true;
+ 		this.computeApproximateSize();
+ 		return this.height;
+ 	}
+ 	getLinePosition(lineNumber, side = "additions") {
+ 		if (this.fileDiff == null || lineNumber < 1) return;
+-		const targetLineIndexes = this.getLineIndex(lineNumber, side);
++		const targetLineIndexes = this.getLineIndex(lineNumber, side, this.fileDiff);
+ 		if (targetLineIndexes == null) return;
+ 		const { disableFileHeader = false, expandUnchanged = false, collapsed = false, collapsedContextThreshold = 1 } = this.options;
+ 		const diffStyle = this.getDiffStyle();
+@@ -275,7 +497,7 @@ var VirtualizedFileDiff = class extends FileDiff {
+ 	getEditorViewport() {
+ 		return this.virtualizer.type === "simple" ? this.virtualizer.getRoot() : this.virtualizer.getContainerElement();
+ 	}
+-	getNumericScrollAnchor(localViewportTop) {
++	getNumericScrollAnchor(localViewportTop, lookaheadRows = ANCHOR_LOOKAHEAD_ROWS) {
+ 		if (this.fileDiff == null) return;
+ 		const { disableFileHeader = false, expandUnchanged = false, collapsed = false, collapsedContextThreshold = 1 } = this.options;
+ 		if (collapsed) return;
+@@ -285,6 +507,8 @@ var VirtualizedFileDiff = class extends FileDiff {
+ 		const checkpoint = this.getLayoutCheckpointBeforeTop(localViewportTop);
+ 		let top = checkpoint?.top ?? getVirtualFileHeaderRegion(this.metrics, disableFileHeader) + this.cache.fileAnnotationHeight;
+ 		let anchor;
++		let fallback;
++		let lookahead = 0;
+ 		iterateOverDiff({
+ 			diff: this.fileDiff,
+ 			diffStyle,
+@@ -304,17 +528,28 @@ var VirtualizedFileDiff = class extends FileDiff {
+ 					if (separator != null) top += separator.totalHeight;
+ 				}
+ 				if (top >= localViewportTop) {
+-					if (deletionLine != null) anchor = {
+-						lineNumber: deletionLine.lineNumber,
+-						side: "deletions",
+-						top
+-					};
+-					else if (additionLine != null) anchor = {
++					let candidate;
++					if (additionLine != null) candidate = {
+ 						lineNumber: additionLine.lineNumber,
+ 						side: "additions",
+-						top
++						top,
++						text: this.fileDiff.additionLines[additionLine.lineIndex],
++						diff: this.fileDiff
++					};
++					else if (deletionLine != null) candidate = {
++						lineNumber: deletionLine.lineNumber,
++						side: "deletions",
++						top,
++						text: this.fileDiff.deletionLines[deletionLine.lineIndex],
++						diff: this.fileDiff
+ 					};
+-					if (anchor != null) return true;
++					if (candidate != null) {
++						fallback ??= candidate;
++						if (isDistinctiveAnchorText(candidate.text) || ++lookahead > lookaheadRows) {
++							anchor = isDistinctiveAnchorText(candidate.text) ? candidate : fallback;
++							return true;
++						}
++					}
+ 				}
+ 				const lineHeight = this.getLineHeight(lineIndex, (additionLine?.noEOFCR ?? false) || (deletionLine?.noEOFCR ?? false));
+ 				top += lineHeight;
+@@ -328,7 +563,60 @@ var VirtualizedFileDiff = class extends FileDiff {
+ 				return false;
+ 			}
+ 		});
+-		return anchor;
++		return anchor ?? fallback;
++	}
++	/**
++	* Resolve a line anchor taken on this item, following the anchored row's text
++	* when the file's content changed since: a line number names other text once
++	* lines are added or removed above it (every row of a new file is numbered on
++	* the new side), so the reader's line moved by the rows inserted above it.
++	*/
++	resolveAnchorLinePosition(anchor) {
++		const fileDiff = this.fileDiff;
++		if (fileDiff == null) return;
++		if (anchor.diff == null || anchor.diff === fileDiff || anchor.text == null) return this.getLinePosition(anchor.lineNumber, anchor.side);
++		let remapped = anchor.remapped;
++		if (remapped == null || remapped.diff !== fileDiff) {
++			remapped = {
++				diff: fileDiff,
++				...this.findRowByText(fileDiff, anchor)
++			};
++			anchor.remapped = remapped;
++		}
++		return remapped.lineNumber == null ? this.getLinePosition(anchor.lineNumber, anchor.side) : this.getLinePosition(remapped.lineNumber, remapped.side);
++	}
++	findRowByText(fileDiff, anchor) {
++		const { expandUnchanged = false, collapsed = false, collapsedContextThreshold = 1 } = this.options;
++		if (collapsed) return {};
++		// The row can only have moved by about as many lines as were added or
++		// removed; the same text farther away is another row that happens to read
++		// the same, and following it would throw the reader across the file.
++		const previous = anchor.diff;
++		const maxDistance = ANCHOR_REMAP_SLACK_ROWS + Math.abs(fileDiff.additionLines.length - previous.additionLines.length) + Math.abs(fileDiff.deletionLines.length - previous.deletionLines.length) + Math.abs(fileDiff.unifiedLineCount - previous.unifiedLineCount);
++		let best = {};
++		let bestScore = maxDistance + 1;
++		const consider = (line, lines, side) => {
++			if (line == null || lines[line.lineIndex] !== anchor.text) return;
++			const score = Math.abs(line.lineNumber - anchor.lineNumber) + (side === anchor.side ? 0 : .5);
++			if (score >= bestScore) return;
++			bestScore = score;
++			best = {
++				lineNumber: line.lineNumber,
++				side
++			};
++		};
++		iterateOverDiff({
++			diff: fileDiff,
++			diffStyle: this.getDiffStyle(),
++			expandedHunks: expandUnchanged ? true : this.hunksRenderer.getExpandedHunksMap(),
++			collapsedContextThreshold,
++			callback: ({ deletionLine, additionLine }) => {
++				consider(deletionLine, fileDiff.deletionLines, "deletions");
++				consider(additionLine, fileDiff.additionLines, "additions");
++				return bestScore === 0;
++			}
++		});
++		return best;
+ 	}
+ 	getVirtualizedHeight() {
+ 		return this.height;
+@@ -354,6 +642,7 @@ var VirtualizedFileDiff = class extends FileDiff {
+ 	}
+ 	cleanUp(recycle = false) {
+ 		if (this.fileContainer != null && this.isSimpleMode()) this.getSimpleVirtualizer()?.disconnect(this.fileContainer);
++		this.cache.wrapRows = void 0;
+ 		if (!recycle) {
+ 			this.resetLayoutCache({ includeEstimatedHeights: true });
+ 			this.pendingExpansions = void 0;
+@@ -1046,6 +1335,99 @@ function parseLineIndex(lineIndexAttr, diffStyle) {
+ 	const [unifiedIndex, splitIndex] = lineIndexAttr.split(",").map(Number);
+ 	return diffStyle === "split" ? splitIndex : unifiedIndex;
+ }
++/**
++* A blank line or a lone brace names no particular row: a file is full of them,
++* so an anchor on one could not be found again once lines move.
++*/
++function isDistinctiveAnchorText(text) {
++	return text != null && /\w{3}/.test(text);
++}
++function getWrapRowKey(diffStyle, deletionText, additionText, hasMetadata) {
++	const key = diffStyle === "split" ? `${deletionText ?? ""}\u0000${additionText ?? ""}` : additionText ?? deletionText ?? "";
++	return hasMetadata ? `${key}\u0001` : key;
++}
++function getWrapSignature(codeGroups, lineHeight) {
++	let signature = `${lineHeight}`;
++	for (const codeGroup of codeGroups) {
++		const content = codeGroup?.children[1];
++		if (!(content instanceof HTMLElement)) continue;
++		const width = content.clientWidth;
++		if (width <= 0) return;
++		signature += `|${width}`;
++	}
++	return signature;
++}
++let wrapCanvasContext;
++const charWidths = /* @__PURE__ */ new Map();
++/** Characters that fit on one row of each code column, from its width and font. */
++function measureWrapColumns(codeGroups) {
++	const columns = [];
++	let tabSize = 2;
++	for (const codeGroup of codeGroups) {
++		const content = codeGroup?.children[1];
++		if (!(content instanceof HTMLElement)) continue;
++		let line;
++		for (const child of content.children) if (child instanceof HTMLElement && child.dataset.lineIndex != null) {
++			line = child;
++			break;
++		}
++		if (line == null) return;
++		const style = getComputedStyle(line);
++		const textWidth = line.clientWidth - (parseFloat(style.paddingLeft) || 0) - (parseFloat(style.paddingRight) || 0);
++		const font = style.font || `${style.fontStyle} ${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
++		let charWidth = charWidths.get(font);
++		if (charWidth == null) {
++			wrapCanvasContext ??= document.createElement("canvas").getContext("2d");
++			if (wrapCanvasContext == null) return;
++			wrapCanvasContext.font = font;
++			charWidth = wrapCanvasContext.measureText("0".repeat(64)).width / 64;
++			charWidths.set(font, charWidth);
++		}
++		if (!(charWidth > 0) || !(textWidth > 0)) return;
++		columns.push(Math.max(1, Math.floor(textWidth / charWidth + .01)));
++		tabSize = Number.parseInt(style.tabSize, 10) || tabSize;
++	}
++	return columns.length === 0 ? void 0 : {
++		columns,
++		tabSize
++	};
++}
++/**
++* Rows a line takes under `white-space: pre-wrap; word-break: break-word` in a
++* monospace column: breaks after spaces, tabs and hyphens, and inside a word
++* only when the word alone is wider than the column.
++*/
++function countWrappedRows(text, columns, tabSize) {
++	if (text == null || !(columns > 0)) return 1;
++	let length = text.length;
++	if (length > 0 && text.charCodeAt(length - 1) === 10) length--;
++	if (length > 0 && text.charCodeAt(length - 1) === 13) length--;
++	if (length <= columns && text.indexOf("\t") === -1) return 1;
++	let rows = 1;
++	let column = 0;
++	let breakColumn = -1;
++	for (let index = 0; index < length; index++) {
++		const code = text.charCodeAt(index);
++		if (code === 32) {
++			column++;
++			breakColumn = column;
++			continue;
++		}
++		if (code === 9) {
++			column += tabSize - column % tabSize;
++			breakColumn = column;
++			continue;
++		}
++		if (column + 1 > columns) {
++			rows++;
++			column = breakColumn > 0 && breakColumn <= columns ? column - breakColumn : 0;
++			breakColumn = -1;
++		}
++		column++;
++		if (code === 45) breakColumn = column;
++	}
++	return rows;
++}
+ //#endregion
+ export { VIRTUALIZED_FILE_DIFF_LAYOUT_CHECKPOINT_INTERVAL, VirtualizedFileDiff };
+ 
+diff --git a/dist/components/Virtualizer.js b/dist/components/Virtualizer.js
+index 4063b99..13c9191 100644
+--- a/dist/components/Virtualizer.js
++++ b/dist/components/Virtualizer.js
+@@ -306,7 +306,7 @@ var Virtualizer = class Virtualizer {
+ 			const fileBottom = fileTop + fileElement.offsetHeight;
+ 			let fileOffset;
+ 			let fileTypeOffset;
+-			if (fileBottom <= 0) {
++			if (fileBottom <= 0 && fileTop < 0) {
+ 				fileOffset = fileBottom;
+ 				fileTypeOffset = "bottom";
+ 			} else {
+diff --git a/dist/editor/tokenizer.js b/dist/editor/tokenizer.js
+index 804fb15..c3f6a8b 100644
+--- a/dist/editor/tokenizer.js
++++ b/dist/editor/tokenizer.js
+@@ -170,12 +170,12 @@ var EditorTokenizer = class {
+     }`);
+ 		this.#themeName = themeName;
+ 		this.#themeType = themeType ?? theme.type;
+-		this.#colorMap = colorMap;
++		this.#colorMap = withColorReplacements(theme, colorMap);
+ 	}
+ 	#ensureActiveTheme() {
+ 		if (this.#themeName === "") return;
+-		const { colorMap } = this.#highlighter.setTheme(this.#themeName);
+-		this.#colorMap = colorMap;
++		const { theme, colorMap } = this.#highlighter.setTheme(this.#themeName);
++		this.#colorMap = withColorReplacements(theme, colorMap);
+ 	}
+ 	cleanUp() {
+ 		this.#isCleanedUp = true;
+@@ -544,6 +544,15 @@ var EditorTokenizer = class {
+ 		this.#postTokenizeMessage(jobId);
+ 	}
+ };
++// Shiki keeps only hex colors in its color map: a theme color it cannot hold
++// (`color(display-p3 …)`, a CSS variable) is stored as a placeholder such as
++// #00000001 and put back through `colorReplacements`. Tokens read straight off
++// the map drew edited lines of such a theme in that near-transparent black.
++function withColorReplacements(theme, colorMap) {
++	const replacements = theme?.colorReplacements;
++	if (replacements == null) return colorMap;
++	return colorMap.map((color) => color == null ? color : replacements[color.toLowerCase()] ?? color);
++}
+ function tokenizeLine(grammar, colorMap, lineText, stateStack, timeLimit, collectBracketIgnoredRanges = true, resolveTokens = true) {
+ 	const result = grammar.tokenizeLine2(lineText, stateStack, timeLimit);
+ 	if (result.stoppedEarly) console.warn(`[diffs] Time limit reached when tokenizing line: ${lineText.substring(0, 100)}`);
+diff --git a/dist/renderers/DiffHunksRenderer.js b/dist/renderers/DiffHunksRenderer.js
+index db8dd4a..529c79c 100644
+--- a/dist/renderers/DiffHunksRenderer.js
++++ b/dist/renderers/DiffHunksRenderer.js
+@@ -43,6 +43,7 @@ var DiffHunksRenderer = class {
+ 	additionAnnotations = {};
+ 	computedLang = "text";
+ 	renderCache;
++	requestedDiff;
+ 	editSessionActive = false;
+ 	constructor(options = { theme: DEFAULT_THEMES }, onRenderUpdate, workerManager) {
+ 		this.options = options;
+@@ -59,6 +60,7 @@ var DiffHunksRenderer = class {
+ 	recycle() {
+ 		this.highlighter = void 0;
+ 		this.diff = void 0;
++		this.requestedDiff = void 0;
+ 		this.clearRenderCache();
+ 		this.additionAnnotations = {};
+ 		this.deletionAnnotations = {};
+@@ -412,6 +414,7 @@ var DiffHunksRenderer = class {
+ 	}
+ 	renderDiff(diff = this.renderCache?.diff, renderRange = DEFAULT_RENDER_RANGE) {
+ 		if (diff == null) return;
++		this.requestedDiff = diff;
+ 		const { expandUnchanged, collapsedContextThreshold } = this.getOptionsWithDefaults();
+ 		let { options, forceHighlight } = this.getRenderOptions(diff);
+ 		const cache = this.getMatchingWorkerResultCache(diff, options);
+@@ -438,7 +441,7 @@ var DiffHunksRenderer = class {
+ 		if (!this.editSessionActive && this.workerManager?.isWorkingPool() === true) {
+ 			const highlightPending = this.renderCache.result == null && this.renderCache.highlighted && !forcePlainText && !newContent && isDefaultRenderRange(renderRange);
+ 			if (highlightPending) this.renderCache.highlightPending = true;
+-			if (!highlightPending && (forcePlainText || this.renderCache.result == null || !this.renderCache.highlighted && (newContent || newRenderRange))) {
++			if (!highlightPending && (forcePlainText || this.renderCache.result == null || newContent || !this.renderCache.highlighted && newRenderRange)) {
+ 				this.renderCache.diff = diff;
+ 				this.renderCache.options = options;
+ 				this.renderCache.highlighted = false;
+@@ -462,6 +465,7 @@ var DiffHunksRenderer = class {
+ 				};
+ 			}
+ 			if (!hasThemes || !forcePlainText && !hasLangs) this.asyncHighlight(diff).then(({ result, options }) => {
++				if (this.requestedDiff != null && !areDiffTargetsEqual(diff, this.requestedDiff)) return;
+ 				if (this.renderCache != null) this.renderCache.highlighted = false;
+ 				this.applyHighlightResult(diff, result, options, !forcePlainText);
+ 			});
+@@ -528,6 +532,7 @@ var DiffHunksRenderer = class {
+ 	}
+ 	applyHighlightResult(diff, result, options, highlighted = true) {
+ 		if (this.renderCache == null) return;
++		if (this.requestedDiff != null && !areDiffTargetsEqual(diff, this.requestedDiff)) return;
+ 		const triggerRenderUpdate = this.renderCache.highlightPending === true || !this.renderCache.highlighted || !areDiffRenderOptionsEqual(this.renderCache.options, options) || !areDiffTargetsEqual(this.renderCache.diff, diff);
+ 		this.renderCache = {
+ 			diff,
+@@ -681,7 +686,10 @@ var DiffHunksRenderer = class {
+ 						additionLineIndex: additionLine?.lineIndex,
+ 						deletionLineIndex: deletionLine?.lineIndex
+ 					});
+-					pushGutterLineNumber("unified", lineDecoration.gutterLineType, additionLine != null ? additionLine.lineNumber : deletionLine.lineNumber, `${unifiedLineIndex},${splitLineIndex}`, lineDecoration.gutterProperties);
++					pushGutterLineNumber("unified", lineDecoration.gutterLineType, additionLine != null ? additionLine.lineNumber : deletionLine.lineNumber, `${unifiedLineIndex},${splitLineIndex}`, {
++						"data-old-line": deletionLine?.lineNumber,
++						...lineDecoration.gutterProperties
++					});
+ 					if (additionLineContent != null) additionLineContent = withContentProperties(additionLineContent, lineDecoration.contentProperties, isRenderCacheDirty && additionLine != null ? {
+ 						"data-line": additionLine.lineNumber,
+ 						"data-line-index": `${unifiedLineIndex},${splitLineIndex}`

@@ -40,6 +40,9 @@ export function sameConversation(
   if (current.available !== next.available || current.message !== next.message) return false
   if (current.complete !== next.complete || current.stale !== next.stale || current.partialError !== next.partialError) return false
   if (current.body !== next.body) return false
+  // A push that moved nothing else is still a new conversation: the head is how
+  // the review notices it fell behind, and keeping the old object hid every push.
+  if (current.headOid !== next.headOid) return false
   if (current.threads.length !== next.threads.length) return false
   if (current.reviews.length !== next.reviews.length) return false
   for (let index = 0; index < current.threads.length; index += 1) {

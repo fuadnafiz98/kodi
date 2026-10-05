@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useEffect, useMemo, useRef, useState, type RefObject } from 'react'
 import './AgentPanel.css'
 
 import type {
@@ -15,7 +15,7 @@ import { ProviderConnection } from './AgentProviderConnection'
 import { AgentTurn } from './AgentTurn'
 import type { ConfirmRequest } from '../app/ConfirmDialog'
 import type { MarkdownBlock } from '../markdown/markdown'
-import type { AgentTurnRecord } from './useAgentAnswer'
+import type { AgentReference, AgentTurnRecord } from './useAgentAnswer'
 
 interface AgentPanelProps {
   answer: string
@@ -23,10 +23,12 @@ interface AgentPanelProps {
   streaming: boolean
   error: string | null
   question: string
+  references: readonly AgentReference[]
   activity: readonly AgentActivityUpdate[]
   approvals: readonly AgentApprovalRequest[]
   usage: AgentUsageUpdate | null
   history: readonly AgentTurnRecord[]
+  chatId: string
   startedAt: number | null
   completedAt: number | null
   provider: AgentProvider
@@ -55,20 +57,25 @@ interface AgentPanelProps {
   onAsk(prompt: string): void
   onCancel(): void
   onReset(): void
+  onOpenChat(id: string): void
+  onOpenReference?(reference: AgentReference): void
+  onDeleteChat(id: string): void
   onClose(): void
 }
 
 export const AgentPanel = memo(function AgentPanel({
-  answer, blocks, streaming, error, question, activity, approvals, usage, history,
+  answer, blocks, streaming, error, question, references, activity, approvals, usage, history, chatId,
   startedAt, completedAt, provider, model, effort, accessMode, accessModeLocked, models, efforts,
   loadingModels, statuses, loadingStatuses, authenticatingProvider, statusError,
   attachments, contextLabel, onProviderChange, onModelChange, onEffortChange,
   onAccessModeChange, onConfirm, onRefreshStatuses, onLogin, onApprovalDecision,
-  onRemoveAttachment, onAsk, onCancel, onReset, onClose
+  onRemoveAttachment, onAsk, onCancel, onReset, onOpenChat, onOpenReference, onDeleteChat, onClose
 }: AgentPanelProps): React.JSX.Element {
   const [draft, setDraft] = useState('')
   const [settingsOpen, setSettingsOpen] = useState(false)
   const composerRef = useRef<HTMLTextAreaElement>(null)
+  const transcriptRef = useRef<HTMLDivElement>(null)
+  useFollowTranscriptEnd(transcriptRef)
   const started = history.length > 0 || question !== '' || blocks.length > 0 || activity.length > 0 || error != null
   const providerStatus = statuses[provider]
   const ready = providerStatus.authenticated
@@ -94,10 +101,10 @@ export const AgentPanel = memo(function AgentPanel({
 
   return (
     <aside className="agent-dock" aria-label="Agent">
-      <AgentDockHeader streaming={streaming} ready={ready} started={started}
-        onReset={onReset} onClose={onClose} />
+      <AgentDockHeader streaming={streaming} ready={ready} started={started} currentChatId={chatId}
+        onReset={onReset} onOpenChat={onOpenChat} onDeleteChat={onDeleteChat} onClose={onClose} />
 
-      <div className="agent-dock-transcript">
+      <div className="agent-dock-transcript" ref={transcriptRef}>
         {!ready || statusError != null ? (
           <ProviderConnection provider={provider} status={providerStatus} loading={loadingStatuses}
             authenticating={authenticatingProvider === provider} error={statusError}
@@ -109,10 +116,12 @@ export const AgentPanel = memo(function AgentPanel({
             onAsk={onAsk} onCloseSettings={() => setSettingsOpen(false)} />
         )}
 
-        {history.map((turn) => <AgentTurn key={turn.id} turn={turn} />)}
+        {history.map((turn) => <AgentTurn key={turn.id} turn={turn} onOpenReference={onOpenReference} />)}
 
         <AgentCurrentTurn
           question={question}
+          references={references}
+          onOpenReference={onOpenReference}
           blocks={blocks}
           answer={answer}
           error={error}
@@ -178,4 +187,41 @@ function useAgentLiveLabel(
   }, [activity])
   if (latestRunning?.status === 'waiting') return 'Waiting for approval'
   return latestRunning?.title || (hasAnswerBlocks ? 'Writing answer' : 'Inspecting repository')
+}
+
+// Within this of the end still counts as reading the end.
+const FOLLOW_SLACK_PX = 24
+
+/**
+ * Keeps a reader who is at the end of the transcript at the end as it grows:
+ * a streaming answer, and the usage and Copy answer rows that land under it
+ * when it finishes. Nothing followed before, so a long answer ran out under the
+ * composer and its last rows sat below the fold. A reader who scrolls up to
+ * reread is left where they are until they come back down.
+ */
+function useFollowTranscriptEnd(transcriptRef: RefObject<HTMLDivElement | null>): void {
+  useEffect(() => {
+    const transcript = transcriptRef.current
+    if (transcript == null) return
+    let following = true
+    let frame = 0
+    const onScroll = (): void => {
+      following = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight <= FOLLOW_SLACK_PX
+    }
+    // One scroll per frame however many tokens landed in it.
+    const observer = new MutationObserver(() => {
+      if (!following || frame !== 0) return
+      frame = window.requestAnimationFrame(() => {
+        frame = 0
+        if (following) transcript.scrollTop = transcript.scrollHeight
+      })
+    })
+    observer.observe(transcript, { childList: true, subtree: true, characterData: true })
+    transcript.addEventListener('scroll', onScroll, { passive: true })
+    return () => {
+      observer.disconnect()
+      transcript.removeEventListener('scroll', onScroll)
+      if (frame !== 0) window.cancelAnimationFrame(frame)
+    }
+  }, [transcriptRef])
 }

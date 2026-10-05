@@ -190,12 +190,8 @@ export function GitChangesTab({
           title="Staged Changes"
           {...sectionProps('staged', groups.staged)}
           headerActions={
-            <button type="button" className="scm-section-button" disabled={locked}
-              title={stagedSelected == null ? 'Unstage every staged file' : 'Unstage the selected files'}
-              onClick={() => void move(pick(groups.staged, stagedSelected).map((entry) => entry.path), 'unstaged')}>
-              <IconMinus aria-hidden="true" />
-              {stagedSelected == null ? 'Unstage All' : `Unstage ${stagedSelected.size}`}
-            </button>
+            <StagedHeaderActions selected={stagedSelected} locked={locked}
+              onUnstage={() => void move(pick(groups.staged, stagedSelected).map((entry) => entry.path), 'unstaged')} />
           }
         />
       ) : null}
@@ -203,26 +199,57 @@ export function GitChangesTab({
         <ChangeSection
           title="Changes"
           {...sectionProps('unstaged', groups.unstaged)}
-          headerActions={<>
-            <button type="button" className="scm-icon-button" disabled={locked}
-              aria-label={unstagedSelected == null ? 'Discard all changes' : `Discard ${unstagedSelected.size} selected`}
-              title={unstagedSelected == null ? 'Discard All Changes' : 'Discard Selected'}
-              onClick={() => discard(pick(groups.unstaged, unstagedSelected))}>
-              <IconReply />
-            </button>
-            <button type="button" className="scm-section-button suggested" disabled={locked}
-              title={unstagedSelected == null ? 'Stage every change, new files included' : 'Stage the selected files'}
-              onClick={() => void move(pick(groups.unstaged, unstagedSelected).map((entry) => entry.path), 'staged')}>
-              <IconPlus aria-hidden="true" />
-              {unstagedSelected == null ? 'Stage All' : `Stage ${unstagedSelected.size}`}
-            </button>
-          </>}
+          headerActions={
+            <UnstagedHeaderActions selected={unstagedSelected} locked={locked}
+              onDiscard={() => discard(pick(groups.unstaged, unstagedSelected))}
+              onStage={() => void move(pick(groups.unstaged, unstagedSelected).map((entry) => entry.path), 'staged')} />
+          }
         />
       ) : null}
       {statuses.length > 0 ? (
         <p className="scm-hint">⌘/⇧-click to select · Space to stage or unstage · ⌫ to discard</p>
       ) : null}
     </section>
+  )
+}
+
+/** A section header's actions cover its selection when there is one, else every row. */
+function StagedHeaderActions({ selected, locked, onUnstage }: {
+  selected: ReadonlySet<string> | null
+  locked: boolean
+  onUnstage(): void
+}): React.JSX.Element {
+  return (
+    <button type="button" className="scm-section-button" disabled={locked}
+      title={selected == null ? 'Unstage every staged file' : 'Unstage the selected files'}
+      onClick={onUnstage}>
+      <IconMinus aria-hidden="true" />
+      {selected == null ? 'Unstage All' : `Unstage ${selected.size}`}
+    </button>
+  )
+}
+
+function UnstagedHeaderActions({ selected, locked, onDiscard, onStage }: {
+  selected: ReadonlySet<string> | null
+  locked: boolean
+  onDiscard(): void
+  onStage(): void
+}): React.JSX.Element {
+  return (
+    <>
+      <button type="button" className="scm-icon-button" disabled={locked}
+        aria-label={selected == null ? 'Discard all changes' : `Discard ${selected.size} selected`}
+        title={selected == null ? 'Discard All Changes' : 'Discard Selected'}
+        onClick={onDiscard}>
+        <IconReply />
+      </button>
+      <button type="button" className="scm-section-button suggested" disabled={locked}
+        title={selected == null ? 'Stage every change, new files included' : 'Stage the selected files'}
+        onClick={onStage}>
+        <IconPlus aria-hidden="true" />
+        {selected == null ? 'Stage All' : `Stage ${selected.size}`}
+      </button>
+    </>
   )
 }
 
@@ -279,15 +306,21 @@ function ChangeSection({
         </button>
         <div className="scm-section-actions">{headerActions}</div>
       </div>
+      {/* A grid rather than a listbox: ARIA makes an option's children
+          presentational, which flattens the stage and discard buttons inside it
+          into the option's text. A row carries the selection just as well, and
+          each of its parts is a cell — the open button is the one that takes focus.
+          Divs, because a list's items cannot be rows; the class names carry the
+          same box a `ul` of them did. */}
       {collapsed ? null : (
-        <ul id={listId} className="scm-list" role="listbox" aria-multiselectable="true" aria-label={title}
+        <div id={listId} className="scm-list" role="grid" aria-multiselectable="true" aria-label={title}
           data-settled={settled ? '' : undefined}>
           {visible.map((entry) => {
             const { name, directory } = splitRepositoryPath(entry.path)
             const isSelected = selected?.has(entry.path) === true
             return (
-              <li key={entry.path} className="scm-row" data-status={entry.status} role="option" aria-selected={isSelected}>
-                <button type="button" className="scm-row-open"
+              <div key={entry.path} className="scm-row" data-status={entry.status} role="row" aria-selected={isSelected}>
+                <button type="button" className="scm-row-open" role="gridcell"
                   title={entry.previousPath == null ? entry.path : `${entry.previousPath} → ${entry.path}`}
                   onClick={(event) => {
                     if (event.metaKey || event.ctrlKey) {
@@ -333,7 +366,7 @@ function ChangeSection({
                   <span className="scm-row-name">{name}</span>
                   {directory === '' ? null : <span className="scm-row-directory">{directory}</span>}
                 </button>
-                <span className="scm-row-actions">
+                <span className="scm-row-actions" role="gridcell">
                   {onDiscard == null ? null : (
                     <button type="button" className="scm-icon-button" tabIndex={-1} disabled={locked}
                       aria-label={`Discard changes to ${entry.path}`} title="Discard Changes"
@@ -348,21 +381,21 @@ function ChangeSection({
                     {staged ? <IconMinus /> : <IconPlus />}
                   </button>
                 </span>
-                <span className="scm-row-status" title={statusLabel(entry.status)}
+                <span className="scm-row-status" role="gridcell" title={statusLabel(entry.status)}
                   aria-label={statusLabel(entry.status)}>{statusLetter(entry.status)}</span>
-              </li>
+              </div>
             )
           })}
           {hidden > 0 ? (
-            <li className="scm-more" role="presentation">
+            <div className="scm-more">
               <button type="button" onClick={() => setLimit(visible.length + ROW_PAGE)}>
                 {hidden > ROW_PAGE
                   ? `Show ${ROW_PAGE} more of ${hidden.toLocaleString()}`
                   : `Show ${hidden.toLocaleString()} more`}
               </button>
-            </li>
+            </div>
           ) : null}
-        </ul>
+        </div>
       )}
     </div>
   )

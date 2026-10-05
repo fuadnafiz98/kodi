@@ -67,6 +67,11 @@ const pathBarReads = (path) => `${inSingleFileView}
 const onSingleFile = (path) => `${inSingleFileView}
   && document.querySelector('.diff-file-title')?.getAttribute('title') === ${JSON.stringify(path)}
   && ${deepAll('[data-diffs-header] [data-title]')}[0]?.textContent === ${JSON.stringify(path)}`
+// A line the palette named: selected, and inside the window.
+const lineOnScreen = (line) => `${deepAll(`[data-content] [data-line="${line}"][data-selected-line]`)}.some((element) => {
+  const rect = element.getBoundingClientRect()
+  return rect.height > 0 && rect.top >= 0 && rect.bottom <= window.innerHeight
+})`
 const scrollReviewBy = (distance) => `document.querySelector('.multi-file-code-view').scrollBy(0, ${distance})`
 
 const paletteInput = `document.querySelector('#command-palette-input')`
@@ -161,6 +166,12 @@ await runSuite('palette-navigation', async (suite, cleanup) => {
           () => pick(cdp, path, how), { ...JUMP_BUDGET, done: onReviewFile(path), check: onReviewFile(path) })
       }
 
+      // A path with a line, the way a stack trace or a linter prints one.
+      const lined = changedPath(12)
+      await suite.watch(app, label(`⌘K ${lined}:150 lands on line 150 in the folder review`),
+        () => pick(cdp, `${lined}:150`, 'enter'),
+        { ...JUMP_BUDGET, done: `${onReviewFile(lined)} && ${lineOnScreen(150)}`, check: `${onReviewFile(lined)} && ${lineOnScreen(150)}` })
+
       // ⌘K to the file that is already selected — picked (or clicked) a moment
       // ago, then scrolled away from — changes no app state. It used to do
       // nothing at all.
@@ -189,6 +200,19 @@ await runSuite('palette-navigation', async (suite, cleanup) => {
         await suite.watch(app, label(`⌘K on ${path} shows its own header in the single-file view`),
           () => pick(cdp, path, how), { ...JUMP_BUDGET, counterBudgets: {}, done: onSingleFile(path), check: onSingleFile(path) })
       }
+
+      const linedSingle = changedPath(9)
+      await suite.watch(app, label(`⌘K ${linedSingle}:200 lands on line 200 in the single-file view`),
+        () => pick(cdp, `${linedSingle}:200`, 'enter'),
+        { ...JUMP_BUDGET, counterBudgets: {}, done: `${onSingleFile(linedSingle)} && ${lineOnScreen(200)}`, check: `${onSingleFile(linedSingle)} && ${lineOnScreen(200)}` })
+      await suite.watch(app, label('⌘K :120 goes to line 120 of the open file'), async () => {
+        await cdp.combo('k', 'KeyK', 75, 4)
+        await cdp.waitFor(`document.activeElement === ${paletteInput}`, 8_000, 4)
+        await cdp.send('Input.insertText', { text: ':120' })
+        await cdp.waitFor(`[...document.querySelectorAll('.command-palette-results button')]
+          .some((row) => row.textContent.includes('Go to line 120'))`, 5_000, 16)
+        await cdp.enter()
+      }, { ...JUMP_BUDGET, counterBudgets: {}, done: `${onSingleFile(linedSingle)} && ${lineOnScreen(120)}`, check: `${onSingleFile(linedSingle)} && ${lineOnScreen(120)}` })
 
       // Back into the folder review on the selected row, deep in the list: the
       // commit review opened from here must start on its own first file, not at
@@ -228,6 +252,29 @@ await runSuite('palette-navigation', async (suite, cleanup) => {
       await suite.watch(app, label('switching back to the commit tab returns to where it was left'),
         () => press(cdp, `${tab('patch')}.click()`),
         { ...JUMP_BUDGET, timedAction: true, done: backWhereLeft, check: backWhereLeft })
+
+      // A reader who types the name and hits Enter at once. The file results
+      // are a deferred render behind the input, and Enter in that gap used to
+      // run the previous query's top row: the palette closed on the file already
+      // open, about one Enter in ten.
+      let missedEnters = 0
+      const misses = []
+      for (let attempt = 0; attempt < 10; attempt += 1) {
+        const path = historyPath(attempt % 2 === 0 ? 5 : 9)
+        await cdp.combo('k', 'KeyK', 75, 4)
+        await cdp.waitFor(`document.activeElement === document.querySelector('#command-palette-input')`, 8_000, 4)
+        await cdp.send('Input.insertText', { text: path })
+        await cdp.enter()
+        if ((await cdp.waitFor(onReviewFile(path), 4_000, 16)).timedOut) {
+          missedEnters += 1
+          misses.push({ asked: path, onScreen: await cdp.eval(reviewTop) })
+        }
+        if (await cdp.eval(`document.querySelector('.command-palette-layer')?.open === true`)) {
+          await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 })
+          await Bun.sleep(200)
+        }
+      }
+      suite.record(label('Enter straight after typing opens what was typed'), missedEnters === 0, { missedEnters, attempts: 10, misses })
 
       await takeLongTasks(cdp)
       const banner = await cdp.tryEval(`document.querySelector('.error-banner')?.textContent ?? null`)

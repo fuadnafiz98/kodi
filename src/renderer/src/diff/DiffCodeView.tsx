@@ -9,11 +9,13 @@ import { reportCopiedPath, syncCopyFilePathLifecycle } from './copyFilePath'
 import { GutterActions } from './GutterActions'
 import { syncDragGuideLifecycle } from './dragSelection'
 import { syncSplitDiffResizeLifecycle } from './splitDiffResize'
-import { syncReviewCaretLifecycle } from '../review/reviewCaret'
-import { SELECTION_ACTION_CSS, VIEWER_BASE_CSS } from './viewerCss'
+import { syncReviewCaretLifecycle, type PlaceEditCaret } from '../review/reviewCaret'
+import { VIEWER_BASE_CSS } from './viewerCss'
 import { CODE_FONTS, getEditorThemeType, INTERFACE_FONTS, type AppPreferences } from '../settings/preferences'
 import type { ReviewAnnotationMetadata } from '../review/ReviewComments'
 import { VirtualizedBackToTop } from './VirtualizedBackToTop'
+import { useLineReveal } from './useLineReveal'
+import { usePrimedComparison } from './usePrimedComparison'
 
 const DIFF_OPTIONS = {
   diffIndicators: 'bars' as const,
@@ -26,12 +28,11 @@ const DIFF_OPTIONS = {
 }
 const INTERACTION_CSS = `
   ${VIEWER_BASE_CSS}
-  ${SELECTION_ACTION_CSS}
 
-  /* The polygon this used to carry fitted |a|^n + |b|^n = 1 at n≈1.82 — flatter
+  ${/* The polygon this used to carry fitted |a|^n + |b|^n = 1 at n≈1.82 — flatter
      than a circle, i.e. a bevel, not a squircle — and clip-path clips the outline,
      so the button had no visible keyboard focus. corner-shape in VIEWER_BASE_CSS
-     draws the real thing and leaves the ring alone. */
+     draws the real thing and leaves the ring alone. */ ''}
   button[data-expand-button][data-expand-button] {
     cursor: pointer;
     color: var(--text-secondary);
@@ -68,13 +69,15 @@ export interface DiffCodeViewProps {
   renderDiffAnnotation(annotation: DiffLineAnnotation<ReviewAnnotationMetadata>): React.ReactNode
   beginComment(range: SelectedLineRange): void
   setReviewCursor(cursor: ReviewCursor): void
+  /** A click on the working file's text: where editing should start. */
+  onPlaceEditCaret?: PlaceEditCaret
 }
 
 type HoveredLine = { lineNumber: number; side?: 'additions' | 'deletions' }
 
 /** The code itself: one file while editing, a diff otherwise. */
 export function DiffCodeView({
-  comparison,
+  comparison: incomingComparison,
   comparisonPath,
   editing,
   diffStyle,
@@ -86,8 +89,10 @@ export function DiffCodeView({
   renderFileAnnotation,
   renderDiffAnnotation,
   beginComment,
-  setReviewCursor
+  setReviewCursor,
+  onPlaceEditCaret
 }: DiffCodeViewProps): React.JSX.Element {
+  const comparison = usePrimedComparison(incomingComparison, !editing && incomingComparison.mode === 'diff')
   const codeStyle = useMemo(() => ({
     '--diffs-font-family': CODE_FONTS[preferences.codeFont].fontFamily,
     '--diffs-header-font-family': INTERFACE_FONTS[preferences.interfaceFont].fontFamily,
@@ -121,6 +126,11 @@ export function DiffCodeView({
     })
   }, [beginComment, selectedLines])
 
+  const selectRevealedLine = useCallback((path: string, range: SelectedLineRange) => {
+    setReviewCursor({ path, selectedLines: range, draftRange: null })
+  }, [setReviewCursor])
+  const reportRender = useLineReveal(comparisonPath, comparison.mode === 'diff' ? 'additions' : undefined, selectRevealedLine)
+
   const interactionOptions = useMemo(() => ({
     enableLineSelection: DIFF_OPTIONS.enableLineSelection,
     enableGutterUtility: DIFF_OPTIONS.enableGutterUtility,
@@ -132,13 +142,14 @@ export function DiffCodeView({
       }
       beginComment(range)
     },
-    onPostRender: (node: HTMLElement, _instance: unknown, phase: string) => {
+    onPostRender: (node: HTMLElement, instance: unknown, phase: string) => {
       syncDragGuideLifecycle(node, phase, beginComment)
       syncSplitDiffResizeLifecycle(node, phase)
       syncCopyFilePathLifecycle(node, phase, reportCopiedPath)
-      syncReviewCaretLifecycle(node, phase)
+      syncReviewCaretLifecycle(node, phase, onPlaceEditCaret)
+      reportRender(node, instance, phase)
     }
-  }), [beginComment, comparisonPath, setReviewCursor])
+  }), [beginComment, comparisonPath, onPlaceEditCaret, reportRender, setReviewCursor])
 
   // `theme` is deliberately absent: the worker pool resolves it and re-renders
   // every instance on a switch, so repeating it here only bought a second full
@@ -163,12 +174,13 @@ export function DiffCodeView({
     disableLineNumbers: !preferences.showLineNumbers,
     diffStyle,
     hunkSeparators: 'line-info-basic' as const,
-    // Folded context is unreachable text: while editing, every line has to be
-    // there to be typed in. The fold preference comes back on exit.
-    expandUnchanged: editing || !preferences.foldUnchanged,
+    // Editing keeps the reader's folds. Expanding every unchanged line the moment
+    // a click started editing moved the line under the pointer; folded context
+    // is still in the document, and its expand control still opens it.
+    expandUnchanged: !preferences.foldUnchanged,
     collapsedContextThreshold: 4,
     unsafeCSS: INTERACTION_CSS
-  }), [diffStyle, editing, interactionOptions, preferences.editorTheme, preferences.foldUnchanged,
+  }), [diffStyle, interactionOptions, preferences.editorTheme, preferences.foldUnchanged,
     preferences.showLineNumbers, preferences.wordWrap])
 
   if (comparison.mode === 'file' && comparison.newFile != null) {

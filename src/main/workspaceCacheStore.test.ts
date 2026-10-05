@@ -128,7 +128,8 @@ describe('serializeWorkspaceCacheStore', () => {
     expect([...reads.entries()]).toEqual([])
 
     expect(text).toBe(JSON.stringify(current))
-    expect(parseWorkspaceCacheStore(JSON.parse(text))).toEqual(parseWorkspaceCacheStore(JSON.parse(JSON.stringify(current))))
+    const expected = JSON.stringify(current)
+    expect(parseWorkspaceCacheStore(JSON.parse(text))).toEqual(parseWorkspaceCacheStore(JSON.parse(expected)))
     expect(JSON.parse(text).entries[0].selectedPath).toBe('src/file-3.ts')
   })
 

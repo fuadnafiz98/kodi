@@ -2,17 +2,21 @@ import { memo } from 'react'
 
 import { AgentActivityTimeline } from './AgentActivityTimeline'
 import { AnswerActions } from './AgentAnswerActions'
+import { AgentQuestion } from './AgentQuestion'
 import { TurnMeta } from './AgentTurnMeta'
 import { UsageSummary } from './AgentUsageSummary'
 import { MarkdownContent } from '../markdown/MarkdownContent'
-import type { AgentTurnRecord } from './useAgentAnswer'
+import type { AgentReference, AgentTurnRecord } from './useAgentAnswer'
 
 // Archived turns never change again, and their props keep identity, so an
 // answer streaming below them must not re-render the whole history per token.
-export const AgentTurn = memo(function AgentTurn({ turn }: { turn: AgentTurnRecord }): React.JSX.Element {
+export const AgentTurn = memo(function AgentTurn({ turn, onOpenReference }: {
+  turn: AgentTurnRecord
+  onOpenReference?(reference: AgentReference): void
+}): React.JSX.Element {
   return (
     <article className="agent-turn archived">
-      <p className="agent-question">{turn.question}</p>
+      <AgentQuestion question={turn.question} references={turn.references} onOpenReference={onOpenReference} />
       <TurnMeta provider={turn.provider} model={turn.model} effort={turn.effort}
         accessMode={turn.accessMode} running={false} startedAt={turn.startedAt}
         completedAt={turn.completedAt} />

@@ -2366,6 +2366,45 @@ describe('RepositoryService', () => {
     }
   })
 
+  it('fetches a pull request head the clone has never seen', async () => {
+    const upstreamPath = await mkdtemp(join(tmpdir(), 'kodi-pr-upstream-'))
+    const clonePath = await mkdtemp(join(tmpdir(), 'kodi-pr-clone-'))
+    const repository = new RepositoryService()
+    const url = 'https://github.com/acme/repo/pull/7'
+    try {
+      await initRepository(upstreamPath)
+      await writeFile(join(upstreamPath, 'value.py'), '"""\nDocs.\n"""\nvalue = 1\n', 'utf8')
+      await commitAll(upstreamPath, 'Base')
+      const base = (await runGitAllowingDifferences(upstreamPath, 'rev-parse', 'HEAD')).trim()
+      const branch = (await runGitAllowingDifferences(upstreamPath, 'rev-parse', '--abbrev-ref', 'HEAD')).trim()
+      await runGitAllowingDifferences(upstreamPath, 'clone', '--quiet', '--single-branch', '--branch', branch, upstreamPath, clonePath)
+      // Pushed after the clone, reachable only from the pull request's ref.
+      await writeFile(join(upstreamPath, 'value.py'), '"""\nDocs.\n"""\nvalue = 2\n', 'utf8')
+      await commitAll(upstreamPath, 'Head')
+      const head = (await runGitAllowingDifferences(upstreamPath, 'rev-parse', 'HEAD')).trim()
+      await runGitAllowingDifferences(upstreamPath, 'update-ref', 'refs/pull/7/head', head)
+      await runGitAllowingDifferences(upstreamPath, 'reset', '--quiet', '--hard', base)
+      // Fetches go to the local upstream; the push URL names the GitHub repository.
+      await runGitAllowingDifferences(clonePath, 'remote', 'set-url', '--push', 'origin', 'https://github.com/acme/repo.git')
+
+      await repository.open(clonePath)
+      await repository.refresh()
+      expect(await repository.hasRevision(head)).toBe(false)
+
+      expect(await repository.ensurePullRequestRevisions(url, base, head)).toBe(true)
+      expect((await repository.getRevisionFile(head, 'value.py'))?.contents).toBe('"""\nDocs.\n"""\nvalue = 2\n')
+      // Objects only: no branch, no FETCH_HEAD.
+      expect(await runGitAllowingDifferences(clonePath, 'for-each-ref', '--format=%(refname)', 'refs/pull')).toBe('')
+      expect(existsSync(join(clonePath, '.git', 'FETCH_HEAD'))).toBe(false)
+      expect(await repository.ensurePullRequestRevisions('https://github.com/other/repo/pull/7', base, '0'.repeat(40))).toBe(false)
+      expect(await repository.ensurePullRequestRevisions(url, base, 'HEAD')).toBe(false)
+    } finally {
+      repository.dispose()
+      await rm(upstreamPath, { recursive: true, force: true })
+      await rm(clonePath, { recursive: true, force: true })
+    }
+  })
+
   it('updates the status in place when a clean file becomes modified', async () => {
     const repositoryPath = await mkdtemp(join(tmpdir(), 'kodi-save-status-'))
     const repository = new RepositoryService()

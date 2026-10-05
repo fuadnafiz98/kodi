@@ -929,12 +929,6 @@ kbd { border: 1px solid var(--border-strong); border-radius: var(--corner-compac
 .review-state-pill { flex: none; border-radius: var(--corner-inline); padding: 0 5px; background: color-mix(in srgb, currentColor 12%, transparent); color: var(--muted); font-family: var(--font-ui); font-size: var(--text-2xs); font-weight: var(--weight-medium); letter-spacing: var(--track-caps-9); line-height: 16px; text-transform: uppercase; cursor: default; }
 .review-state-pill.state-merged { color: var(--status-merged-text); }
 .review-state-pill.state-closed { color: var(--status-danger-text); }
-/* Pressing Edit swaps one button for the whole action row, which used to drag the
-   file title sideways mid-interaction. The reservation is the measured width of
-   the widest state (Unsaved · undo/redo/preview/discard · Save ⌘S · close, 280px,
-   plus a diff's three view toggles), and the selector matches exactly the state
-   that can grow: an enabled Edit button. */
-.diff-controls:has(.file-edit-start:not(:disabled)) { min-inline-size: 360px; justify-content: flex-end; }
 .diff-display-controls { height: 24px; display: flex; align-items: center; gap: 1px; padding: 0; border: 0; border-radius: 0; background: transparent; }
 .diff-display-controls > .editor-option-controls { height: 24px; gap: 1px; padding: 0; border: 0; border-radius: var(--corner-compact); background: transparent; }
 .diff-display-controls > .editor-option-controls button { width: 24px; height: 24px; border-radius: var(--corner-compact); }
@@ -964,7 +958,10 @@ kbd { border: 1px solid var(--border-strong); border-radius: var(--corner-compac
 }
 .diff-display-controls button[data-tooltip]:hover::after,
 .diff-display-controls button[data-tooltip]:focus-visible::after { opacity: 1; transform: translateY(0); }
-.file-edit-actions { min-width: 0; display: flex; align-items: center; gap: 4px; }
+.file-edit-actions { min-width: 0; display: flex; align-items: center; justify-content: flex-end; gap: 4px; }
+/* The first keystroke brings in Unsaved · discard · Save ⌘S. An editable file
+   keeps their measured width free, so the title never moves while typing. */
+.file-edit-actions[data-editable] { min-inline-size: 184px; }
 /* The box claims its width instantly — that is layout — and only the contents
    fade in. `scale` is load-bearing: this selector outranks the base button rule,
    so omitting it would silently kill press feedback on Cancel and Save. */
@@ -980,38 +977,28 @@ kbd { border: 1px solid var(--border-strong); border-radius: var(--corner-compac
 .file-edit-tools button:hover:not(:disabled):not(.active) { background: var(--control-fill-hover); color: var(--text-secondary); }
 .file-edit-tools button.active { background: var(--control-fill-selected); color: var(--text); }
 .file-edit-tools svg { width: 14px; height: 14px; flex: none; }
-.file-edit-start { height: 24px; display: inline-flex; align-items: center; gap: 5px; border: 0; border-radius: var(--corner-compact); padding: 0 8px 0 6px; background: transparent; color: var(--text-secondary); font-size: var(--text-xs); font-weight: var(--weight-strong); cursor: pointer; }
-.file-edit-start:hover { background: var(--control-fill-hover); color: var(--text); }
-.diff-display-controls > .file-edit-start { height: 24px; border: 0; border-radius: var(--corner-compact); padding: 0 7px 0 5px; background: transparent; color: var(--muted); }
-.diff-display-controls > .file-edit-start:hover:not(:disabled) { background: var(--control-fill-hover); color: var(--text); }
-.diff-display-controls > .file-edit-start:disabled { opacity: var(--disabled-opacity); cursor: default; }
-.file-edit-start svg,
+.diff-display-controls > .file-read-only { margin-right: 4px; }
 .file-edit-save svg { width: var(--icon-md); height: var(--icon-md); flex: none; }
-/* Clean, Save is a quiet label beside its shortcut; dirty, it takes the fill.
-   The fill fades rather than snaps so the first keystroke doesn't flash the bar. */
-.file-edit-save { height: 24px; display: inline-flex; align-items: center; gap: 5px; border: 0; border-radius: var(--corner-compact); padding: 0 3px 0 7px; background: transparent; color: var(--muted); font-size: var(--text-xs); font-weight: var(--weight-strong); cursor: pointer; transition: opacity var(--duration-base) var(--ease-out), transform var(--duration-base) var(--ease-out), background-color var(--duration-base) ease, color var(--duration-base) ease, scale var(--duration-fast) var(--ease-out); }
-.file-edit-save[data-dirty] { background: var(--accent-soft); color: var(--text); }
-.file-edit-save[data-dirty]:hover:not(:disabled) { background: color-mix(in srgb, var(--accent-soft), var(--accent) 12%); }
+/* Save only exists while there is something to save, so it is the one filled
+   control in the bar. */
+.file-edit-save { height: 24px; display: inline-flex; align-items: center; gap: 5px; border: 0; border-radius: var(--corner-compact); padding: 0 3px 0 7px; background: var(--accent-soft); color: var(--text); font-size: var(--text-xs); font-weight: var(--weight-strong); cursor: pointer; transition: opacity var(--duration-base) var(--ease-out), transform var(--duration-base) var(--ease-out), background-color var(--duration-base) ease, scale var(--duration-fast) var(--ease-out); }
+.file-edit-save:hover:not(:disabled) { background: color-mix(in srgb, var(--accent-soft), var(--accent) 12%); }
 .file-edit-save .shortcut-hint {
   min-width: 0;
   height: 16px;
   border: 0;
   border-radius: var(--corner-inline);
   padding: 0 4px;
-  background: transparent;
+  background: color-mix(in srgb, var(--text) 8%, transparent);
   color: var(--faint);
-  transition: background-color var(--duration-base) ease;
   font-size: var(--text-2xs);
   font-weight: var(--weight-medium);
   line-height: 16px;
 }
-.file-edit-save[data-dirty] .shortcut-hint { background: color-mix(in srgb, var(--text) 8%, transparent); }
-/* Disabled Save and Discard keep full opacity for the label's own colour to do
-   the work; a half-transparent filled button reads as broken, not idle. */
+/* Save is only disabled while it saves: the spinner is the state, so the fill
+   stays rather than fading to look broken. */
 .file-edit-actions button:disabled { cursor: default; }
 .file-edit-tools button:disabled { opacity: var(--disabled-opacity); }
-.file-edit-save:disabled:not([data-dirty]) { color: var(--faint); }
-.file-edit-save:disabled[data-dirty] { opacity: var(--disabled-opacity); }
 .file-edit-state { min-width: 50px; display: inline-flex; align-items: center; justify-content: flex-end; gap: 5px; color: var(--faint); font-size: var(--text-2xs); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .file-edit-state.dirty { color: var(--status-warning-text); }
 .file-edit-state.dirty::before { content: ""; width: 6px; height: 6px; flex: none; border-radius: 50%; background: currentColor; }
@@ -1144,6 +1131,18 @@ label[data-review-viewed-toggle][data-review-viewed-toggle] {
 [data-review-viewed-checkbox] > svg { width: var(--icon-sm) !important; height: var(--icon-sm) !important; display: block !important; opacity: 0 !important; transform: scale(0.72) !important; transition: opacity var(--duration-fast) var(--ease-out), transform var(--duration-panel) var(--ease-out); }
 [data-review-viewed-toggle][data-state="checked"] [data-review-viewed-checkbox] > svg { opacity: 1 !important; transform: scale(1) !important; }
 [data-review-viewed-toggle] > span:last-child { transition: color var(--duration-base) var(--ease-out); }
+/* A file edited in the review with something unsaved: the same quiet status
+   and one filled Save as the toolbar's, at header size. */
+[data-review-edit-state][data-review-edit-state] { min-height: 28px !important; display: inline-flex !important; align-items: center !important; gap: 4px !important; flex: 0 0 auto !important; padding-inline-end: 10px !important; font-size: var(--text-xs) !important; white-space: nowrap !important; }
+[data-review-edit-state] .review-edit-status { display: inline-flex; align-items: center; gap: 5px; margin-inline-end: 2px; color: var(--status-warning-text); font-size: var(--text-2xs); }
+[data-review-edit-state] .review-edit-status::before { content: ""; width: 6px; height: 6px; flex: none; border-radius: 50%; corner-shape: squircle; background: currentColor; }
+[data-review-edit-state] button { height: 22px !important; display: inline-flex !important; align-items: center !important; gap: 4px !important; border: 0 !important; border-radius: var(--corner-compact) !important; padding: 0 6px !important; background: transparent !important; color: var(--muted) !important; font: inherit !important; font-weight: var(--weight-strong) !important; cursor: pointer !important; transition: background-color var(--duration-fast) ease, color var(--duration-fast) ease, scale var(--duration-fast) var(--ease-out); }
+[data-review-edit-state] button[data-review-discard] { width: 22px !important; justify-content: center !important; padding: 0 !important; }
+[data-review-edit-state] button[data-review-save] { background: var(--accent-soft) !important; color: var(--text) !important; }
+[data-review-edit-state] button:hover:not(:disabled) { background: var(--control-fill-hover) !important; color: var(--text) !important; }
+[data-review-edit-state] button[data-review-save]:hover:not(:disabled) { background: color-mix(in srgb, var(--accent-soft), var(--accent) 12%) !important; }
+[data-review-edit-state] button:disabled { cursor: default !important; }
+[data-review-edit-state] svg { width: var(--icon-sm) !important; height: var(--icon-sm) !important; flex: none; }
 /* Pierre wraps each slotted header extra in a plain block div, so a block-level
    child (the preview button is display:grid) claims its own line, the Viewed
    label wraps under it, and the header doubles in height. The custom header
@@ -1758,6 +1757,7 @@ button[data-review-markdown-toggle][data-state="preview"] { background: var(--co
   .workspace { --sidebar-width: 250px; grid-template-columns: var(--sidebar-width) 5px minmax(0, 1fr); }
   .comparison-label { display: none; }
   .file-edit-state { display: none; }
+  .file-edit-actions[data-editable] { min-inline-size: 112px; }
   .welcome-layout { grid-template-columns: minmax(290px, 5fr) minmax(340px, 6fr); gap: 48px; }
 }
 
@@ -1771,6 +1771,7 @@ button[data-review-markdown-toggle][data-state="preview"] { background: var(--co
 }
 
 @media (max-width: 900px) {
+  .file-edit-actions[data-editable] { min-inline-size: 64px; }
   .file-edit-save { width: 24px; justify-content: center; padding: 0; }
   .file-edit-save .icon-swap { display: grid; }
   .file-edit-save-label,

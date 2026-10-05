@@ -2,7 +2,8 @@ import { resolve } from 'node:path'
 
 import react from '@vitejs/plugin-react'
 import { defineConfig, externalizeDepsPlugin } from 'electron-vite'
-import type { Plugin } from 'vite'
+import MagicString from 'magic-string'
+import { transformWithEsbuild, type Plugin } from 'vite'
 
 // The renderer displays code and review text from arbitrary repositories, so it
 // declares a policy instead of relying on the default that Electron warns about.
@@ -193,6 +194,92 @@ function lazyThemeNormalizerPlugin(): Plugin {
           THEME_NORMALIZER_CALL,
           `const { normalizeTheme } = await import('shiki/core')\n\t\t${THEME_NORMALIZER_CALL}`
         )
+    }
+  }
+}
+
+// Both viewers ship their stylesheet as one JS string — the build's minifier only
+// shortens code, so its indentation and blank lines reached the boot path
+// verbatim (~15 KB). The CSS minifier gives the same rules in less.
+const LIBRARY_STYLE_MODULES = ['/@pierre/diffs/dist/style.js', '/@pierre/trees/dist/style.js']
+const LIBRARY_STYLE_DECLARATION = /var style_default = ("(?:[^"\\]|\\.)*");/
+
+function minifyLibraryStylesPlugin(): Plugin {
+  return {
+    name: 'kodi:minify-library-styles',
+    enforce: 'pre',
+    async transform(code, id) {
+      const normalized = id.split('?')[0]?.replaceAll('\\', '/') ?? id
+      if (!LIBRARY_STYLE_MODULES.some((module) => normalized.endsWith(module))) return null
+      const declaration = LIBRARY_STYLE_DECLARATION.exec(code)
+      if (declaration?.[1] == null) {
+        throw new Error(`${normalized} no longer declares its stylesheet as \`var style_default = "…"\`. Update kodi:minify-library-styles.`)
+      }
+      const css = JSON.parse(declaration[1]) as string
+      const minified = await transformWithEsbuild(css, 'style.css', { loader: 'css', minify: true, target: 'chrome130' })
+      return { code: code.replace(declaration[1], JSON.stringify(minified.code.trim())), map: null }
+    }
+  }
+}
+
+// Our own stylesheets for the viewers' shadow roots are template strings too
+// (`*_CSS`, `*_STYLES`), and their indentation reached the bundle the same way.
+// Whitespace that spans a line break is one space to CSS, and none beside a
+// brace, `;` or `,`. Only the literal text is touched, never a `${…}` part.
+const CSS_STRING_DECLARATION = /[A-Z0-9](?:_CSS|_STYLES) = `/
+const CSS_STRING_NAME = /(?:_CSS|_STYLES)$/
+
+interface SyntaxNode {
+  type: string
+  start: number
+  end: number
+  [key: string]: unknown
+}
+
+function visitDeclarators(node: unknown, visit: (declarator: SyntaxNode) => void): void {
+  if (node == null || typeof node !== 'object') return
+  if (Array.isArray(node)) {
+    for (const child of node) visitDeclarators(child, visit)
+    return
+  }
+  const syntax = node as SyntaxNode
+  if (syntax.type === 'VariableDeclarator') visit(syntax)
+  for (const key in syntax) visitDeclarators(syntax[key], visit)
+}
+
+function collapseCssWhitespace(raw: string): string {
+  return raw
+    .replace(/\s*\n\s*/g, '\n')
+    .replace(/([{};,])\n|\n(?=[{}])/g, '$1')
+    .replaceAll('\n', ' ')
+}
+
+function collapseCssStringsPlugin(): Plugin {
+  return {
+    name: 'kodi:collapse-css-strings',
+    apply: 'build',
+    transform(code, id) {
+      const file = id.split('?')[0]?.replaceAll('\\', '/') ?? id
+      if (!file.includes('/src/renderer/src/') || !CSS_STRING_DECLARATION.test(code)) return null
+      const output = new MagicString(code)
+      visitDeclarators(this.parse(code), (declarator) => {
+        const name = declarator.id as SyntaxNode | undefined
+        const init = declarator.init as SyntaxNode | null | undefined
+        if (name?.type !== 'Identifier' || !CSS_STRING_NAME.test(String(name.name))) return
+        if (init?.type !== 'TemplateLiteral') return
+        for (const quasi of init.quasis as SyntaxNode[]) {
+          const raw = (quasi.value as { raw: string }).raw
+          if (code.slice(quasi.start, quasi.end) !== raw) {
+            throw new Error(`kodi:collapse-css-strings misread a template string in ${file}.`)
+          }
+          const collapsed = collapseCssWhitespace(raw)
+          if (collapsed === raw) continue
+          if (collapsed === '') output.remove(quasi.start, quasi.end)
+          else output.overwrite(quasi.start, quasi.end, collapsed)
+        }
+      })
+      if (!output.hasChanged()) return null
+      return { code: output.toString(), map: output.generateMap({ hires: true }) }
     }
   }
 }
@@ -389,7 +476,9 @@ export default defineConfig({
       dropShikiWasmPlugin(),
       trimShikiThemesPlugin(),
       lazyHighlighterEnginePlugin(),
-      lazyThemeNormalizerPlugin()
+      lazyThemeNormalizerPlugin(),
+      minifyLibraryStylesPlugin(),
+      collapseCssStringsPlugin()
     ],
     build: {
       minify: 'esbuild',

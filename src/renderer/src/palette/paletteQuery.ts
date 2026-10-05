@@ -1,3 +1,5 @@
+import { parseFileLocation } from './fileLocation'
+
 /**
  * How the palette reads what the reader typed. `>` switches to commands-only,
  * everything else is a file/content query, and a prefix of the top match is a
@@ -13,8 +15,9 @@ export function paletteFilterQuery(query: string): string {
   return trimmed.startsWith('>') ? trimmed.slice(1).trim() : query
 }
 
+/** What the file and content search look for: the path, without `>` or `:42`. */
 export function searchQueryForRepository(query: string): string {
-  return isCommandOnlyQuery(query) ? '' : query
+  return isCommandOnlyQuery(query) ? '' : parseFileLocation(query).path
 }
 
 /**
