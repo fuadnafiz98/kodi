@@ -10,6 +10,7 @@ import type {
 import { githubRepoSlugFromPullRequestUrl } from '../../../shared/pullRequestUrl'
 import type { WorkspaceView } from '../app/AppView'
 import { automaticWorkspaceView, firstOpenPathForSnapshot } from '../explorer/workspaceMode'
+import { forgetReviewGuideWorld } from './reviewGuideView'
 import { worldViewCache } from './worldViewCache'
 
 export interface WorldNavigation {
@@ -778,6 +779,7 @@ export function useReviewWorlds({
     }
     navigationRef.current.delete(worldId)
     dispatch({ type: 'close', worldId, nextWorld })
+    forgetReviewGuideWorld(worldId)
     if (closingActive) restoreNavigation(nextWorld.worldId)
     const closedWorld = current.worlds[index]
     const closingRoot = closedWorld?.source === 'new' ? null : closedWorld?.root ?? null

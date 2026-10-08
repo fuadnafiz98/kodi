@@ -370,6 +370,115 @@ export async function scrollGesture(cdp, { x, y }, distance, speed = 2_000) {
   }, 60_000)
 }
 
+/**
+ * Every `wheel` listener that can block a scroll over the element `expression`
+ * evaluates to: the element, each ancestor across shadow hosts, the document
+ * and the window. One non-passive listener anywhere on that path makes
+ * Chromium run the main thread before it may scroll, and it then scrolled the
+ * whole gesture there (`SCROLL_MAIN_THREAD`): every late main frame was a frame
+ * in which the text did not move.
+ */
+export async function blockingWheelListeners(cdp, expression) {
+  const result = await cdp.send('Runtime.evaluate', {
+    includeCommandLineAPI: true,
+    returnByValue: true,
+    expression: `(() => {
+      const start = ${expression}
+      if (start == null) return null
+      const nodes = []
+      for (let node = start; node != null; node = node.parentNode ?? node.host ?? null) nodes.push(node)
+      nodes.push(window)
+      const blocking = []
+      for (const node of nodes) {
+        let listeners = []
+        try { listeners = getEventListeners(node).wheel ?? [] } catch {}
+        for (const listener of listeners) {
+          if (listener.passive) continue
+          blocking.push({
+            on: node === window ? 'window' : node === document ? 'document' : node.nodeName + (node.id ? '#' + node.id : '') + (typeof node.className === 'string' && node.className ? '.' + node.className.trim().split(/\\s+/).join('.') : ''),
+            capture: listener.useCapture
+          })
+        }
+      }
+      return blocking
+    })()`
+  })
+  if (result.exceptionDetails != null) throw new Error(result.exceptionDetails.text ?? 'Listener probe failed.')
+  return result.result.value
+}
+
+// What the compositor presented, frame by frame: the closest a trace gets to
+// what the reader saw. Needs a visible window (a hidden one never paints).
+const COMPOSITOR_CATEGORIES = ['cc', 'benchmark', 'input', 'disabled-by-default-devtools.timeline.frame']
+
+export async function startCompositorTrace(cdp) {
+  const events = []
+  let complete = null
+  const finished = new Promise((resolve) => { complete = resolve })
+  const listener = (event) => {
+    const message = JSON.parse(event.data)
+    if (message.method === 'Tracing.dataCollected') events.push(...message.params.value)
+    if (message.method === 'Tracing.tracingComplete') complete()
+  }
+  cdp.socket.addEventListener('message', listener)
+  cdp.__compositorTrace = { events, finished, listener }
+  await cdp.send('Tracing.start', { transferMode: 'ReportEvents', traceConfig: { includedCategories: COMPOSITOR_CATEGORIES } })
+}
+
+export async function stopCompositorTrace(cdp) {
+  const trace = cdp.__compositorTrace
+  if (trace == null) return []
+  cdp.__compositorTrace = null
+  await cdp.send('Tracing.end')
+  await Promise.race([trace.finished, Bun.sleep(30_000)])
+  cdp.socket.removeEventListener('message', trace.listener)
+  return trace.events
+}
+
+/**
+ * The frames of a trace that carried a scroll. A late one is a frame dropped,
+ * or one shown without the main thread's update while the main thread was the
+ * one scrolling: in both, the text stayed where it was. On a compositor
+ * scroll a partial frame still moves the text, so it does not count.
+ */
+export function summarizeScrollFrames(events) {
+  const byState = {}
+  let scrollFrames = 0
+  let mainThread = 0
+  let late = 0
+  let missingContent = 0
+  for (const event of events) {
+    if (event.name !== 'PipelineReporter' || event.ph !== 'b') continue
+    const frame = event.args?.frame_reporter
+    if (frame == null || frame.scroll_state == null || frame.scroll_state === 'SCROLL_NONE') continue
+    if (frame.state === 'STATE_NO_UPDATE_DESIRED') continue
+    scrollFrames += 1
+    const key = `${frame.state}|${frame.scroll_state}`
+    byState[key] = (byState[key] ?? 0) + 1
+    const onMain = frame.scroll_state === 'SCROLL_MAIN_THREAD'
+    if (onMain) mainThread += 1
+    if (frame.state === 'STATE_DROPPED' || (onMain && frame.state === 'STATE_PRESENTED_PARTIAL')) late += 1
+    if (frame.has_missing_content || frame.checkerboarded_needs_raster || frame.checkerboarded_needs_record) missingContent += 1
+  }
+  const share = (count) => scrollFrames === 0 ? 0 : Math.round((count / scrollFrames) * 10_000) / 100
+  return { scrollFrames, mainThreadPercent: share(mainThread), latePercent: share(late), missingContent, byState }
+}
+
+/**
+ * A second launch on `profile` with `args` (`--kodi-url=…`), the way the
+ * bundled `kodi` script hands a running app something to open. Resolves with
+ * its exit code, or null when it became the app itself (and was killed).
+ */
+export async function openInRunningApp(profile, args, timeoutMs = 10_000) {
+  const child = Bun.spawn([
+    ...appBinary(), ...(process.env.KODI_E2E_APP == null ? ['.'] : []),
+    `--user-data-dir=${profile}`, ...args
+  ], { cwd: process.env.KODI_E2E_APP_DIR ?? REPO_ROOT, env: appEnvironment(), stdout: 'ignore', stderr: 'ignore' })
+  const code = await Promise.race([child.exited, Bun.sleep(timeoutMs).then(() => null)])
+  if (code == null) child.kill('SIGKILL')
+  return code
+}
+
 /** The app's own work counters (see src/renderer/src/perf/kodiCounters.ts). */
 export async function counters(cdp) {
   return await cdp.tryEval('({ ...(window.__kodiMetrics ?? {}) })') ?? {}

@@ -17,6 +17,12 @@
   font-size: var(--text-md);
   line-height: 1.45;
 }
+.scm-message-wrap { position: relative; display: flex; }
+.scm-message-wrap .scm-message { padding-right: 34px; }
+.scm-suggest { position: absolute; top: 5px; right: 5px; display: grid; place-items: center; width: 24px; height: 24px; border: 0; border-radius: var(--corner-control); background: transparent; color: var(--muted); cursor: pointer; }
+.scm-suggest:hover:not(:disabled) { background: var(--control-fill-hover); color: var(--text); }
+.scm-suggest:disabled { opacity: 0.4; cursor: default; }
+.scm-suggest svg { width: 14px; height: 14px; }
 .scm-message::placeholder { color: var(--faint); }
 .scm-message:focus-visible { border-color: var(--focus); box-shadow: var(--focus-glow); outline: 0; }
 .scm-message[aria-invalid="true"] { border-color: color-mix(in srgb, var(--status-danger-text) 60%, transparent); }

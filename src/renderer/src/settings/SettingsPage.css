@@ -164,3 +164,5 @@
 .inbox-repo-suggestions > button { display: inline-flex; align-items: center; gap: 5px; height: 24px; border: 1px solid var(--border); border-radius: var(--corner-control); padding: 0 9px; background: transparent; color: var(--muted); font-family: var(--font-mono); font-size: var(--text-2xs); cursor: pointer; }
 .inbox-repo-suggestions > button:hover { border-color: var(--border-strong); background: var(--control-fill); color: var(--text-secondary); }
 .inbox-repo-suggestions > button svg { width: 11px; height: 11px; }
+.settings-editor-command { flex: 0 1 260px; }
+

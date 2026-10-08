@@ -51,10 +51,17 @@ describe('findClosestDragLine', () => {
 
 describe('DRAG_SELECTION_CSS', () => {
   test('keeps a continuous gutter rail and does not paint over the diff mix', () => {
-    expect(DRAG_SELECTION_CSS).toContain('[data-selected-line]::after')
+    expect(DRAG_SELECTION_CSS).toContain('box-shadow: inset -2px 0 var(--accent)')
     expect(DRAG_SELECTION_CSS).not.toContain('top: 50%')
     expect(DRAG_SELECTION_CSS).not.toContain('bottom: 50%')
     expect(DRAG_SELECTION_CSS).not.toContain('background: color-mix(in srgb, var(--accent) 16%, transparent) !important')
+  })
+
+  test('leaves the number cell\'s pseudo-elements to the unified line numbers', () => {
+    // UNIFIED_LINE_NUMBERS_CSS draws the old line number in ::after; a selection
+    // rail there merged with it into a 3ch accent block over the number.
+    expect(DRAG_SELECTION_CSS).not.toContain('::after')
+    expect(DRAG_SELECTION_CSS).not.toContain('::before')
   })
 
   test('leaves utility-slot geometry to the viewer lane rules', () => {

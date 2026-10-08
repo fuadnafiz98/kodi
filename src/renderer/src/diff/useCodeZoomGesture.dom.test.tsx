@@ -31,6 +31,7 @@ test('updates zoom through CSS during a gesture and commits React state once on 
         deltaMode: { value: 0 }, deltaY: { value: -1 }
       })
       surface.dispatchEvent(wheel)
+      expect(wheel.defaultPrevented).toBe(false)
     }
   })
 
@@ -47,4 +48,30 @@ test('updates zoom through CSS during a gesture and commits React state once on 
   expect(surface.style.getPropertyValue(LIVE_CODE_FONT_SIZE_PROPERTY)).toBe('')
   expect(surface.style.getPropertyValue(LIVE_CODE_LINE_HEIGHT_PROPERTY)).toBe('')
   expect(renderCount).toBe(2)
+})
+
+test('listens to the wheel passively, so scrolling over code never waits for the main thread', () => {
+  const registrations: Array<{ target: HTMLElement, type: string, options: unknown }> = []
+  const addEventListener = HTMLElement.prototype.addEventListener
+  HTMLElement.prototype.addEventListener = function (this: HTMLElement, type: string, listener: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions) {
+    registrations.push({ target: this, type, options })
+    addEventListener.call(this, type, listener, options)
+  }
+
+  function ZoomSurface(): React.JSX.Element {
+    const zoom = useCodeZoomGesture(13, 20)
+    return <section ref={zoom.surfaceRef}>Code</section>
+  }
+
+  let surface: HTMLElement | null = null
+  try {
+    surface = render(<ZoomSurface />).container.querySelector('section')
+  } finally {
+    HTMLElement.prototype.addEventListener = addEventListener
+  }
+
+  // React adds its own (passive) wheel listener on the root; only the surface's matter here.
+  const wheel = registrations.filter((registration) => registration.target === surface && registration.type === 'wheel')
+  expect(wheel).toHaveLength(1)
+  expect(wheel[0]?.options).toMatchObject({ passive: true })
 })

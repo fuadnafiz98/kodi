@@ -133,7 +133,7 @@ export function useGitWorkflow({
   const [inboxEntry, setInboxEntry] = useState<PanelCacheEntry<PullRequestInboxSnapshot>>(emptyEntry)
   const [loadingInbox, setLoadingInbox] = useState(false)
   const [actionKey, setActionKey] = useState<string | null>(null)
-  const [submittingReview, setSubmittingReview] = useState(false)
+  const [submittingReview, setSubmittingReview] = useState<PullRequestReviewEvent | null>(null)
   const [submissionMessage, setSubmissionMessage] = useState<string | null>(null)
   const activateRepository = useCallback(
     (root: string) => requireRepositoryApi().activateRepository(root),
@@ -958,7 +958,7 @@ export function useGitWorkflow({
     const selector = repositoryReview.selector
     if (!(await confirm(reviewSubmissionRequest(reviewEvent, pullRequest, comments.length)))) return false
 
-    setSubmittingReview(true)
+    setSubmittingReview(reviewEvent)
     setSubmissionMessage(null)
     onError(null)
     try {
@@ -984,7 +984,7 @@ export function useGitWorkflow({
       onError(getErrorMessage(error))
       return false
     } finally {
-      setSubmittingReview(false)
+      setSubmittingReview(null)
     }
   }, [activeReviewWorld, confirm, onError, repositoryReview,
     writeInboxEntry, writeIntegrationEntry])

@@ -1,8 +1,33 @@
 diff --git a/dist/components/CodeView.js b/dist/components/CodeView.js
-index 051e7d0..eb6d780 100644
+index 051e7d0..dcfd82a 100644
 --- a/dist/components/CodeView.js
 +++ b/dist/components/CodeView.js
-@@ -1590,8 +1590,7 @@ var CodeView = class CodeView {
+@@ -131,7 +131,11 @@ var CodeView = class CodeView {
+ 	static __lastScrollPosition = 0;
+ 	type = "advanced";
+ 	config = {
+-		overscrollSize: 200,
++		// Kodi: 600 (was 200). The review scrolls on the compositor thread, which
++		// can run ahead of the rows the main thread has drawn: at 200 a 4,000 px/s
++		// fling outran them by ~160-300 px of blank rows; at 600 it stays ≥120 px
++		// ahead and flings cost less main-thread time (the window moves less often).
++		overscrollSize: 600,
+ 		intersectionObserverMargin: 0,
+ 		resizeDebugging: false
+ 	};
+@@ -236,7 +240,10 @@ var CodeView = class CodeView {
+ 		return this.options.smoothScrollSettings ?? DEFAULT_SMOOTH_SCROLL_SETTINGS;
+ 	}
+ 	shouldDisablePointerEvents() {
+-		return this.options.pointerEventsOnScroll !== true;
++		// Kodi: off unless asked for. Writing `pointer-events` on the sticky
++		// container at the start and end of every scroll restyled the whole
++		// rendered review twice a pull — on a slow read, every pull.
++		return this.options.pointerEventsOnScroll === false;
+ 	}
+ 	shouldValidateItemHeights() {
+ 		return DIFFS_DEVELOPMENT_BUILD && this.options.__devOnlyValidateItemHeights === true;
+@@ -1590,8 +1597,7 @@ var CodeView = class CodeView {
  		this.renderState.stickyTop = stickyTop;
  		this.renderState.stickyBottom = stickyBottom;
  		this.stickyOffset.style.height = `${stickyTop}px`;
@@ -12,7 +37,7 @@ index 051e7d0..eb6d780 100644
  		this.stickyContainer.style.top = `${stickyJitter}px`;
  		this.stickyContainer.style.bottom = `${stickyJitter + itemMetrics.diffHeaderHeight}px`;
  	}
-@@ -1737,11 +1736,23 @@ var CodeView = class CodeView {
+@@ -1737,11 +1743,23 @@ var CodeView = class CodeView {
  				skippedItem ??= item;
  				continue;
  			}
@@ -41,7 +66,7 @@ index 051e7d0..eb6d780 100644
  			const localViewportTop = this.getScrollAnchorViewportTop(absoluteItemTop, scrollTop) - absoluteItemTop;
  			const lineAnchor = item.instance.getNumericScrollAnchor(localViewportTop);
  			if (lineAnchor != null) {
-@@ -1751,6 +1762,8 @@ var CodeView = class CodeView {
+@@ -1751,6 +1769,8 @@ var CodeView = class CodeView {
  					id: item.item.id,
  					lineNumber: lineAnchor.lineNumber,
  					side: lineAnchor.side,
@@ -50,7 +75,7 @@ index 051e7d0..eb6d780 100644
  					viewportOffset: absoluteLineTop - scrollTop
  				};
  			}
-@@ -1774,12 +1787,15 @@ var CodeView = class CodeView {
+@@ -1774,12 +1794,15 @@ var CodeView = class CodeView {
  	resolveAnchoredScrollTop(anchor) {
  		const item = this.idToItem.get(anchor.id);
  		if (item == null) return;

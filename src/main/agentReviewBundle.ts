@@ -187,7 +187,7 @@ export async function prepareAgentReviewContext(options: {
   cached: CachedReviewPatch | null
 }): Promise<string> {
   const { snapshot, subject, remembered, cached } = options
-  const review = withCachedPatch(remembered, rememberedFromCache(cached, subject))
+  const review = resolveRememberedReview(remembered, cached, subject)
   if (snapshot == null || snapshot.kind !== 'git') {
     return formatAgentReviewInstructions({
       subject,
@@ -277,6 +277,15 @@ function formatAgentReviewBrief(
     ...files,
     ...overflow
   ].filter((line): line is string => line != null).join('\n')
+}
+
+/** The review a subject names: remembered in memory, or read back from the pull-request cache. */
+export function resolveRememberedReview(
+  remembered: RememberedAgentReview | null,
+  cached: CachedReviewPatch | null,
+  subject: AgentRequestSubject
+): RememberedAgentReview | null {
+  return withCachedPatch(remembered, rememberedFromCache(cached, subject))
 }
 
 // A review too big to keep its patch in memory is remembered for its title and

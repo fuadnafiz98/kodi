@@ -35,7 +35,7 @@ const AGENT_PROVIDERS = new Set<AgentAskRequest['provider']>(['claude', 'codex']
 const AGENT_ACCESS_MODES = new Set<AgentAccessMode>(['review', 'auto', 'full-access'])
 const AGENT_SUBJECT_SOURCES = new Set<AgentRequestSubject['source']>(['workingTree', 'patch', 'since'])
 
-function decodeAgentSubject(value: unknown): AgentRequestSubject | null {
+export function decodeAgentSubject(value: unknown): AgentRequestSubject | null {
   if (typeof value !== 'object' || value == null || Array.isArray(value)) return null
   const prototype = Object.getPrototypeOf(value) as unknown
   if (prototype !== Object.prototype && prototype !== null) return null

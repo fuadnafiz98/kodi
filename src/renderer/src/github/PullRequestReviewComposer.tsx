@@ -7,7 +7,8 @@ import { PullRequestReviewNotices } from './PullRequestReviewNotices'
 export interface PullRequestReviewComposerProps {
   /** `finish` sits at the foot of the review; `toolbar` is the expanded bar. */
   variant: 'toolbar' | 'finish'
-  submitting: boolean
+  /** The decision being posted to GitHub, or null. */
+  submitting: PullRequestReviewEvent | null
   message: string | null
   inlineCommentCount: number
   orphanedCommentCount: number
@@ -60,7 +61,7 @@ export function PullRequestReviewComposer({
       <PullRequestReviewActions
         showCancel={!finish}
         submitting={submitting}
-        blocked={submitting || orphanedCommentCount > 0}
+        blocked={submitting != null || orphanedCommentCount > 0}
         hasReviewContent={body.trim() !== '' || inlineCommentCount > 0}
         viewerCanSubmitDecision={viewerCanSubmitDecision}
         onCancel={onCancel}

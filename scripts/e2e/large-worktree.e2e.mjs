@@ -6,10 +6,15 @@
 //
 // Before the fix this suite was written for, collapse-all froze the renderer for
 // 15 s on this fixture (one tree notification per folder, O(folders²)).
+//
+// The review over these ~24k files is checked once at the end: a status change
+// with it open must not drop it to one request per file. A tick cancels the
+// patch still being built for the older snapshot; the review asked again three
+// times, then fell back to 21k–27k single-file requests.
 import { writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
-import { createRepository, deepCount, git, launchApp, press, removeLater, runSuite, writeTree } from './harness.mjs'
+import { createRepository, deepCount, git, launchApp, launchSecondInstance, press, removeLater, runSuite, writeTree } from './harness.mjs'
 
 // Folder-dense on purpose: the cost that froze the window grew with the number
 // of folders, not files. 240 × 25 leaf folders of 4 files is ~24k files in ~6.2k
@@ -20,6 +25,17 @@ const CYCLES = 5
 // Heap a repeated expand/collapse may keep. A leak of one projection per cycle
 // on this tree is tens of MB.
 const HEAP_GROWTH_BUDGET_MB = 25
+
+const counter = (name) => `(window.__kodiMetrics?.${name} ?? 0)`
+
+/** ⌘K to `path` (from the review, a clean file opens on its own). */
+async function openFromPalette(cdp, path) {
+  await cdp.combo('k', 'KeyK', 75, 4)
+  await cdp.waitFor(`document.activeElement === document.querySelector('#command-palette-input')`, 8_000, 4)
+  await cdp.send('Input.insertText', { text: path })
+  await cdp.waitFor(`[...document.querySelectorAll('.command-palette-results button')].some((row) => row.textContent.includes(${JSON.stringify(path)}))`, 8_000, 8)
+  await cdp.enter()
+}
 
 const fileCountExpression = (atLeast) => `(() => {
   const text = document.querySelector('.sidebar-file-count')?.textContent ?? ''
@@ -70,7 +86,11 @@ await runSuite('large-worktree', async (suite, cleanup) => {
   suite.record('git badges survive expand/collapse', Number(badged) > 0, { badgedRows: badged })
 
   // A very dirty repository: every one of these ~24k files is a status, and a
-  // tick that changes one of them used to re-sort and re-walk them all.
+  // tick that changes one of them used to re-sort and re-walk them all. These
+  // time the tree, so the window shows one clean file rather than the review
+  // it opens on (the review's own tick is checked at the end).
+  await openFromPalette(cdp, 'README.md')
+  await cdp.waitFor(`document.querySelector('.diff-stale-host') != null && document.querySelector('.multi-file-code-view') == null`, 10_000, 16)
   for (let tick = 0; tick < 3; tick += 1) {
     await suite.watch(app, `status tick ${tick + 1} over ~24k changed files stays cheap`, async () => {
       if (tick === 0) await writeFile(join(fixture, 'README.md'), '# changed\n')
@@ -94,6 +114,22 @@ await runSuite('large-worktree', async (suite, cleanup) => {
     () => press(cdp, `document.querySelector('[data-section="staged"] .scm-section-button').click()`),
     `document.querySelector('[data-section="staged"]') == null
       && Number(document.querySelector('[data-section="unstaged"] .scm-count')?.textContent ?? 0) >= ${burstCount - 3}`)
+
+  // `kodi <folder>` with the folder in front on one file goes back to its review.
+  await press(cdp, `document.querySelector('.source-control-titlebar-button').click()`)
+  await launchSecondInstance(app.profile, fixture)
+  const inReview = await cdp.waitFor(`document.querySelector('.multi-file-code-view') != null`, 15_000, 16)
+  await Bun.sleep(3_000)
+  const before = await cdp.eval(`({ fallbacks: ${counter('reviewPagedFallbacks')}, requests: ${counter('comparisonRequests')} })`)
+  // Two writes 400 ms apart: the second lands while the first one's patch builds.
+  await writeFile(join(fixture, 'README.md'), '# changed again\n')
+  await Bun.sleep(400)
+  await writeFile(join(fixture, 'src/added.ts'), 'export const added = true\n')
+  await Bun.sleep(5_000)
+  const after = await cdp.eval(`({ fallbacks: ${counter('reviewPagedFallbacks')}, requests: ${counter('comparisonRequests')}, reason: window.__kodiLastReason?.reviewPagedFallbacks ?? null })`)
+  suite.record('a status change with the review over ~24k files open keeps its patch, not one request per file',
+    !inReview.timedOut && after.fallbacks === before.fallbacks && after.requests - before.requests < 50,
+    { inReview: !inReview.timedOut, runFallbacks: before.fallbacks, runComparisonRequests: before.requests, fallbacks: after.fallbacks - before.fallbacks, comparisonRequests: after.requests - before.requests, reason: after.reason })
 
   const banner = await cdp.tryEval(`document.querySelector('.error-banner')?.textContent ?? null`)
   suite.record('no error banner', banner == null, { banner })

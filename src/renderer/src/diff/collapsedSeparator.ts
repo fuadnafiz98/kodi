@@ -1,7 +1,10 @@
 export const COLLAPSED_SEPARATOR_CSS = `
   ${/* Pierre mounts the same separator in the gutter and the content column, then
-     hides the content copy. The label belongs in the content column, which is
-     always a real track. */ ''}
+     hides the content copy. The expand chevrons stay in the gutter, right under
+     the line numbers they open, as GitHub draws them: in the content column they
+     sat a track past the numbers, ~25 px from what they expand. The label belongs
+     in the content column, which is always a real track, so the gutter copy keeps
+     only its buttons and the content copy only its label. */ ''}
 
   [data-separator="line-info-basic"] {
     border-block: 0;
@@ -9,42 +12,28 @@ export const COLLAPSED_SEPARATOR_CSS = `
   }
 
   [data-gutter] [data-separator="line-info-basic"] [data-separator-wrapper] {
+    display: flex;
+    justify-content: flex-end;
     width: auto;
+    height: 100%;
     background: inherit;
   }
 
   [data-gutter] [data-separator="line-info-basic"] [data-separator-content],
-  [data-gutter] [data-separator="line-info-basic"] [data-expand-button] {
+  [data-content] [data-separator="line-info-basic"] [data-expand-button] {
     display: none;
   }
 
   [data-content] [data-separator="line-info-basic"] [data-separator-wrapper] {
     display: grid;
-    grid-template-columns: 28px minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr);
     width: auto;
     inset-inline: 0;
     background: inherit;
   }
 
-  [data-content] [data-separator="line-info-basic"] [data-separator-wrapper][data-separator-multi-button] {
-    grid-template-columns: 28px 28px minmax(0, 1fr);
-  }
-
-  ${/* Pierre pins the label to column 2. With one button that is the code column;
-     with two it is the second button's 28px track, so the count and the down
-     chevron shared one cell — the count clipped to nothing and the seam
-     hairlines drew across the chevron. The label belongs in the last track
-     either way, and naming it beats auto-placement: a hidden button is not a
-     grid item, so the label used to slide a track left in the pane that hides
-     its controls. */ ''}
   [data-content] [data-separator="line-info-basic"] [data-separator-content] {
     grid-row: 1;
-    grid-column: -2 / -1;
-  }
-
-  ${/* Nothing occupies the button tracks in the pane whose controls are hidden, so
-     the seam runs the full width and the row reads across the divider. */ ''}
-  [data-diff-type="split"] [data-additions] [data-content] [data-separator="line-info-basic"] [data-separator-content] {
     grid-column: 1 / -1;
   }
 
@@ -62,7 +51,7 @@ export const COLLAPSED_SEPARATOR_CSS = `
     width: 100%;
     justify-content: flex-start;
     gap: 8px;
-    padding-inline: 12px;
+    padding-inline: 4px 12px;
     background: inherit;
   }
 
@@ -92,7 +81,7 @@ export const COLLAPSED_SEPARATOR_CSS = `
   ${/* Split mounts the same hunk in both panes. One count and one set of controls;
      the new pane keeps the hairline so the row still reads across the divider. */ ''}
   [data-diff-type="split"] [data-additions] [data-unmodified-lines],
-  [data-diff-type="split"] [data-additions] [data-expand-button] {
+  [data-diff-type="split"] [data-additions] [data-separator="line-info-basic"] [data-expand-button] {
     display: none;
   }
 
@@ -100,7 +89,10 @@ export const COLLAPSED_SEPARATOR_CSS = `
     color: var(--text-secondary);
   }
 
-  [data-content] [data-separator="line-info-basic"] [data-expand-button] {
+  [data-gutter] [data-separator="line-info-basic"] [data-expand-button] {
+    display: flex;
+    align-items: center;
+    justify-content: center;
     position: relative;
     min-width: 28px;
     border: 0;
@@ -108,7 +100,7 @@ export const COLLAPSED_SEPARATOR_CSS = `
     color: var(--text-secondary);
   }
 
-  [data-content] [data-separator="line-info-basic"] [data-expand-button]::before {
+  [data-gutter] [data-separator="line-info-basic"] [data-expand-button]::before {
     content: "";
     position: absolute;
     inset: 2px;
@@ -118,32 +110,19 @@ export const COLLAPSED_SEPARATOR_CSS = `
     pointer-events: none;
   }
 
-  [data-content] [data-separator="line-info-basic"] [data-expand-button]:hover {
+  [data-gutter] [data-separator="line-info-basic"] [data-expand-button]:hover {
     background: transparent;
     color: var(--text);
   }
 
-  [data-content] [data-separator="line-info-basic"] [data-expand-button]:hover::before {
+  [data-gutter] [data-separator="line-info-basic"] [data-expand-button]:hover::before {
     background: var(--control-fill-hover);
   }
 
-  [data-content] [data-separator="line-info-basic"] [data-expand-button] [data-icon] {
+  [data-gutter] [data-separator="line-info-basic"] [data-expand-button] [data-icon] {
     position: relative;
     width: 14px;
     height: 14px;
   }
 
-  @media (pointer: fine) {
-    [data-content] [data-separator="line-info-basic"] [data-separator-wrapper][data-separator-multi-button] {
-      grid-template-rows: 100%;
-    }
-
-    [data-content] [data-separator="line-info-basic"] [data-separator-multi-button] [data-expand-up] {
-      grid-area: 1 / 1;
-    }
-
-    [data-content] [data-separator="line-info-basic"] [data-separator-multi-button] [data-expand-down] {
-      grid-area: 1 / 2;
-    }
-  }
 `

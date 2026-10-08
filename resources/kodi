@@ -1,39 +1,161 @@
 #!/bin/zsh
-# kodi — open a folder in Kodi. `kodi .` opens the current directory.
+# kodi — open a folder, a pull request, a commit or an agent's guide in Kodi.
+#
+#   kodi [folder]                      the folder (default: .)
+#   kodi pr <number> [folder]          that pull request of the folder's repository
+#   kodi <pull request URL>            a GitHub pull request
+#   kodi <commit> [folder]             a commit's review, by any ref git resolves
+#   kodi --guide-file <json> [folder]  the folder's review on a guide an agent wrote
+#   kodi --guide-format                how to write that guide (text and JSON schema)
+#   kodi --completions zsh|bash        a completion script
 #
 # Ships inside the app bundle at Contents/Resources/kodi; the installer links
 # it onto your PATH. It talks to the app through LaunchServices (`open`), so a
-# running Kodi receives the folder through the normal single-instance flow.
+# running Kodi receives the request through the normal single-instance flow.
 set -euo pipefail
 
 # ${0:A} resolves the PATH symlink back to the bundled script, so this always
 # lands on Kodi.app no matter where the link lives.
-app="$(cd "$(dirname "${0:A}")/../.." >/dev/null && pwd)"
-target="${1:-.}"
+resources="$(cd "$(dirname "${0:A}")" >/dev/null && pwd)"
+app="$(cd "$resources/../.." >/dev/null && pwd)"
 
-case "$target" in
-  -h|--help)
-    echo "usage: kodi [folder]"
-    exit 0
-    ;;
-  -*)
-    echo "kodi: unknown option: $target" >&2
-    exit 2
-    ;;
-esac
+usage() {
+  cat <<'USAGE'
+usage: kodi [folder]
+       kodi pr <number> [folder]
+       kodi <pull request URL>
+       kodi <commit> [folder]
+       kodi --guide-file <json> [--claude-session <id>] [folder]
+       kodi --guide-format
+       kodi --completions zsh|bash
+USAGE
+}
 
-if [[ "$target" = /* ]]; then
-  resolved="$target"
+completions() {
+  case "${1:-}" in
+    zsh)
+      cat <<'ZSH'
+#compdef kodi
+_kodi() {
+  _arguments \
+    '(- *)'{-h,--help}'[show usage]' \
+    '(- *)--guide-format[print how to write a review guide]' \
+    '(- *)--completions[print a completion script]:shell:(zsh bash)' \
+    '--guide-file[open on a guide an agent wrote]:guide file:_files -g "*.json"' \
+    '--claude-session[the Claude Code session that wrote the guide]:session id:' \
+    '1: :->target' \
+    '2: :_files -/'
+  case $state in
+    target) _alternatives 'commands:command:((pr\:"open a pull request by number"))' 'folders:folder:_files -/' ;;
+  esac
+}
+compdef _kodi kodi
+ZSH
+      ;;
+    bash)
+      cat <<'BASH'
+_kodi() {
+  local current="${COMP_WORDS[COMP_CWORD]}" previous="${COMP_WORDS[COMP_CWORD-1]}"
+  case "$previous" in
+    --guide-file) COMPREPLY=($(compgen -f -X '!*.json' -- "$current")); return ;;
+    --completions) COMPREPLY=($(compgen -W "zsh bash" -- "$current")); return ;;
+  esac
+  if [[ "$current" == -* ]]; then
+    COMPREPLY=($(compgen -W "--help --guide-format --guide-file --claude-session --completions" -- "$current"))
+  else
+    COMPREPLY=($(compgen -d -- "$current"))
+    [[ $COMP_CWORD -eq 1 ]] && COMPREPLY+=($(compgen -W "pr" -- "$current"))
+  fi
+}
+complete -o filenames -F _kodi kodi
+BASH
+      ;;
+    *)
+      echo "kodi: --completions takes zsh or bash" >&2
+      exit 2
+      ;;
+  esac
+}
+
+resolve_folder() {
+  local target="$1" resolved
+  if [[ "$target" = /* ]]; then
+    resolved="$target"
+  else
+    resolved="$(cd "$target" 2>/dev/null && pwd)" || {
+      echo "kodi: no such folder: $target" >&2
+      exit 1
+    }
+  fi
+  [[ -d "$resolved" ]] || { echo "kodi: not a folder: $target" >&2; exit 1; }
+  print -r -- "$resolved"
+}
+
+guide_file=""
+claude_session=""
+positionals=()
+while (( $# > 0 )); do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    --guide-format)
+      cat "$resources/review-guide/format.md"
+      echo
+      cat "$resources/review-guide/schema.json"
+      exit 0
+      ;;
+    --completions) completions "${2:-}"; exit 0 ;;
+    --guide-file)
+      (( $# >= 2 )) || { echo "kodi: --guide-file needs a file" >&2; exit 2; }
+      guide_file="$2"; shift 2; continue ;;
+    --guide-file=*) guide_file="${1#--guide-file=}"; shift; continue ;;
+    --claude-session)
+      (( $# >= 2 )) || { echo "kodi: --claude-session needs an id" >&2; exit 2; }
+      claude_session="$2"; shift 2; continue ;;
+    --claude-session=*) claude_session="${1#--claude-session=}"; shift; continue ;;
+    --) shift; positionals+=("$@"); break ;;
+    -*) echo "kodi: unknown option: $1" >&2; exit 2 ;;
+    *) positionals+=("$1"); shift ;;
+  esac
+done
+
+# Each value stays one `--kodi-x=<value>` token: a second-instance argv reaches
+# the running app switch-first, which would detach a space-separated value.
+args=()
+first="${positionals[1]:-}"
+
+if [[ "$first" == "pr" ]]; then
+  number="${positionals[2]:-}"
+  [[ "$number" =~ '^[0-9]+$' ]] || { echo "usage: kodi pr <number> [folder]" >&2; exit 2; }
+  folder="$(resolve_folder "${positionals[3]:-.}")"
+  command -v gh >/dev/null || { echo "kodi: kodi pr needs the GitHub CLI (gh)" >&2; exit 1; }
+  url="$(cd "$folder" && gh pr view "$number" --json url -q .url)" || exit 1
+  args+=("--kodi-url=$url")
+elif [[ "$first" =~ '^https?://' ]]; then
+  [[ "$first" =~ '/pull/[0-9]+' ]] || { echo "kodi: not a pull request URL: $first" >&2; exit 2; }
+  args+=("--kodi-url=$first")
+elif [[ -n "$first" && ! -e "$first" ]] && \
+    sha="$(git -C "$(resolve_folder "${positionals[2]:-.}")" rev-parse --verify --quiet "$first^{commit}" 2>/dev/null)"; then
+  folder="$(resolve_folder "${positionals[2]:-.}")"
+  args+=("--kodi-folder=$folder" "--kodi-ref=$sha")
 else
-  resolved="$(cd "$target" 2>/dev/null && pwd)" || {
-    echo "kodi: no such folder: $target" >&2
-    exit 1
-  }
+  folder="$(resolve_folder "${first:-.}")"
+  args+=("--kodi-folder=$folder")
 fi
-[[ -d "$resolved" ]] || { echo "kodi: not a folder: $target" >&2; exit 1; }
 
+if [[ -n "$guide_file" ]]; then
+  [[ -f "$guide_file" ]] || { echo "kodi: no such guide file: $guide_file" >&2; exit 1; }
+  guide_file="${guide_file:A}"
+  args+=("--kodi-guide-file=$guide_file")
+fi
+if [[ -n "$claude_session" ]]; then
+  args+=("--kodi-claude-session=$claude_session")
+fi
+
+# KODI_CLI_DRY_RUN=1 prints what would reach the app, one argument a line.
+if [[ "${KODI_CLI_DRY_RUN:-}" == 1 ]]; then
+  print -rl -- "${args[@]}"
+  exit 0
+fi
 # Dev shells often export ELECTRON_RUN_AS_NODE; it leaks through `open` and
 # boots the app as plain Node.
-# `--kodi-folder=$resolved` stays one token: a second-instance argv reaches the
-# running app switch-first, which would detach a space-separated value.
-exec env -u ELECTRON_RUN_AS_NODE open -na "$app" --args "--kodi-folder=$resolved"
+exec env -u ELECTRON_RUN_AS_NODE open -na "$app" --args "${args[@]}"

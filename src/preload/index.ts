@@ -14,6 +14,7 @@ import type {
   TerminalExitEvent
 } from '../shared/contracts.js'
 import { IPC_CHANNELS } from '../shared/contracts.js'
+import type { ReviewGuideProgressEvent } from '../shared/reviewGuide.js'
 import { HeldPathCache, heldPathList } from '../shared/heldPaths.js'
 import { applyRestoreHintToDocument, parseRestoreHint, restoreHintFromArgv } from '../shared/sessionRestore.js'
 import { parseWorkspaceCache } from '../shared/workspaceCache.js'
@@ -128,6 +129,7 @@ const repositoryApi: RepositoryApi = {
   },
   readClipboardText: (type) => ipcRenderer.invoke(IPC_CHANNELS.readClipboardText, type),
   revealPath: (path) => ipcRenderer.invoke(IPC_CHANNELS.revealPath, path),
+  openInEditor: (path, line, editorCommand) => ipcRenderer.invoke(IPC_CHANNELS.openInEditor, path, line, editorCommand),
   refresh: () => invokeSnapshotMutation(IPC_CHANNELS.refresh),
   getComparison: (path) => ipcRenderer.invoke(IPC_CHANNELS.getComparison, path),
   getRevisionFile: (revision, path) => ipcRenderer.invoke(IPC_CHANNELS.getRevisionFile, revision, path),
@@ -187,6 +189,22 @@ const repositoryApi: RepositoryApi = {
       ipcRenderer.removeListener(IPC_CHANNELS.agentEvent, handler)
     }
   },
+  getReviewGuide: (request) => ipcRenderer.invoke(IPC_CHANNELS.getReviewGuide, request),
+  cancelReviewGuide: (tabId) => ipcRenderer.invoke(IPC_CHANNELS.cancelReviewGuide, tabId),
+  onReviewGuideProgress: (listener) => {
+    const handler = (_event: unknown, progress: ReviewGuideProgressEvent): void => listener(progress)
+    ipcRenderer.on(IPC_CHANNELS.reviewGuideProgress, handler)
+    return () => {
+      ipcRenderer.removeListener(IPC_CHANNELS.reviewGuideProgress, handler)
+    }
+  },
+  getReviewGuideFormat: () => ipcRenderer.invoke(IPC_CHANNELS.getReviewGuideFormat),
+  takeExternalTarget: () => ipcRenderer.invoke(IPC_CHANNELS.takeExternalTarget),
+  takeExternalGuide: (subject) => ipcRenderer.invoke(IPC_CHANNELS.takeExternalGuide, subject),
+  suggestCommitMessage: (request) => ipcRenderer.invoke(IPC_CHANNELS.suggestCommitMessage, request),
+  cancelCommitMessage: () => ipcRenderer.invoke(IPC_CHANNELS.cancelCommitMessage),
+  findDefinitions: (identifier, fromPath) => ipcRenderer.invoke(IPC_CHANNELS.findDefinitions, identifier, fromPath),
+  getReviewFileMarks: (root, paths, revision) => ipcRenderer.invoke(IPC_CHANNELS.getReviewFileMarks, root, paths, revision),
   createTerminal: (columns, rows) => ipcRenderer.invoke(IPC_CHANNELS.createTerminal, columns, rows),
   readyTerminal: (sessionId) => ipcRenderer.send(IPC_CHANNELS.readyTerminal, sessionId),
   writeTerminal: (sessionId, data) => {

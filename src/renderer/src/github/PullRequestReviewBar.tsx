@@ -3,22 +3,20 @@ import './PullRequestReviewBar.css'
 
 import type { PullRequestReviewEvent } from '../../../shared/contracts'
 import { PullRequestReviewComposer } from './PullRequestReviewComposer'
-import { PullRequestReviewSummaryBar, type NewRevisionNotice } from './PullRequestReviewSummaryBar'
 import { useOptionalState } from '../app/useOptionalState'
 
 interface PullRequestReviewBarProps {
-  submitting: boolean
+  /** The decision being posted to GitHub, or null. */
+  submitting: PullRequestReviewEvent | null
   message: string | null
   inlineCommentCount: number
   orphanedCommentCount: number
   viewerCanSubmitDecision: boolean
-  newRevision?: NewRevisionNotice | null
   variant?: 'toolbar' | 'finish'
   expanded?: boolean
   body?: string
   onExpandedChange?(expanded: boolean): void
   onBodyChange?(body: string): void
-  onOpen(): void
   onSubmit(event: PullRequestReviewEvent, body: string): Promise<boolean>
 }
 
@@ -28,15 +26,13 @@ export function PullRequestReviewBar({
   inlineCommentCount,
   orphanedCommentCount,
   viewerCanSubmitDecision,
-  newRevision = null,
   variant = 'toolbar',
   expanded: expandedProp,
   body: bodyProp,
   onExpandedChange,
   onBodyChange,
-  onOpen,
   onSubmit
-}: PullRequestReviewBarProps): React.JSX.Element {
+}: PullRequestReviewBarProps): React.JSX.Element | null {
   const finish = variant === 'finish'
   const [expanded, setExpanded] = useOptionalState(expandedProp, finish, onExpandedChange)
   const [body, setBody] = useOptionalState(bodyProp, '', onBodyChange)
@@ -52,17 +48,10 @@ export function PullRequestReviewBar({
     if (!finish) setExpanded(false)
   }
 
-  if (!finish && !expanded) {
-    return (
-      <PullRequestReviewSummaryBar
-        message={message}
-        inlineCommentCount={inlineCommentCount}
-        orphanedCommentCount={orphanedCommentCount}
-        newRevision={newRevision}
-        onSubmitReview={() => { onOpen(); setExpanded(true) }}
-      />
-    )
-  }
+  // Closed, the toolbar's summary (`ReviewToolbarActions`) stands in for it. It
+  // is not drawn from here: this module loads lazily, and a static import back
+  // into a startup chunk makes Vite list that chunk's whole preload set.
+  if (!finish && !expanded) return null
 
   return (
     <PullRequestReviewComposer

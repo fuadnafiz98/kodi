@@ -54,6 +54,10 @@ import { usePresence, useRetainedPresence } from './usePresence'
 import { ConfirmDialog } from './ConfirmDialog'
 import { useConfirm } from './useConfirm'
 import { agentSubjectForWorld, formatAgentReviewContext } from '../agent/agentReviewContext'
+import { openFileInEditor, setEditorCommand } from '../review/editorTarget'
+import { installDefinitionTrigger, setDefinitionOpeners } from '../definitions/definitionTrigger'
+import { requestReveal } from './revealLocation'
+import { considerAutoGuide, expectExternalGuide, publishGuideAgent } from '../review/reviewGuideView'
 import { sessionWorkspaceStage } from '../../../shared/sessionRestore'
 import { comparisonFromCachedText, initialWorkspacePaint } from '../../../shared/workspaceCache'
 import { automaticWorkspaceView, firstOpenPathForSnapshot } from '../explorer/workspaceMode'
@@ -134,6 +138,23 @@ const AgentSessionLayout = memo(function AgentSessionLayout(view: WorkspaceLayou
     [agentSubject, gitWorkflow.repositoryReview]
   )
   const agent = useAgentSession({ context: agentContext, subject: agentSubject })
+  // The Guide view writes with the dock's model and describes the active review.
+  const { provider, model, effort, models, login, open: agentOpen, toggle: toggleAgent } = agent
+  const { guideAutoGenerate, guideOpensFirst } = view.preferences
+  const activeWorld = gitWorkflow.activeWorld ?? null
+  useEffect(() => {
+    const guideAgent = {
+      subject: agentSubject,
+      provider,
+      model,
+      effort,
+      models,
+      login,
+      openAgent: () => { if (!agentOpen) toggleAgent() }
+    }
+    publishGuideAgent(guideAgent)
+    considerAutoGuide(activeWorld, guideAgent, { guideAutoGenerate, guideOpensFirst })
+  }, [activeWorld, agentOpen, agentSubject, effort, guideAutoGenerate, guideOpensFirst, login, model, models, provider, toggleAgent])
   const collisionPaths = useMemo(
     () => findCollisionPaths(view.snapshot?.statuses ?? [], gitWorkflow.repositoryReview),
     [gitWorkflow.repositoryReview, view.snapshot?.statuses]
@@ -213,6 +234,18 @@ const AppLayout = memo(function AppLayout(view: AppLayoutProps): React.JSX.Eleme
     for (const branch of branches) if (!branch.current) names.push(branch.name)
     return names
   }, [branches])
+  const selectWorkspacePath = workspace.selectPath
+  const selectedWorkspacePath = workspace.selectedPath
+  useEffect(() => {
+    setDefinitionOpeners({
+      openFile(path, line) {
+        requestReveal({ path, line })
+        if (!openInWorkspace(path)) selectWorkspacePath(path)
+      },
+      openInEditor: (path, line) => void openFileInEditor(path, line).catch(() => {}),
+      currentPath: () => selectedWorkspacePath
+    })
+  }, [selectWorkspacePath, selectedWorkspacePath])
   const shellStyle = {
     '--terminal-panel-height': `${view.terminalHeight}px`,
     '--terminal-dock-offset': view.terminalOpen ? `${view.terminalHeight}px` : '0px',
@@ -447,20 +480,34 @@ export function App({
 
   // `kodi <folder>` while the app is up. Main holds the folder until the window
   // takes it, which it does only once its startup snapshot has settled: taken
-  // during boot, the restore that landed a moment later covered it. A folder
-  // whose working tree is already the tab in front stays as the reader left it.
+  // during boot, the restore that landed a moment later covered it.
   const startupSettledRef = useRef(false)
   const adoptExternalFolder = useEffectEvent((nextSnapshot: RepositorySnapshot) => {
     const active = gitWorkflow.activeWorld
-    if (active?.source === 'desk' && active.root === nextSnapshot.root) return
+    if (active?.source === 'desk' && active.root === nextSnapshot.root) {
+      // Already in front: `kodi .` asks for its changes, so a file view goes back
+      // to the review, by the snapshot on screen (main's may be a skeleton, with
+      // no statuses). A reader already in the review keeps their place.
+      if (workspaceView === 'file') gitWorkflow.resyncDeskNavigation(appliedSnapshotRef.current ?? nextSnapshot)
+      return
+    }
     ensureWorkspaceRoot()
     setError(null)
     adoptOpenedSnapshot(nextSnapshot)
+  })
+  // `kodi <commit>` and `kodi --guide-file` name more than a folder; that part
+  // is taken once the folder is in front.
+  const takeExternalTarget = useEffectEvent(async () => {
+    const target = await window.repository?.takeExternalTarget()
+    if (target == null) return
+    if (target.guide) expectExternalGuide()
+    if (target.oid != null) await gitWorkflow.reviewCommit(target.oid)
   })
   const takeExternalFolder = useEffectEvent(() => {
     if (!startupSettledRef.current) return
     void window.repository?.takeExternalFolder().then((nextSnapshot) => {
       if (nextSnapshot != null) adoptExternalFolder(nextSnapshot)
+      return takeExternalTarget()
     })
   })
   useEffect(() => {
@@ -494,8 +541,12 @@ export function App({
       setSessionReady(true)
       ensureWorkspaceRoot()
       const holdingReview = gitWorkflow.worlds.some((world) => newWorldHoldsReview(world))
+      // Read before the tab opens: opening it applies the snapshot, and read
+      // after, every restore looked like the folder already painted, so a
+      // skeleton's file view stuck once the live snapshot came in.
+      const painted = appliedSnapshotRef.current?.root === restoredSnapshot.root
       openWorkingTree(restoredSnapshot)
-      if (!holdingReview && appliedSnapshotRef.current?.root !== restoredSnapshot.root) {
+      if (!holdingReview && !painted) {
         changeWorkspaceView(automaticWorkspaceView(restoredSnapshot, null))
         // A restore that lands as a skeleton derived its view from no statuses;
         // the live snapshot behind it re-derives it, as a fresh open does.
@@ -518,6 +569,8 @@ export function App({
     saveRecentFolders(recentFolders)
   }, [recentFolders])
 
+  useEffect(() => setEditorCommand(preferences.editorCommand), [preferences.editorCommand])
+  useEffect(() => installDefinitionTrigger(), [])
   const runCommand = useAppCommands({
     commandPalette,
     closeFolderPicker,
@@ -529,7 +582,10 @@ export function App({
     setSettingsOpen,
     setPreferences,
     toggleSidebar,
-    toggleTerminal: terminal.toggle
+    toggleTerminal: terminal.toggle,
+    selectedPath,
+    editorCommand: preferences.editorCommand,
+    onError: setError
   })
 
   const view: Omit<AppLayoutProps, 'commandPaletteRef' | 'terminalDockRef'> = {

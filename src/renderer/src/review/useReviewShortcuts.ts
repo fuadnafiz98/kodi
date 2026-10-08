@@ -34,7 +34,7 @@ export function useReviewShortcuts({
     if (!active) return
     const handleKeyDown = (event: KeyboardEvent): void => {
       const command = reviewCommandFromEvent(event, deepActiveElement(document))
-      if (command == null) return
+      if (command == null || command === 'nextGuideSection' || command === 'previousGuideSection') return
       const options = optionsRef.current
       const currentPath = options.currentPathRef.current ?? options.paths[0] ?? null
       if (currentPath == null) return

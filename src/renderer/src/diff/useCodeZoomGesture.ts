@@ -140,7 +140,6 @@ export function useCodeZoomGesture(baseFontSize: number, baseLineHeight: number)
         return
       }
       if (event.deltaY === 0) return
-      event.preventDefault()
 
       const currentFontSize = currentFontSizeRef.current
       const nextFontSize = nextCodeZoomFontSize(currentFontSize, event.deltaY, event.deltaMode, window.innerHeight)
@@ -192,7 +191,12 @@ export function useCodeZoomGesture(baseFontSize: number, baseLineHeight: number)
         })
       }, ZOOM_COMMIT_SETTLE_MS)
     }
-    surface.addEventListener('wheel', handleWheel, { capture: true, passive: false })
+    // Passive, and it has to stay that way: a wheel listener that may cancel
+    // over the code made Chromium scroll the review on the main thread, so every
+    // late main frame was a frame in which the text did not move. Nothing needs
+    // cancelling — Electron applies no page or visual zoom of its own on a
+    // ctrl+wheel or a pinch.
+    surface.addEventListener('wheel', handleWheel, { capture: true, passive: true })
     surface.addEventListener('pointerdown', cancelAnchor, { capture: true })
     surface.addEventListener('scroll', restoreActiveAnchor, { capture: true })
     return () => {

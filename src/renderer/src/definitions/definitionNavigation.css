@@ -1,0 +1,91 @@
+/* ⌘ over an identifier: a 1 px line under it, above the review. */
+.definition-underline {
+  position: fixed;
+  z-index: var(--z-popover);
+  height: 1px;
+  background: var(--accent);
+  pointer-events: none;
+}
+
+.definition-popover {
+  position: fixed;
+  z-index: var(--z-popover);
+  width: min(400px, calc(100vw - 16px));
+  max-height: 264px;
+  overflow: auto;
+  padding: 4px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--corner-surface);
+  background: var(--popover);
+  box-shadow: var(--elev-2);
+  color: var(--text);
+  font-size: var(--text-sm);
+  line-height: 16px;
+}
+
+.definition-popover-head {
+  padding: 6px 8px 4px;
+  color: var(--muted);
+  font-size: var(--text-xs);
+}
+
+.definition-popover-head code { color: var(--text); font-family: var(--font-mono); }
+.definition-popover-status { margin: 0; padding: 8px; color: var(--muted); }
+.definition-popover ul { margin: 0; padding: 0; list-style: none; }
+.definition-popover li { position: relative; }
+
+.definition-popover [data-definition-jump] {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 2px 8px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: var(--corner-compact);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.definition-popover [data-definition-jump]:hover,
+.definition-popover [data-definition-jump]:focus-visible { background: var(--surface-hover); outline: 0; }
+
+.definition-location { overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }
+.definition-location strong { color: var(--text); font-weight: var(--weight-medium); }
+.definition-line { color: var(--muted); font-family: var(--font-mono); font-size: var(--text-xs); }
+.definition-kind { color: var(--faint); font-size: var(--text-xs); }
+
+.definition-popover code:not(.definition-popover-head code) {
+  grid-column: 1 / -1;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The editor is the second way out; it shows on the row being pointed at. */
+.definition-editor {
+  position: absolute;
+  top: 5px;
+  right: 6px;
+  height: 20px;
+  padding: 0 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--corner-inset);
+  background: var(--popover);
+  color: var(--muted);
+  font: inherit;
+  font-size: var(--text-xs);
+  opacity: 0;
+  cursor: pointer;
+}
+
+.definition-popover li:hover .definition-editor,
+.definition-popover li:focus-within .definition-editor { opacity: 1; }
+.definition-editor:hover { color: var(--text); }
+.definition-popover li:hover .definition-kind,
+.definition-popover li:focus-within .definition-kind { visibility: hidden; }

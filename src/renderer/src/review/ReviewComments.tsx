@@ -316,6 +316,8 @@ interface ReviewThreadCardProps {
   onEdit(body: string): void
   onReply(body: string): void
   onToggleResolved(): void
+  /** Hands the comment and its lines to the agent dock. */
+  onAskAgent?(): void
 }
 
 export function ReviewThreadCard({
@@ -324,7 +326,8 @@ export function ReviewThreadCard({
   onDelete,
   onEdit,
   onReply,
-  onToggleResolved
+  onToggleResolved,
+  onAskAgent
 }: ReviewThreadCardProps): React.JSX.Element {
   const [editing, setEditing] = useState(false)
   const [editBody, setEditBody] = useState(thread.body)
@@ -395,6 +398,10 @@ export function ReviewThreadCard({
           <button type="button" onClick={() => setReplying(true)}><IconReply />Reply</button>
           <button type="button" onClick={onCopy}
             title="Copy the code and this comment as Markdown"><IconCopy />Copy</button>
+          {onAskAgent == null ? null : (
+            <button type="button" data-review-ask-agent="" onClick={onAskAgent}
+              title="Ask the agent about this comment, with its lines attached"><IconSparkles />Ask agent</button>
+          )}
           <button type="button" onClick={() => setEditing(true)}><IconPencil />Edit</button>
           <button type="button" onClick={onToggleResolved}><IconApproved />{thread.resolved ? 'Reopen' : 'Resolve'}</button>
           <button className="danger" type="button" onClick={onDelete}><IconTrash />Delete</button>

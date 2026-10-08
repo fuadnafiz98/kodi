@@ -1,5 +1,6 @@
 import type { PullRequestReviewEvent, RepositoryReview } from '../../../shared/contracts'
-import { PullRequestReviewBar } from '../github/PullRequestReviewBar'
+import { pullRequestReviewBarModule } from './ReviewStatusBar'
+import { useLazyModule } from '../app/lazyModule'
 import { reviewBarMode, type ReviewWorldSource } from './reviewHeaderModel'
 
 export interface ReviewFinishBarProps {
@@ -7,7 +8,8 @@ export interface ReviewFinishBarProps {
   visible: boolean
   review: RepositoryReview | null
   reviewWorldSource: ReviewWorldSource
-  submitting: boolean
+  /** The decision being posted to GitHub, or null. */
+  submitting: PullRequestReviewEvent | null
   message: string | null
   inlineCommentCount: number
   orphanedCommentCount: number
@@ -15,7 +17,6 @@ export interface ReviewFinishBarProps {
   body: string
   onExpandedChange(expanded: boolean): void
   onBodyChange(body: string): void
-  onOpen(): void
   onSubmit(event: PullRequestReviewEvent, body: string): Promise<boolean>
 }
 
@@ -32,13 +33,15 @@ export function ReviewFinishBar({
   body,
   onExpandedChange,
   onBodyChange,
-  onOpen,
   onSubmit
 }: ReviewFinishBarProps): React.JSX.Element | null {
-  if (!visible) return null
-  if (reviewBarMode(review, reviewWorldSource) !== 'submit' || review?.kind !== 'github') return null
+  // Asked for as soon as a pull request review is on screen, so it is here
+  // before the reader reaches the foot of the review.
+  const wanted = visible && review?.kind === 'github' && reviewBarMode(review, reviewWorldSource) === 'submit'
+  const bar = useLazyModule(pullRequestReviewBarModule, wanted)
+  if (!wanted || review?.kind !== 'github' || bar == null) return null
   return (
-    <PullRequestReviewBar
+    <bar.PullRequestReviewBar
       variant="finish"
       submitting={submitting}
       message={message}
@@ -49,7 +52,6 @@ export function ReviewFinishBar({
       body={body}
       onExpandedChange={onExpandedChange}
       onBodyChange={onBodyChange}
-      onOpen={onOpen}
       onSubmit={onSubmit}
     />
   )

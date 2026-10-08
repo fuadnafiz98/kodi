@@ -3,6 +3,14 @@ import { IconShieldKeyhole } from '@pierre/icons'
 import { IconSparklesOutline } from '../app/IconSparklesOutline'
 
 import { QUICK_PROMPTS } from './agentPanelOptions'
+import type {} from '../reviewGuide/reviewGuideHost'
+
+/** Opens the active review's Guide; through the window host, so no startup module is imported. */
+function showReviewGuide(): void {
+  const host = window.__kodiReviewGuide
+  const worldId = host?.agent?.subject?.tabId
+  if (host != null && worldId != null) host.setView(worldId, 'guide')
+}
 
 export interface AgentEmptyStateProps {
   /** What the agent would be asked about: the review, the branch, the file. */
@@ -32,6 +40,8 @@ export function AgentEmptyState({
           <button key={quick.label} type="button" disabled={streaming || !ready}
             onClick={() => { onCloseSettings(); onAsk(quick.prompt) }}>{quick.label}</button>
         ))}
+        <button type="button" disabled={window.__kodiReviewGuide?.agent?.subject == null}
+          title="Show the review as a guide, in sections" onClick={showReviewGuide}>Guide</button>
       </div>
       <p className="agent-privacy"><IconShieldKeyhole aria-hidden="true" />
         The selected provider receives repository context only when you send a request.</p>

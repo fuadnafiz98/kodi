@@ -133,3 +133,16 @@ test('mounts the note rows only while the list is open', () => {
   expect(list?.hidden).toBe(true)
   expect(list?.querySelectorAll('li').length).toBe(0)
 })
+
+test('copies the notes as Markdown, asking the review for each file', async () => {
+  const writeText = mock(async (_text: string) => {})
+  Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+  const itemFor = mock((_path: string) => undefined)
+  render(<ReviewSummary entries={[note('thread-2', 'src/app.ts')]} reattachingThreadId={null}
+    onBeginReattach={() => {}} onCancelReattach={() => {}}
+    onDrop={() => {}} onDropAll={() => {}} itemFor={itemFor} />)
+  fireEvent.click(screen.getByRole('button', { name: 'Copy notes as Markdown' }))
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  expect(itemFor).toHaveBeenCalledWith('src/app.ts')
+  expect(writeText.mock.calls[0]![0]).toBe('# Address these review comments\n\n1. **src/app.ts** (New line 8)\n\n> Keep this check.\n')
+})

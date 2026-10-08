@@ -21,7 +21,7 @@ import {
   type SelectedLineRange
 } from '@pierre/diffs'
 import { type CodeViewHandle, type CodeViewReactOptions } from '@pierre/diffs/react'
-import { IconCheck, IconChevronSm, IconClockArrow, IconCodeSearch, IconEye, IconFileCode, IconRefresh, IconWarningOctogonFill } from '@pierre/icons'
+import { IconArrowUpRight, IconCheck, IconChevronSm, IconClockArrow, IconCodeSearch, IconEye, IconFileCode, IconRefresh, IconWarningOctogonFill } from '@pierre/icons'
 
 import type { FileImagePreview, PullRequestConversation, RemoteReviewThread, RepositoryReview } from '../../../shared/contracts'
 import { markdownPreviewSource } from './documentView'
@@ -95,6 +95,7 @@ import {
 import { BackToTopButton, BACK_TO_TOP_THRESHOLD } from '../diff/BackToTopButton'
 import { showToast } from '../app/toast'
 import { pendingReveal, takeReveal } from '../app/revealLocation'
+import type { ReviewFindSource } from './reviewFindSource'
 import type { ReviewCommand } from '../settings/keybindings'
 import {
   dropChangedViewedFiles,
@@ -108,6 +109,10 @@ import { createReviewCommentAnchor } from './reviewThreadAnchors'
 import { copyCodeReference, copyReviewComment } from './codeReferenceClipboard'
 import { GutterActions } from '../diff/GutterActions'
 import { useStableHandler } from './useStableHandler'
+import { openFileInEditor } from './editorTarget'
+import { isGeneratedReviewPath, useReviewFileMarks } from './reviewFileMarks'
+import { orderReviewItems, useGuideItemOrder, useReviewView } from './reviewGuideView'
+import type { GuideViewerHandle } from '../reviewGuide/ReviewGuideView'
 import './MultiFileReview.css'
 
 const CODE_VIEW_CSS = `
@@ -123,6 +128,14 @@ const CODE_VIEW_CSS = `
 const EMPTY_IMAGE_PREVIEWS: ReadonlyMap<string, FileImagePreview> = new Map()
 const EMPTY_MARKDOWN_PATHS: ReadonlySet<string> = new Set()
 const EMPTY_MARKDOWN_SOURCES: ReadonlyMap<string, MarkdownHydratedSource> = new Map()
+
+// Outside the component: a write to a global inside one makes the React
+// Compiler skip the whole component's memoization.
+function publishReviewFindSource(source: ReviewFindSource): () => void {
+  const sources = window.__kodiReviewFind ??= new Set()
+  sources.add(source)
+  return () => { sources.delete(source) }
+}
 
 function retainImagePreviews(
   current: ReadonlyMap<string, FileImagePreview>,
@@ -166,6 +179,8 @@ export function agentSelectionForReviewItem(
 
 export interface MultiFileReviewProps {
   paths: readonly string[]
+  /** The repository the review belongs to, for `.gitattributes`. */
+  reviewRoot?: string | null
   diffStyle: DiffStyle
   preferences: AppPreferences
   repositoryReview?: RepositoryReview | null
@@ -190,7 +205,7 @@ export interface MultiFileReviewProps {
   pendingRemoteThreadId: string | null
   onReplyToRemoteThread(threadId: string, body: string): void
   onResolveRemoteThread(threadId: string, resolved: boolean): void
-  onAttachToAgent(selection: AgentSelection): void
+  onAttachToAgent(selection: AgentSelection, prompt?: string): void
   reviewCommand: { command: ReviewCommand; path: string; revision: number } | null
   worldId: string
   /** The working tree's drafts: present, the desk review edits files in place. */
@@ -318,6 +333,20 @@ function ReviewMarkdownPreviewToggle({
   )
 }
 
+function ReviewOpenInEditorButton({ path }: { path: string }): React.JSX.Element {
+  return (
+    <button type="button" data-review-open-editor="" aria-label={`Open ${path} in editor`} title="Open in editor (⇧⌘O)"
+      onClick={(event) => {
+        event.stopPropagation()
+        void openFileInEditor(path, null).catch((error: unknown) => {
+          showToast(error instanceof Error ? error.message : 'The file could not be opened in an editor.')
+        })
+      }}>
+      <IconArrowUpRight />
+    </button>
+  )
+}
+
 function MarkdownReviewPreview({
   source,
   partial
@@ -339,6 +368,8 @@ const NOOP_ERROR = (): void => {}
 
 // The list of a review's own comments only exists once there is a comment.
 const reviewSummaryModule = createLazyModule(() => import('./ReviewSummary'))
+// The Guide view loads the first time a review switches to it.
+const reviewGuideModule = createLazyModule(() => import('../reviewGuide/ReviewGuideView'))
 
 function preloadEditorQuietly(): void {
   // A failed fetch surfaces again, with its message, on the click that needs it.
@@ -533,7 +564,8 @@ function findActiveRenderedItemId(viewer: CodeViewInstance<ReviewAnnotationMetad
 }
 
 interface AnnotatedReviewItemsOptions {
-  loadState: ReviewLoadState
+  /** The loaded items in the order the viewer shows them. */
+  items: ReviewLoadState['items']
   imagePreviews: ReadonlyMap<string, FileImagePreview>
   markdownPreviewPaths: ReadonlySet<string>
   markdownSources: ReadonlyMap<string, MarkdownHydratedSource>
@@ -547,7 +579,7 @@ interface AnnotatedReviewItemsOptions {
 }
 
 function useAnnotatedReviewItems({
-  loadState,
+  items,
   imagePreviews,
   markdownPreviewPaths,
   markdownSources,
@@ -564,11 +596,11 @@ function useAnnotatedReviewItems({
   const annotatedWorldIdRef = useRef(worldId)
   const reviewItems = useMemo(
     () => applyMarkdownPreviews(
-      applyImagePreviews(loadState.items, imagePreviews),
+      applyImagePreviews(items, imagePreviews),
       markdownPreviewPaths,
       markdownSources
     ),
-    [imagePreviews, loadState.items, markdownPreviewPaths, markdownSources]
+    [imagePreviews, items, markdownPreviewPaths, markdownSources]
   )
   const derivation = useMemo(() => {
     const seeded = worldId != null && annotatedWorldIdRef.current !== worldId
@@ -708,6 +740,7 @@ interface MultiFileViewerProps {
   onCommentOnSelection(): void
   onBeginComment(selection: CodeViewLineSelection): void
   onAskAgentAboutSelection(): void
+  onAskAgentAboutThread(item: CodeViewItem<ReviewAnnotationMetadata>, path: string, thread: ReviewThread): void
   onCopySelection(): void
   onImagePreview(path: string, image: FileImagePreview): void
   scrollContainerRef: RefObject<HTMLDivElement | null>
@@ -729,10 +762,17 @@ interface MultiFileViewerProps {
   workingDrafts?: WorkingDrafts
   autosaveOnBlur: boolean
   onError(message: string | null): void
+  /** The world shows its guide: the review is laid out around the Guide view. */
+  guideView: boolean
+  /** Section labels on the first file of each guide section. */
+  guidePills: ReadonlyMap<string, string> | null
+  generatedPaths: ReadonlySet<string> | null
+  /** The loaded items in the order the viewer shows them. */
+  orderedItems: ReviewLoadState['items']
 }
 
 type AnnotationSlotOptions = Pick<MultiFileViewerProps,
-  'onCommentOnSelection' | 'onAskAgentAboutSelection' | 'onCopySelection' | 'saveComment' | 'onReplyToRemoteThread'
+  'onCommentOnSelection' | 'onAskAgentAboutSelection' | 'onAskAgentAboutThread' | 'onCopySelection' | 'saveComment' | 'onReplyToRemoteThread'
   | 'onResolveRemoteThread' | 'reattachingThread' | 'cancelComment' | 'pendingRemoteThreadId' | 'updateThread'
   | 'selectedLines' | 'onSelectLines' | 'onBeginComment'
 > & { pullRequestParts: ReturnType<typeof usePullRequestReviewParts> }
@@ -741,6 +781,7 @@ type AnnotationSlotOptions = Pick<MultiFileViewerProps,
 function useReviewAnnotationSlots({
   onCommentOnSelection,
   onAskAgentAboutSelection,
+  onAskAgentAboutThread,
   onCopySelection,
   saveComment,
   onReplyToRemoteThread,
@@ -764,6 +805,7 @@ function useReviewAnnotationSlots({
   // portal of every rendered item on that — thread cards included.
   const commentOnSelection = useStableHandler(onCommentOnSelection)
   const askAgentAboutSelection = useStableHandler(onAskAgentAboutSelection)
+  const askAgentAboutThread = useStableHandler(onAskAgentAboutThread)
   const copySelection = useStableHandler(onCopySelection)
   const saveDraftComment = useStableHandler(saveComment)
   const replyToRemoteThread = useStableHandler(onReplyToRemoteThread)
@@ -804,8 +846,9 @@ function useReviewAnnotationSlots({
       onDelete={() => updateThread(path, thread.id, () => null)}
       onEdit={(body) => updateThread(path, thread.id, (current) => ({ ...current, body }))}
       onReply={(body) => updateThread(path, thread.id, (current) => ({ ...current, replies: [...current.replies, { id: crypto.randomUUID(), body }] }))}
-      onToggleResolved={() => updateThread(path, thread.id, (current) => ({ ...current, resolved: !current.resolved }))} /></AnnotationFrame>
-  }, [askAgentAboutSelection, cancelComment, commentOnSelection, copySelection, pendingRemoteThreadId,
+      onToggleResolved={() => updateThread(path, thread.id, (current) => ({ ...current, resolved: !current.resolved }))}
+      onAskAgent={() => askAgentAboutThread(item, path, thread)} /></AnnotationFrame>
+  }, [askAgentAboutSelection, askAgentAboutThread, cancelComment, commentOnSelection, copySelection, pendingRemoteThreadId,
     pullRequestParts, reattaching, replyToRemoteThread, resolveRemoteThread, saveDraftComment, updateThread])
   // What the viewer's gutter click used to do: one `+` press selects the line,
   // two inside the interval open the composer. Custom utility content replaces
@@ -877,6 +920,7 @@ const MultiFileViewer = memo(function MultiFileViewer({
   onCommentOnSelection,
   onBeginComment,
   onAskAgentAboutSelection,
+  onAskAgentAboutThread,
   onCopySelection,
   onImagePreview,
   scrollContainerRef,
@@ -896,7 +940,11 @@ const MultiFileViewer = memo(function MultiFileViewer({
   onDropAll,
   workingDrafts,
   autosaveOnBlur,
-  onError
+  onError,
+  guideView,
+  guidePills,
+  generatedPaths,
+  orderedItems
 }: MultiFileViewerProps): React.JSX.Element {
   const [showBackToTop, setShowBackToTop] = useState(false)
   const backToTopVisibleRef = useRef(false)
@@ -935,6 +983,7 @@ const MultiFileViewer = memo(function MultiFileViewer({
       threads.map((thread) => ({ path, thread }))
     ), [threadsByPath])
   const summary = useLazyModule(reviewSummaryModule, summaryEntries.length > 0)
+  const summaryItemFor = useCallback((path: string) => viewerRef.current?.getItem(itemId(path)), [viewerRef])
   const beginSummaryReattach = useCallback((entry: ReviewSummaryEntry) => {
     onBeginReattach(entry.path, entry.thread.id)
     const id = itemId(entry.path)
@@ -956,11 +1005,11 @@ const MultiFileViewer = memo(function MultiFileViewer({
         <summary.ReviewSummary entries={summaryEntries}
           reattachingThreadId={reattachingThread?.threadId ?? null}
           onBeginReattach={beginSummaryReattach} onCancelReattach={onCancelReattach}
-          onDrop={dropSummaryThread} onDropAll={onDropAll} />
+          onDrop={dropSummaryThread} onDropAll={onDropAll} itemFor={summaryItemFor} />
       )}
     </>,
     [beginSummaryReattach, deferredConversation, dropSummaryThread, isPullRequestReview, onCancelReattach,
-      onDropAll, pullRequestParts, reattachingThread, summary, summaryEntries]
+      onDropAll, pullRequestParts, reattachingThread, summary, summaryEntries, summaryItemFor]
   )
   const handleToggleItemCollapsed = useCallback((item: CodeViewItem<ReviewAnnotationMetadata>) => {
     window.cancelAnimationFrame(collapseFollowFrameRef.current)
@@ -986,13 +1035,20 @@ const MultiFileViewer = memo(function MultiFileViewer({
       })
     })
   }, [collapsedItemIds, toggleItemCollapsed, viewerRef])
-  const renderHeaderPrefix = useCallback((item: CodeViewItem<ReviewAnnotationMetadata>) => (
-    <ReviewFileCollapseButton
-      item={item}
-      expanded={!collapsedItemIds.has(item.id)}
-      onToggle={handleToggleItemCollapsed}
-    />
-  ), [collapsedItemIds, handleToggleItemCollapsed])
+  const renderHeaderPrefix = useCallback((item: CodeViewItem<ReviewAnnotationMetadata>) => {
+    const pill = guidePills?.get(item.id)
+    return <>
+      <ReviewFileCollapseButton
+        item={item}
+        expanded={!collapsedItemIds.has(item.id)}
+        onToggle={handleToggleItemCollapsed}
+      />
+      {pill == null ? null : <span data-review-guide-pill="">{pill}</span>}
+      {isGeneratedReviewPath(pathFromItemId(item.id), generatedPaths)
+        ? <span data-review-generated="" title="Generated: collapsed by default">Generated</span>
+        : null}
+    </>
+  }, [collapsedItemIds, generatedPaths, guidePills, handleToggleItemCollapsed])
   // Viewed belongs in the header's metadata slot on the trailing edge. Rendered
   // in the prefix slot it shared a narrow box with the collapse button and
   // wrapped onto a second line under the chevron.
@@ -1014,13 +1070,14 @@ const MultiFileViewer = memo(function MultiFileViewer({
             onToggle={onToggleMarkdownPreview}
           />
         ) : null}
+        <ReviewOpenInEditorButton path={path} />
         <ReviewViewedToggle path={path} viewed={viewedPaths.has(path)} onToggle={onToggleViewed} />
       </>
     )
   }, [discardEdit, edits, markdownPreviewPaths, onToggleMarkdownPreview, onToggleViewed, previewableMarkdownPaths,
     saveEdit, viewedPaths])
   const { renderReviewAnnotation, renderGutterUtility } = useReviewAnnotationSlots({
-    onCommentOnSelection, onAskAgentAboutSelection, onCopySelection, saveComment, onReplyToRemoteThread,
+    onCommentOnSelection, onAskAgentAboutSelection, onAskAgentAboutThread, onCopySelection, saveComment, onReplyToRemoteThread,
     onResolveRemoteThread, reattachingThread, pullRequestParts, cancelComment, pendingRemoteThreadId, updateThread,
     selectedLines, onSelectLines, onBeginComment
   })
@@ -1070,6 +1127,7 @@ const MultiFileViewer = memo(function MultiFileViewer({
     }, ACTIVE_PATH_SETTLE_MS)
   }, [onScrollPositionChange, onVisiblePathChange, viewerRef])
 
+  const guide = useLazyModule(reviewGuideModule, guideView)
   const retainedWorldIds = useRetainedWorldViewers(worldId)
   const viewerSlots = retainedWorldIds.flatMap((id) => {
     const items = itemsForRetainedWorld(
@@ -1099,7 +1157,14 @@ const MultiFileViewer = memo(function MultiFileViewer({
   )
   if (emptyOverlay != null && viewerSlots.length === 0) return emptyOverlay
 
-  return <div className="multi-file-review">
+  // The guide sits beside the same viewer element; only the container's layout
+  // changes, so the retained viewer and its measured heights survive the switch.
+  const guideActive = guideView && guide != null && worldId != null
+  return <div className="multi-file-review" data-review-guide={guideActive ? '' : undefined}>
+    {guideActive ? (
+      <guide.ReviewGuideView worldId={worldId} viewerRef={viewerRef as unknown as RefObject<GuideViewerHandle | null>}
+        items={orderedItems} viewedPaths={viewedPaths} repositoryReview={repositoryReview} fileCount={paths.length} />
+    ) : null}
     {emptyOverlay}
     {/* The editor module is ~1 MB of script: fetched as the pointer arrives
         over a review it could edit, it is parsed by the time the click lands. */}
@@ -1138,7 +1203,7 @@ interface ReviewSelectionOptions {
   cancelReattach(): void
   handleSelectedLinesChange(selection: CodeViewLineSelection | null): void
   reattachToSelection(selection: CodeViewLineSelection): boolean
-  onAttachToAgent(selection: AgentSelection): void
+  onAttachToAgent(selection: AgentSelection, prompt?: string): void
 }
 
 function useReviewSelectionActions({
@@ -1208,6 +1273,14 @@ function useReviewSelectionActions({
     onAttachToAgent(selection)
     handleSelectLines(null)
   }, [handleSelectLines, items, onAttachToAgent, pendingSelection])
+  const askAgentAboutThread = useCallback((item: CodeViewItem<ReviewAnnotationMetadata>, path: string, thread: ReviewThread) => {
+    const selection = agentSelectionForReviewItem(item, path, thread.range)
+    if (selection == null) {
+      showToast('This comment’s lines are no longer in the diff')
+      return
+    }
+    onAttachToAgent(selection, `About this comment: ${thread.body}`)
+  }, [onAttachToAgent])
   // Copy leaves the selection up — it is the grab, not the destination, and the
   // reader may still want the comment or chat action on the same lines.
   const copySelection = useCallback(() => {
@@ -1258,6 +1331,7 @@ function useReviewSelectionActions({
     startReattach,
     stopReattach,
     askAgentAboutSelection,
+    askAgentAboutThread,
     copySelection
   }
 }
@@ -1375,6 +1449,7 @@ function useMarkdownPreviewLanding(
 
 const MultiFileReview = memo(function MultiFileReview({
   paths,
+  reviewRoot = null,
   diffStyle,
   preferences,
   repositoryReview = null,
@@ -1415,6 +1490,7 @@ const MultiFileReview = memo(function MultiFileReview({
   const viewedAdvanceFrameRef = useRef(0)
   const markdownPreviewPinRef = useRef<ReviewScrollAnchor | null>(null)
   const stablePaths = paths
+  const generatedPaths = useReviewFileMarks(worldId, reviewRoot, paths, repositoryReview?.headOid ?? null)
   const {
     selectedLines,
     draftComment,
@@ -1437,7 +1513,8 @@ const MultiFileReview = memo(function MultiFileReview({
     items: loadState.items,
     threadsByPath,
     setThreadsByPath,
-    worldId
+    worldId,
+    generatedPaths
   })
   const {
     pendingSelection,
@@ -1448,6 +1525,7 @@ const MultiFileReview = memo(function MultiFileReview({
     startReattach,
     stopReattach,
     askAgentAboutSelection,
+    askAgentAboutThread,
     copySelection
   } = useReviewSelectionActions({
     items: loadState.items,
@@ -1463,6 +1541,18 @@ const MultiFileReview = memo(function MultiFileReview({
   const setViewerRef = useCallback((viewer: CodeViewHandle<ReviewAnnotationMetadata> | null) => {
     viewerRef.current = viewer
   }, [])
+  const guideView = useReviewView(worldId) === 'guide'
+  const guideOrder = useGuideItemOrder(worldId)
+  const orderedItems = useMemo(
+    () => orderReviewItems(loadState.items, guideOrder) as ReviewLoadState['items'],
+    [guideOrder, loadState.items]
+  )
+  // ⌘F searches every file of the review, not only the rows the viewer drew.
+  useEffect(() => publishReviewFindSource({
+    viewer: () => viewerRef.current?.getInstance() as CodeViewInstance<unknown> | undefined,
+    items: () => orderedItems,
+    expand: (id) => setCollapsedById(id, false)
+  }), [orderedItems, setCollapsedById])
   const handleImagePreview = useCallback((path: string, image: FileImagePreview) => {
     setImagePreviews((current) => {
       const existing = current.get(path)
@@ -1561,7 +1651,7 @@ const MultiFileReview = memo(function MultiFileReview({
       : findNextUnreadReviewItemId(
           findActiveRenderedItemId(viewer),
           item.id,
-          loadState.items,
+          orderedItems,
           viewedPaths
         )
 
@@ -1580,7 +1670,7 @@ const MultiFileReview = memo(function MultiFileReview({
         behavior: 'instant'
       })
     })
-  }, [itemsByPath, loadState.items, setCollapsedById, setViewedFiles, viewedPaths])
+  }, [itemsByPath, orderedItems, setCollapsedById, setViewedFiles, viewedPaths])
 
   useEffect(() => () => {
     window.cancelAnimationFrame(viewedAdvanceFrameRef.current)
@@ -1604,7 +1694,7 @@ const MultiFileReview = memo(function MultiFileReview({
   }, [bumpPathVersions, setThreadsByPath, stopReattach, threadsByPath])
 
   const annotatedItems = useAnnotatedReviewItems({
-    loadState,
+    items: orderedItems,
     imagePreviews: visibleImagePreviews,
     markdownPreviewPaths,
     markdownSources,
@@ -1636,7 +1726,7 @@ const MultiFileReview = memo(function MultiFileReview({
       pendingSelection={pendingSelection} onSelectLines={handleSelectLines}
       onHighlightLines={handleSelectedLinesChange} onHideSelectionActions={hideSelectionActions}
       onCommentOnSelection={commentOnSelection} onBeginComment={beginCommentAtSelection}
-      onAskAgentAboutSelection={askAgentAboutSelection} onCopySelection={copySelection}
+      onAskAgentAboutSelection={askAgentAboutSelection} onAskAgentAboutThread={askAgentAboutThread} onCopySelection={copySelection}
       onImagePreview={handleImagePreview}
       onScrollPositionChange={onScrollPositionChange} onVisiblePathChange={onVisiblePathChange} setViewerRef={setViewerRef}
       getInitialScrollTop={getInitialScrollTop}
@@ -1645,6 +1735,7 @@ const MultiFileReview = memo(function MultiFileReview({
       onBeginReattach={startReattach} onCancelReattach={stopReattach}
       onDropAll={dropAllReviewThreads}
       workingDrafts={workingDrafts} autosaveOnBlur={autosaveOnBlur} onError={onError}
+      guideView={guideView} guidePills={guideOrder?.pills ?? null} generatedPaths={generatedPaths} orderedItems={orderedItems}
     />
   </ReviewClockProvider>
 })

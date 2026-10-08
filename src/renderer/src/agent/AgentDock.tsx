@@ -70,6 +70,7 @@ export function AgentDock({ session, contextLabel, confirm, onOpenReference }: A
         authenticatingProvider={session.authenticatingProvider}
         statusError={session.statusError}
         attachments={session.attachments}
+        prefill={session.prefill}
         contextLabel={contextLabel}
         onProviderChange={session.setProvider}
         onModelChange={session.setModel}

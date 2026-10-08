@@ -116,10 +116,28 @@ if [[ -f "$cli_source" ]]; then
   done
 fi
 
+# The `kodi` skill lets Claude Code and Codex hand a change over with a review
+# guide. Linked, not copied, so it follows the installed app; only where the
+# agent's own folder already exists.
+skill_source="$target_app/Contents/Resources/skills/kodi"
+skills_linked=()
+if [[ -d "$skill_source" ]]; then
+  for agent_home in "${HOME}/.claude" "${HOME}/.codex"; do
+    [[ -d "$agent_home" ]] || continue
+    mkdir -p "$agent_home/skills" 2>/dev/null || continue
+    # A real folder there is someone's own skill; leave it alone.
+    if [[ -e "$agent_home/skills/kodi" && ! -L "$agent_home/skills/kodi" ]]; then continue; fi
+    ln -sfn "$skill_source" "$agent_home/skills/kodi" && skills_linked+=("$agent_home/skills/kodi")
+  done
+fi
+
 version="$(defaults read "$target_app/Contents/Info.plist" CFBundleShortVersionString)"
 echo "Installed Kodi $version in $target_app."
 if [[ -n "$cli_installed" ]]; then
   echo "CLI linked at $cli_installed — run 'kodi .' inside any folder."
 else
   echo "CLI not linked: add $cli_source to your PATH to use 'kodi .'." >&2
+fi
+if (( ${#skills_linked[@]} > 0 )); then
+  echo "Kodi skill linked at ${skills_linked[*]}."
 fi

@@ -132,18 +132,16 @@ test('DiffToolbar reveals the explorer when the sidebar is hidden', () => {
   expect(shown).toBe(true)
 })
 
-// Split and unified are two values of one mode, so the button names where it
-// would take you rather than claiming a pressed state for one of them.
-test('the diff layout control offers the other layout', () => {
+// Split view is a toggle beside wrap and folding, pressed while the diff is split.
+test('the diff layout control toggles split view', () => {
   const styles: DiffStyle[] = []
   render(<DiffToolbar comparison={null} selectedPath="src/app.ts" isGitRepository isFilePreview={false}
     diffStyle="split" workspaceView="multi" reviewFileCount={4} wordWrap={false} foldUnchanged
     fileEdit={editControls()} onDiffStyleChange={(style) => { styles.push(style) }}
     onWordWrapToggle={() => {}} onFoldUnchangedToggle={() => {}} />)
 
-  const toggle = screen.getByRole('button', { name: 'Switch to unified diff' })
-  expect(toggle.hasAttribute('aria-pressed')).toBe(false)
-  expect(screen.queryByRole('button', { name: 'Split diff' })).toBeNull()
+  const toggle = screen.getByRole('button', { name: 'Split view' })
+  expect(toggle.getAttribute('aria-pressed')).toBe('true')
 
   toggle.click()
   expect(styles).toEqual(['unified'])

@@ -50,7 +50,10 @@ export interface AgentSessionApi {
   setAccessMode(accessMode: AgentAccessMode): void
   refreshStatuses(): void
   login(provider: AgentProvider): void
-  attach(selection: AgentSelection): void
+  /** `prompt` fills the composer, as Ask agent on a review comment does. */
+  attach(selection: AgentSelection, prompt?: string): void
+  /** Text the composer should take, once per id. */
+  prefill: { id: number; text: string } | null
   removeAttachment(id: string): void
   ask(prompt: string): void
   toggle(): void
@@ -140,6 +143,7 @@ export function useAgentSession({ context, subject }: AgentSessionOptions): Agen
   const answer = useAgentAnswer()
   const initialSettings = useMemo(loadAgentSettings, [])
   const [open, setOpen] = useState(false)
+  const [prefill, setPrefill] = useState<{ id: number; text: string } | null>(null)
   const [provider, setProvider] = useState<AgentProvider>(initialSettings.provider)
   const [configuredAccessMode, setConfiguredAccessMode] = useState<AgentAccessMode>(initialSettings.accessMode)
   const [selections, setSelections] = useState(initialSettings.selections)
@@ -269,7 +273,7 @@ export function useAgentSession({ context, subject }: AgentSessionOptions): Agen
     }))
   }, [provider])
 
-  const attach = useCallback((selection: AgentSelection) => {
+  const attach = useCallback((selection: AgentSelection, prompt?: string) => {
     setOpen(true)
     if (subject == null || subjectKey == null) {
       setStatusError('Select code in a repository tab before adding it to the agent.')
@@ -281,6 +285,7 @@ export function useAgentSession({ context, subject }: AgentSessionOptions): Agen
     }
     const attachment = attachAgentSelection(subject, selection)
     setStatusError(null)
+    if (prompt != null && prompt !== '') setPrefill((current) => ({ id: (current?.id ?? 0) + 1, text: prompt }))
     setAttachmentsBySubject((current) => {
       const nextForSubject = mergeAgentAttachments(current[subjectKey] ?? [], attachment)
         .slice(-MAX_ATTACHMENTS_PER_TAB)
@@ -355,6 +360,7 @@ export function useAgentSession({ context, subject }: AgentSessionOptions): Agen
     refreshStatuses,
     login,
     attach,
+    prefill,
     removeAttachment,
     ask,
     toggle,
@@ -376,6 +382,7 @@ export function useAgentSession({ context, subject }: AgentSessionOptions): Agen
     model,
     models,
     open,
+    prefill,
     provider,
     refreshStatuses,
     removeAttachment,

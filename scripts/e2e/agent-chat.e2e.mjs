@@ -274,4 +274,72 @@ await runSuite('agent-chat', async (suite, cleanup) => {
   const finished = await cdp.waitFor(`${transcriptText}.includes('END-OF-SLOW') && [...document.querySelectorAll('.agent-dock .agent-question-references code')].some((code) => code.textContent === 'blob.py:1')`, 5_000, 16)
   suite.record('the chat left mid-answer finished in the background, reference included', !finished.timedOut,
     { text: (await cdp.eval(transcriptText)).slice(-120) })
+
+  // Ask agent on a review comment: the dock opens with the comment's lines
+  // attached and the composer holding the comment.
+  const deepFind = (selector) => `(() => {
+    const walk = (root) => {
+      const found = root.querySelector(${JSON.stringify(selector)})
+      if (found != null) return found
+      for (const element of root.querySelectorAll('*')) {
+        if (element.shadowRoot == null) continue
+        const inner = walk(element.shadowRoot)
+        if (inner != null) return inner
+      }
+      return null
+    }
+    return walk(document)
+  })()`
+  await cdp.eval(`document.querySelector('.agent-dock button[aria-label="New conversation"]')?.click()`)
+  await cdp.eval(`document.querySelectorAll('.agent-dock .agent-attachment button').forEach((button) => button.click())`)
+  await cdp.waitFor(lineStart + ' != null', 5_000, 16)
+  const again = await cdp.eval(lineStart)
+  await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: again.x, y: again.y, button: 'left', clickCount: 1 })
+  await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: again.x, y: again.y, button: 'left', clickCount: 1 })
+  await Bun.sleep(300)
+  await cdp.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'End', code: 'End', windowsVirtualKeyCode: 35, modifiers: 8, commands: ['moveToEndOfLineAndModifySelection'] })
+  await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'End', code: 'End', windowsVirtualKeyCode: 35, modifiers: 8 })
+  const commentButton = deepFind('[data-selection-action] button[aria-label="Comment"]')
+  const commentReady = await cdp.waitFor(`${commentButton} != null`, 5_000, 16)
+  if (!commentReady.timedOut) await cdp.eval(`${commentButton}.click()`)
+  const composerField = deepFind('.review-composer textarea')
+  await cdp.waitFor(`${composerField} != null`, 5_000, 16)
+  await cdp.eval(`${composerField}.focus()`)
+  await cdp.send('Input.insertText', { text: 'Should this be a tuple?' })
+  await cdp.eval(`${deepFind('.review-composer .review-composer-send')}?.click()`)
+  const askButton = deepFind('[data-review-ask-agent]')
+  const askReady = await cdp.waitFor(`${askButton} != null`, 5_000, 16)
+  if (!askReady.timedOut) await cdp.eval(`${askButton}.click()`)
+  const prefilled = await cdp.waitFor(`${composer}?.value === 'About this comment: Should this be a tuple?' && document.querySelector('.agent-dock .agent-attachment') != null`, 5_000, 16)
+  suite.record('Ask agent on a comment attaches its lines and fills the composer with it', !commentReady.timedOut && !askReady.timedOut && !prefilled.timedOut,
+    { composer: await cdp.eval(`${composer}?.value ?? null`) })
+  if (!prefilled.timedOut) {
+    await cdp.eval(`document.querySelector('.agent-dock button[aria-label="Send message"]').click()`)
+    await Bun.sleep(400)
+    const asked = await second.main.send('Runtime.evaluate', { returnByValue: true, expression: 'globalThis.__e2eAsks.at(-1)' })
+    suite.record('the question about the comment goes out with its one selection', asked.result?.value?.selections === 1, { ask: asked.result?.value })
+  }
+
+  // Suggest a commit message (Source Control): the dock's agent writes it from
+  // the staged diff, read in main; the field takes its title and body.
+  await second.main.send('Runtime.evaluate', { includeCommandLineAPI: true, expression: `(() => {
+    const { ipcMain } = require('electron')
+    globalThis.__e2eCommitAsks = []
+    ipcMain.removeHandler('repository:suggest-commit-message')
+    ipcMain.handle('repository:suggest-commit-message', (_event, request) => {
+      globalThis.__e2eCommitAsks.push(request)
+      return { title: 'Return a tuple from parse_file_uri', body: 'Callers unpack two values.' }
+    })
+  })()` })
+  await writeFile(join(fixture, 'blob.py'), 'def parse_file_uri():\n    return ("a", "b")\n')
+  await git(fixture, 'add', 'blob.py')
+  const cdp2 = second.cdp
+  await cdp2.eval(`document.querySelector('.source-control-titlebar-button')?.click()`)
+  const suggestButton = `document.querySelector('[data-scm-suggest]')`
+  const suggestReady = await cdp2.waitFor(`${suggestButton} != null && !${suggestButton}.disabled`, 10_000, 16)
+  if (!suggestReady.timedOut) await cdp2.eval(`${suggestButton}.click()`)
+  const suggested = await cdp2.waitFor(`document.querySelector('textarea[aria-label="Commit message"]')?.value === 'Return a tuple from parse_file_uri\\n\\nCallers unpack two values.'`, 5_000, 16)
+  const commitAsk = (await second.main.send('Runtime.evaluate', { returnByValue: true, expression: 'globalThis.__e2eCommitAsks.at(-1) ?? null' })).result?.value
+  suite.record('Suggest message fills the commit field from the dock\'s agent', !suggestReady.timedOut && !suggested.timedOut && typeof commitAsk?.provider === 'string',
+    { ask: commitAsk, value: await cdp2.eval(`document.querySelector('textarea[aria-label="Commit message"]')?.value ?? null`) })
 })

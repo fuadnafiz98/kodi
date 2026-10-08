@@ -26,6 +26,12 @@ export interface AppPreferences {
   // `owner/name` slugs that scope the welcome-screen pull-request inbox; empty
   // asks GitHub for everything the viewer can see.
   inboxRepos: string[]
+  /** Which reviews start their guide without a click, with the agent dock's model. */
+  guideAutoGenerate: GuideAutoGenerate
+  /** A pull request opened from outside opens on its Guide rather than its diff. */
+  guideOpensFirst: boolean
+  /** `{file}`, `{line}`, `{repo}`; empty opens VS Code. */
+  editorCommand: string
   keybindings: KeybindingMap
   // Bumped when a default shortcut is retired, so the migration that drops the
   // old default from storage runs once instead of on every load.
@@ -34,6 +40,9 @@ export interface AppPreferences {
   // default adopts the new one once and keeps any choice made after that.
   defaultsVersion: number
 }
+
+export type GuideAutoGenerate = 'off' | 'pull-requests' | 'all-reviews'
+const GUIDE_AUTO_GENERATE: readonly GuideAutoGenerate[] = ['off', 'pull-requests', 'all-reviews']
 
 export const KEYBINDINGS_VERSION = 2
 /** 1: word wrap became the default. */
@@ -94,6 +103,9 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   terminalScrollback: 5_000,
   restoreLastFolder: true,
   inboxRepos: [],
+  guideAutoGenerate: 'pull-requests',
+  guideOpensFirst: false,
+  editorCommand: '',
   keybindings: DEFAULT_KEYBINDINGS,
   keybindingsVersion: KEYBINDINGS_VERSION,
   defaultsVersion: DEFAULTS_VERSION
@@ -141,6 +153,11 @@ export function loadPreferences(): AppPreferences {
         ? parsed.restoreLastFolder
         : DEFAULT_PREFERENCES.restoreLastFolder,
       inboxRepos: normalizeInboxRepos(parsed.inboxRepos),
+      guideAutoGenerate: GUIDE_AUTO_GENERATE.includes(parsed.guideAutoGenerate as GuideAutoGenerate)
+        ? parsed.guideAutoGenerate as GuideAutoGenerate
+        : DEFAULT_PREFERENCES.guideAutoGenerate,
+      guideOpensFirst: typeof parsed.guideOpensFirst === 'boolean' ? parsed.guideOpensFirst : DEFAULT_PREFERENCES.guideOpensFirst,
+      editorCommand: typeof parsed.editorCommand === 'string' ? parsed.editorCommand.slice(0, 2_000) : DEFAULT_PREFERENCES.editorCommand,
       keybindings: loadKeybindings(parsed.keybindings, parsed.keybindingsVersion),
       keybindingsVersion: KEYBINDINGS_VERSION,
       defaultsVersion: DEFAULTS_VERSION

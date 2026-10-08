@@ -17,6 +17,7 @@ import {
   type AppPreferences,
   type CodeFont,
   type EditorTheme,
+  type GuideAutoGenerate,
   type InterfaceFont
 } from './preferences'
 import { themeCardVars, themeSeed } from './themePalette'
@@ -229,6 +230,12 @@ function EditorSection({ preferences, update }: SettingsSectionProps): React.JSX
             step={1_000} value={preferences.terminalScrollback} onChange={(value) => update('terminalScrollback', value)} />
           <output>{preferences.terminalScrollback.toLocaleString()}</output>
         </SettingRow>
+        <SettingRow controlId="editor-command" label="External editor"
+          description="⇧⌘O opens the file there. {file}, {line} and {repo} are filled in; empty uses VS Code.">
+          <input id="editor-command" name="editor-command" className="inbox-repo-input settings-editor-command" type="text"
+            value={preferences.editorCommand} placeholder='code -g "{file}:{line}"' spellCheck={false} autoComplete="off"
+            onChange={(event) => update('editorCommand', event.target.value)} />
+        </SettingRow>
       </section>
     </div>
   )
@@ -280,6 +287,26 @@ function PullRequestsSection({ preferences, update }: SettingsSectionProps): Rea
           <p>The welcome-screen inbox only fetches pull requests from these repositories. Leave it empty to see everything GitHub sends you.</p>
         </div>
         <InboxRepoEditor repos={preferences.inboxRepos} onChange={(repos) => update('inboxRepos', repos)} />
+      </section>
+      <section className="settings-block">
+        <div className="settings-block-heading">
+          <h2>Guides</h2>
+          <p>A guide explains a review section by section. It is written by the agent dock’s model, which reads the diff, not your repository.</p>
+        </div>
+        <SettingRow controlId="guide-auto-generate" label="Generate guides" description="Start a review’s guide as it opens, so it is ready when you switch to it. Reviews over 120 files or 400 hunks wait for a click.">
+          <SelectControl>
+            <select id="guide-auto-generate" name="guide-auto-generate" value={preferences.guideAutoGenerate}
+              onChange={(event) => update('guideAutoGenerate', event.target.value as GuideAutoGenerate)}>
+              <option value="pull-requests">For pull requests</option>
+              <option value="all-reviews">For every review</option>
+              <option value="off">Only when asked</option>
+            </select>
+          </SelectControl>
+        </SettingRow>
+        <SettingRow controlId="guide-opens-first" label="Open pull requests on the guide" description="A pull request you open shows its guide first; the diff is one click (⌘⇧G) away.">
+          <Toggle id="guide-opens-first" checked={preferences.guideOpensFirst} label="Open pull requests on the guide"
+            onChange={(checked) => update('guideOpensFirst', checked)} />
+        </SettingRow>
       </section>
     </div>
   )

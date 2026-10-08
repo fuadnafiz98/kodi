@@ -1,13 +1,17 @@
+import { isGeneratedPath } from '../../../shared/generatedPaths'
+
 export interface ReviewFileFilter {
   query: string
   hideTests: boolean
   hideApi: boolean
+  hideGenerated: boolean
 }
 
 export const EMPTY_REVIEW_FILE_FILTER: ReviewFileFilter = {
   query: '',
   hideTests: false,
-  hideApi: false
+  hideApi: false,
+  hideGenerated: false
 }
 
 const TEST_DIRECTORY = /(^|\/)(__tests__|tests?|spec)(\/|$)/i
@@ -25,7 +29,7 @@ export function isApiFilePath(path: string): boolean {
 }
 
 export function reviewFileFilterIsActive(filter: ReviewFileFilter): boolean {
-  return filter.hideTests || filter.hideApi || filter.query.trim() !== ''
+  return filter.hideTests || filter.hideApi || filter.hideGenerated || filter.query.trim() !== ''
 }
 
 type PathMatcher = (lowerPath: string, lowerName: string) => boolean
@@ -50,13 +54,15 @@ export function pathMatchesFilterQuery(path: string, query: string): boolean {
 
 export function applyReviewFileFilter(
   paths: readonly string[],
-  filter: ReviewFileFilter
+  filter: ReviewFileFilter,
+  isGenerated: (path: string) => boolean = isGeneratedPath
 ): readonly string[] {
   if (!reviewFileFilterIsActive(filter)) return paths
   const matchers = compileFilterQuery(filter.query)
   const next = paths.filter((path) => {
     if (filter.hideTests && isTestFilePath(path)) return false
     if (filter.hideApi && isApiFilePath(path)) return false
+    if (filter.hideGenerated && isGenerated(path)) return false
     return matchesAny(matchers, path)
   })
   // Filtering only drops paths, so an unchanged length is an unchanged list.

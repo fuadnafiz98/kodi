@@ -310,7 +310,7 @@ export function buildPullRequestPatchFromFiles(rawFiles: readonly RawPullRequest
   return { patch: sections.join(''), files, omittedFiles }
 }
 
-function findPatchSectionStarts(patch: string): number[] {
+export function findPatchSectionStarts(patch: string): number[] {
   const starts: number[] = []
   if (patch.startsWith(GIT_DIFF_SECTION_PREFIX)) starts.push(0)
   let boundaryIndex = patch.indexOf(`\n${GIT_DIFF_SECTION_PREFIX}`)

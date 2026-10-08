@@ -50,11 +50,32 @@ function Harness({
   )
 }
 
+const openGroupFilters = (): void => { fireEvent.click(screen.getByRole('button', { name: 'Group filters' })) }
+
+// The chips stay closed until asked for; the button shows when a closed row is hiding files.
+test('group filters open from the button beside the field', () => {
+  const { rerender } = render(<Harness />)
+  const toggle = screen.getByRole('button', { name: 'Group filters' })
+  expect(screen.queryByRole('button', { name: /Hide tests/ })).toBeNull()
+  expect(toggle.getAttribute('aria-expanded')).toBe('false')
+  expect(toggle.hasAttribute('data-hiding')).toBe(false)
+
+  fireEvent.click(toggle)
+  expect(toggle.getAttribute('aria-expanded')).toBe('true')
+  expect(screen.getByRole('button', { name: /Hide tests/ })).toBeTruthy()
+
+  fireEvent.click(toggle)
+  rerender(<Harness fileFilter={{ ...EMPTY_REVIEW_FILE_FILTER, hideTests: true }} />)
+  expect(screen.queryByRole('button', { name: /Hide tests/ })).toBeNull()
+  expect(toggle.hasAttribute('data-hiding')).toBe(true)
+})
+
 // A chip with no state to read is the complaint these replaced: the count says
 // what it would take, and pressing it says so again in the fill.
 test('filter chips report what they hide and carry their pressed state', async () => {
   const onFileFilterChange = mock(() => {})
   render(<Harness onFileFilterChange={onFileFilterChange} />)
+  openGroupFilters()
 
   const tests = screen.getByRole('button', { name: /Hide tests/ })
   expect(tests.getAttribute('aria-pressed')).toBe('false')
@@ -69,6 +90,7 @@ test('filter chips report what they hide and carry their pressed state', async (
 
 test('a pressed chip reads as pressed', () => {
   render(<Harness fileFilter={{ ...EMPTY_REVIEW_FILE_FILTER, hideApi: true }} />)
+  openGroupFilters()
 
   expect(screen.getByRole('button', { name: /Hide API/ }).getAttribute('aria-pressed')).toBe('true')
 })
@@ -76,6 +98,7 @@ test('a pressed chip reads as pressed', () => {
 // A control that would take nothing is a control with no effect.
 test('a chip with nothing to hide is disabled', async () => {
   render(<Harness filePaths={['README.md']} unfilteredFilePaths={['README.md']} />)
+  openGroupFilters()
 
   await waitFor(() => {
     expect(screen.getByRole('button', { name: /Hide tests/ }).hasAttribute('disabled')).toBe(true)

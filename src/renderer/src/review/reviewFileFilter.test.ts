@@ -23,15 +23,20 @@ describe('review file filters', () => {
       'src/services/jobs.py',
       'tests/e2e/verify.py'
     ]
-    expect(applyReviewFileFilter(paths, { query: '', hideTests: true, hideApi: false })).toEqual([
+    expect(applyReviewFileFilter(paths, { query: '', hideTests: true, hideApi: false, hideGenerated: false })).toEqual([
       'src/api/v1/verify.py',
       'src/services/jobs.py'
     ])
-    expect(applyReviewFileFilter(paths, { query: '', hideTests: false, hideApi: true })).toEqual([
+    expect(applyReviewFileFilter(paths, { query: '', hideTests: false, hideApi: true, hideGenerated: false })).toEqual([
       'src/services/jobs.py',
       'tests/e2e/verify.py'
     ])
-    expect(applyReviewFileFilter(paths, { query: '', hideTests: false, hideApi: false })).toBe(paths)
+    expect(applyReviewFileFilter(paths, { query: '', hideTests: false, hideApi: false, hideGenerated: false })).toBe(paths)
+  })
+
+  test('hides generated files: lockfiles, snapshots, minified bundles', () => {
+    const paths = ['bun.lock', 'src/app.ts', 'src/__snapshots__/app.test.ts.snap', 'dist/app.min.js']
+    expect(applyReviewFileFilter(paths, { query: '', hideTests: false, hideApi: false, hideGenerated: true })).toEqual(['src/app.ts'])
   })
 
   test('treats a typed query as a show-only glob or substring', () => {
@@ -41,11 +46,11 @@ describe('review file filters', () => {
       'src/services/jobs.py',
       'tests/e2e/verify.py'
     ]
-    expect(applyReviewFileFilter(paths, { query: '/api/*', hideTests: false, hideApi: false })).toEqual([
+    expect(applyReviewFileFilter(paths, { query: '/api/*', hideTests: false, hideApi: false, hideGenerated: false })).toEqual([
       'src/api/v1/verify.py',
       'src/api/v1/users.py'
     ])
-    expect(applyReviewFileFilter(paths, { query: '*.py, jobs', hideTests: true, hideApi: false })).toEqual([
+    expect(applyReviewFileFilter(paths, { query: '*.py, jobs', hideTests: true, hideApi: false, hideGenerated: false })).toEqual([
       'src/api/v1/verify.py',
       'src/api/v1/users.py',
       'src/services/jobs.py'

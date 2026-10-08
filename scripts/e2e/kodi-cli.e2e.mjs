@@ -21,10 +21,18 @@
 //     app's handler skips: nobody is there to answer it) held the quit for good;
 //   - and that draft, typed a moment before the signal, is back on the next
 //     launch: the drafts were written 400 ms after the last keystroke, and a
-//     page that unloaded first took them with it.
+//     page that unloaded first took them with it;
+//   - `kodi <folder>` on a folder with changes lands on its review of every
+//     changed file: when git answers after the window asks (the first snapshot
+//     a skeleton with no statuses), with that folder in front on one file, and
+//     on a launch after a session that left one file open. The launch checked
+//     "is this folder already painted" after opening its tab had painted it, so
+//     a skeleton's file view stuck; the folder in front was left alone; and a
+//     launch painted the last session's file view and kept it.
 //
 //   bun run e2e kodi-cli
-import { writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 
 import { createProfile, createRepository, git, launchApp, launchSecondInstance, press, removeLater, runSuite } from './harness.mjs'
@@ -110,6 +118,27 @@ async function typeDraft(cdp, path) {
   await cdp.key('keyDown', 'Backspace', 'Backspace', 8, 0)
   await cdp.key('keyUp', 'Backspace', 'Backspace', 8, 0)
   return !(await cdp.waitFor(`document.querySelector('.file-edit-actions .file-edit-state')?.textContent === 'Unsaved'`, 5_000, 16)).timedOut
+}
+
+const inReview = `(document.querySelector('.multi-file-code-view') != null)`
+const onOneFile = `(document.querySelector('.diff-stale-host') != null && document.querySelector('.multi-file-code-view') == null)`
+
+/** ⌘K to `path`, a file with no changes: it opens on its own. */
+async function openOneFile(cdp, path) {
+  await cdp.combo('k', 'KeyK', 75, 4)
+  await cdp.waitFor(`document.activeElement === document.querySelector('#command-palette-input')`, 8_000, 4)
+  await cdp.send('Input.insertText', { text: path })
+  await cdp.waitFor(`[...document.querySelectorAll('.command-palette-results button')].some((row) => row.textContent.includes(${JSON.stringify(path)}))`, 8_000, 8)
+  await cdp.enter()
+  return !(await cdp.waitFor(onOneFile, 8_000, 16)).timedOut
+}
+
+/** A `git` that answers `status` 600 ms late, so a launch's first snapshot is the skeleton. */
+async function slowGitStatus() {
+  const dir = await mkdtemp(join(tmpdir(), 'kodi-e2e-slow-git-'))
+  await writeFile(join(dir, 'git'), `#!/bin/bash\nfor a in "$@"; do if [ "$a" = status ]; then sleep 0.6; break; fi; done\nexec ${Bun.which('git')} "$@"\n`)
+  await chmod(join(dir, 'git'), 0o755)
+  return dir
 }
 
 async function repository(name, files) {
@@ -210,6 +239,45 @@ await runSuite('kodi-cli', async (suite, cleanup) => {
       activeTab: await booted.cdp.tryEval(`${activeTab}?.textContent ?? null`)
     })
     await booted.stop()
+  }
+
+  {
+    const changed = await repository('changed', { 'a.ts': 'export const a = 1\n', 'b.ts': 'export const b = 1\n', 'clean.ts': 'export const clean = 1\n' })
+    cleanup(removeLater(changed))
+    await writeFile(join(changed, 'a.ts'), 'export const a = 2\n')
+    await writeFile(join(changed, 'b.ts'), 'export const b = 2\n')
+    const slowGit = await slowGitStatus()
+    cleanup(removeLater(slowGit))
+    const { profile: changedProfile, cleanup: removeChangedProfile } = await createProfile()
+    cleanup(removeChangedProfile)
+
+    const app = await launchApp({ folder: changed, profile: changedProfile, pathPrefix: slowGit })
+    cleanup(app.stop)
+    const landed = await app.cdp.waitFor(`${inReview} && ${treeRow('a.ts')} != null`, 15_000, 16)
+    // Long enough for the live snapshot behind the skeleton to have re-derived the view.
+    await Bun.sleep(1_500)
+    suite.record('kodi <folder> on a changed folder lands on its review, also when git answers late', !landed.timedOut && await app.cdp.eval(inReview), {
+      view: await app.cdp.tryEval(`${inReview} ? 'review' : ${onOneFile} ? 'one file' : 'other'`)
+    })
+
+    const oneFile = await openOneFile(app.cdp, 'clean.ts')
+    await launchSecondInstance(changedProfile, changed)
+    const back = await app.cdp.waitFor(inReview, 8_000, 16)
+    suite.record('kodi <folder> with that folder in front on one file goes back to its review', oneFile && !back.timedOut, { oneFile })
+
+    const leftOnOneFile = await openOneFile(app.cdp, 'clean.ts')
+    // The session's write of the open file lands before the quit.
+    await Bun.sleep(1_500)
+    await app.stop()
+    const again = await launchApp({ folder: changed, profile: changedProfile })
+    cleanup(again.stop)
+    await again.cdp.waitFor(`${treeRow('a.ts')} != null`, 15_000, 16)
+    await Bun.sleep(1_500)
+    suite.record('kodi <folder> after a session left one file open lands on its review', leftOnOneFile && await again.cdp.eval(inReview), {
+      leftOnOneFile,
+      view: await again.cdp.tryEval(`${inReview} ? 'review' : ${onOneFile} ? 'one file' : 'other'`)
+    })
+    await again.stop()
   }
 
   {

@@ -6,6 +6,7 @@ import { DiffDisplayControls } from './DiffDisplayControls'
 import { diffToolbarLayout } from './diffToolbarModel'
 import { DiffToolbarSubject } from './DiffToolbarSubject'
 import { FileEditActions } from './FileEditActions'
+import { ReviewGuideSwitch } from '../review/ReviewGuideSwitch'
 
 interface DiffToolbarProps {
   comparison: FileComparison | null
@@ -32,6 +33,8 @@ interface DiffToolbarProps {
   reviewLink?: { href: string; label: string }
   /** Before the display controls: the review session's status and actions. */
   reviewActions?: React.ReactNode
+  /** The review tab whose Diff | Guide switch this toolbar shows. */
+  reviewWorldId?: string | null
 }
 
 export function DiffToolbar({
@@ -55,7 +58,8 @@ export function DiffToolbar({
   sidebarShortcut,
   reviewBadge,
   reviewLink,
-  reviewActions
+  reviewActions,
+  reviewWorldId
 }: DiffToolbarProps): React.JSX.Element {
   const subject = {
     selectedPath,
@@ -88,6 +92,9 @@ export function DiffToolbar({
       <DiffToolbarSubject subject={subject} comparison={comparison} externalLink={reviewLink}>{reviewBadge}</DiffToolbarSubject>
       {reviewActions == null ? null : <div className="diff-review-actions">{reviewActions}</div>}
       <div className="diff-controls">
+        {workspaceView === 'multi' && reviewWorldId != null && reviewFileCount > 0
+          ? <ReviewGuideSwitch worldId={reviewWorldId} />
+          : null}
         <FileEditActions fileEdit={fileEdit} selectedPath={selectedPath} />
         <DiffDisplayControls
           fileEdit={fileEdit}

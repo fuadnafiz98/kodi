@@ -83,6 +83,7 @@ import {
 import {
   MAX_REMEMBERED_REVIEW_BYTES,
   prepareAgentReviewContext,
+  resolveRememberedReview,
   rememberedAgentReviewFrom,
   RememberedReviewStore,
   reviewKey,
@@ -503,7 +504,7 @@ export function isSameGitHubLogin(firstLogin: string, secondLogin: string): bool
 
 const require = createRequire(import.meta.url)
 const { rgPath } = require('@vscode/ripgrep') as { rgPath: string }
-const RIPGREP_EXECUTABLE = resolvePackagedExecutablePath(rgPath)
+export const RIPGREP_EXECUTABLE = resolvePackagedExecutablePath(rgPath)
 
 export function resolvePackagedExecutablePath(executablePath: string): string {
   return executablePath.replace(/([\\/])app\.asar([\\/])/, '$1app.asar.unpacked$2')
@@ -1770,6 +1771,14 @@ export class RepositoryService {
   }
 
   async prepareAgentReview(subject: AgentRequestSubject): Promise<string> {
+    const { remembered, cached } = await this.#lookupAgentReview(subject)
+    return prepareAgentReviewContext({ snapshot: this.#snapshot, subject, remembered, cached })
+  }
+
+  async #lookupAgentReview(subject: AgentRequestSubject): Promise<{
+    remembered: RememberedAgentReview | null
+    cached: (CachedPullRequestReview & { headRefOid: string }) | null
+  }> {
     const remembered = this.#findRememberedReview(subject)
     // A review remembered without its patch was too big to keep one in memory, so
     // the copy on disk is read for it exactly as for a review never remembered.
@@ -1780,12 +1789,29 @@ export class RepositoryService {
     const cached = index != null && index.headRefOid === subject.headOid
       ? await this.#pullRequestCache?.read(index.url, index.snapshotIdentity) ?? null
       : null
-    return prepareAgentReviewContext({
-      snapshot: this.#snapshot,
-      subject,
+    return {
       remembered,
       cached: cached == null ? null : { ...cached, headRefOid: cached.snapshotIdentity.headOid }
-    })
+    }
+  }
+
+  /**
+   * The whole patch a review tab shows, for the guide: the working tree's
+   * changes against HEAD, or the remembered (or cached) patch of a pull request,
+   * branch comparison or commit. Null when there is nothing to describe.
+   */
+  async resolveReviewPatch(subject: AgentRequestSubject): Promise<{ patch: string; title: string | null } | null> {
+    if (subject.source === 'workingTree') {
+      const snapshot = this.#snapshot
+      if (snapshot == null || snapshot.kind !== 'git' || snapshot.statuses.length === 0) return null
+      const paths = snapshot.statuses.map((status) => status.path)
+      const { patch } = await this.getWorkingTreePatch(paths)
+      return patch.trim() === '' ? null : { patch, title: null }
+    }
+    const { remembered, cached } = await this.#lookupAgentReview(subject)
+    const review = resolveRememberedReview(remembered, cached, subject)
+    if (review == null || review.patch.trim() === '') return null
+    return { patch: review.patch, title: review.title }
   }
 
   #rememberAgentReview(review: PullRequestReview | LocalBranchReview): void {

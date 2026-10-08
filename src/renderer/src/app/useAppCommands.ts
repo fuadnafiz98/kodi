@@ -4,6 +4,8 @@ import type { CommandPaletteHandle } from '../palette/CommandPaletteHost'
 import { commandFromEvent, type AppCommand } from '../settings/keybindings'
 import type { AppPreferences } from '../settings/preferences'
 import type { useGitWorkflow } from '../git/useGitWorkflow'
+import { openFileInEditor } from '../review/editorTarget'
+import { toggleReviewView } from '../review/reviewGuideView'
 
 export interface CommandPaletteControls {
   ref: RefObject<CommandPaletteHandle | null>
@@ -35,6 +37,10 @@ export interface AppCommandOptions {
   setPreferences: Dispatch<SetStateAction<AppPreferences>>
   toggleSidebar(): void
   toggleTerminal(): void
+  /** The file in front, for "Open in editor". */
+  selectedPath?: string | null
+  editorCommand?: string
+  onError?(message: string): void
 }
 
 /**
@@ -52,7 +58,10 @@ export function useAppCommands({
   setSettingsOpen,
   setPreferences,
   toggleSidebar,
-  toggleTerminal
+  toggleTerminal,
+  selectedPath = null,
+  editorCommand = '',
+  onError
 }: AppCommandOptions): (command: AppCommand) => void {
   const runCommand = useCallback((command: AppCommand) => {
     // While settings is modal only the two commands that manage overlays run —
@@ -78,8 +87,16 @@ export function useAppCommands({
       setPreferences((current) => ({ ...current, foldUnchanged: !current.foldUnchanged }))
     } else if (command === 'toggleTerminal' && hasSnapshot) {
       toggleTerminal()
+    } else if (command === 'toggleReviewGuide' && hasSnapshot) {
+      const world = gitWorkflow.activeWorld
+      if (world != null && world.source !== 'new') toggleReviewView(world.worldId)
+    } else if (command === 'openInEditor' && hasSnapshot && selectedPath != null) {
+      void openFileInEditor(selectedPath, null, editorCommand).catch((error: unknown) => {
+        onError?.(error instanceof Error ? error.message : 'The file could not be opened in an editor.')
+      })
     }
-  }, [closeFolderPicker, commandPalette, hasSnapshot, setPreferences, setSettingsOpen, settingsOpen, toggleFolderPicker, toggleSidebar, toggleTerminal])
+  }, [closeFolderPicker, commandPalette, editorCommand, gitWorkflow.activeWorld, hasSnapshot, onError, selectedPath, setPreferences,
+    setSettingsOpen, settingsOpen, toggleFolderPicker, toggleSidebar, toggleTerminal])
 
   useAppShortcuts({
     commandPaletteRef: commandPalette.ref,

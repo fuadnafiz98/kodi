@@ -102,8 +102,11 @@ async function hydrateRewrites(
 // older snapshot. That is a git repository answering "ask again", not a plain
 // folder with no patch: treating it as the latter fetched fifty files one by
 // one, re-parsed and re-highlighted them, on every save made while a review was
-// loading — the stalls a busy repository kept hitting.
-const SUPERSEDED_PATCH_RETRIES = 3
+// loading — the stalls a busy repository kept hitting. It keeps asking for as
+// long as writes keep superseding the build: a cap of three let a patch that
+// takes longer to build than the gap between writes (24k untracked files, a
+// status tick every 1.5 s) fall through to 24k one-file requests.
+const SUPERSEDED_PATCH_MAX_WAIT_MS = 1_000
 
 export async function requestWorkingTreePatch(
   repository: Pick<NonNullable<Window['repository']>, 'getWorkingTreePatch'>,
@@ -117,8 +120,8 @@ export async function requestWorkingTreePatch(
       return await repository.getWorkingTreePatch([...paths], requestId)
     } catch (error) {
       const superseded = error instanceof Error && error.message.includes(COMMAND_ABORTED_MESSAGE)
-      if (!superseded || isCancelled() || attempt >= SUPERSEDED_PATCH_RETRIES) throw error
-      await wait(100 * (attempt + 1))
+      if (!superseded || isCancelled()) throw error
+      await wait(Math.min(SUPERSEDED_PATCH_MAX_WAIT_MS, 100 * (attempt + 1)))
       if (isCancelled()) throw error
     }
   }

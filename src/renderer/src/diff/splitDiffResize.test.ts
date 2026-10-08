@@ -57,29 +57,33 @@ describe('split diff resizing', () => {
     expect(COLLAPSED_SEPARATOR_CSS).not.toContain('--kodi-split-before-width')
   })
 
-  it('keeps expand chevrons on the unmodified-lines seam', () => {
-    expect(COLLAPSED_SEPARATOR_CSS).toContain(
+  // The chevrons sit in the gutter, right under the numbers they open: in the
+  // code column they drew a track past the numbers, ~25 px from what they expand.
+  it('keeps expand chevrons in the gutter, next to the line numbers', () => {
+    expect(declarationsFor(
+      COLLAPSED_SEPARATOR_CSS,
       '[data-gutter] [data-separator="line-info-basic"] [data-expand-button]'
-    )
-    expect(COLLAPSED_SEPARATOR_CSS).toContain(
+    )).toContain('display: flex')
+    expect(declarationsFor(
+      COLLAPSED_SEPARATOR_CSS,
+      '[data-gutter] [data-separator="line-info-basic"] [data-separator-wrapper]'
+    )).toContain('justify-content: flex-end')
+    expect(declarationsFor(
+      COLLAPSED_SEPARATOR_CSS,
       '[data-content] [data-separator="line-info-basic"] [data-expand-button]'
-    )
-    expect(COLLAPSED_SEPARATOR_CSS).toContain(
-      'grid-template-columns: 28px 28px minmax(0, 1fr)'
-    )
+    )).toContain('display: none')
   })
 
-  // Pierre pins the label to grid column 2, which is the second button's track
-  // as soon as a hunk can expand both ways: the count and the down chevron drew
-  // in one 28px cell.
-  it('keeps the unmodified-line count out of the expand buttons’ tracks', () => {
+  // With no buttons in the code column, the count owns its only track — Pierre
+  // pins it to column 2, which would otherwise be an implicit track.
+  it('gives the unmodified-line count the whole code column', () => {
+    expect(declarationsFor(
+      COLLAPSED_SEPARATOR_CSS,
+      '[data-content] [data-separator="line-info-basic"] [data-separator-wrapper]'
+    )).toContain('grid-template-columns: minmax(0, 1fr)')
     expect(declarationsFor(
       COLLAPSED_SEPARATOR_CSS,
       '[data-content] [data-separator="line-info-basic"] [data-separator-content]'
-    )).toContain('grid-column: -2 / -1')
-    expect(declarationsFor(
-      COLLAPSED_SEPARATOR_CSS,
-      '[data-diff-type="split"] [data-additions] [data-content] [data-separator="line-info-basic"] [data-separator-content]'
     )).toContain('grid-column: 1 / -1')
   })
 

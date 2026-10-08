@@ -51,6 +51,7 @@ import { EditorStatusBar } from '../editor/EditorStatusBar'
 import { useViewerContext } from '../editor/ViewerProviders'
 import { retainReviewItems } from '../review/reviewItems'
 import { applyReviewFileFilter, EMPTY_REVIEW_FILE_FILTER } from '../review/reviewFileFilter'
+import { useGeneratedPathTest } from '../review/reviewFileMarks'
 import { useReviewDraft } from '../review/useReviewDraft'
 import { reviewPathsForSnapshot, workspaceViewForTreePath } from '../explorer/workspaceMode'
 import { samePathList } from '../explorer/snapshotPaths'
@@ -223,7 +224,7 @@ export interface RepositoryWorkspaceProps {
   diffStyle: DiffStyle
   workspaceView: WorkspaceView
   preferences: AppPreferences
-  onAttachToAgent(selection: AgentSelection): void
+  onAttachToAgent(selection: AgentSelection, prompt?: string): void
   onPreferencesChange(preferences: AppPreferences): void
   repositoryReview: RepositoryReview | null
   reviewWorldSource: 'desk' | 'patch'
@@ -237,7 +238,7 @@ export interface RepositoryWorkspaceProps {
   /** Reopens the pull request at whatever its head commit is now. */
   /** Resolves false when the reload failed, so a watch can raise its notice again. */
   onReloadReview(pullRequestUrl: string): Promise<boolean>
-  submittingPullRequestReview: boolean
+  submittingPullRequestReview: PullRequestReviewEvent | null
   pullRequestReviewMessage: string | null
   onSubmitPullRequestReview(event: PullRequestReviewEvent, body: string, comments: PullRequestReviewComment[]): Promise<boolean>
   onComparisonSaved(comparison: FileComparison): void
@@ -262,7 +263,7 @@ interface RepositoryReviewHeaderProps {
   wordWrap: boolean
   foldUnchanged: boolean
   fileEdit: FileEditControls
-  submittingPullRequestReview: boolean
+  submittingPullRequestReview: PullRequestReviewEvent | null
   pullRequestReviewMessage: string | null
   inlineCommentCount: number
   orphanedCommentCount: number
@@ -279,6 +280,7 @@ interface RepositoryReviewHeaderProps {
   sidebarVisible: boolean
   onSidebarToggle(): void
   sidebarShortcut: string
+  reviewWorldId?: string
 }
 
 function RepositoryReviewHeader({
@@ -310,7 +312,8 @@ function RepositoryReviewHeader({
   onSubmitPullRequestReview,
   sidebarVisible,
   onSidebarToggle,
-  sidebarShortcut
+  sidebarShortcut,
+  reviewWorldId
 }: RepositoryReviewHeaderProps): React.JSX.Element {
   return (
     <>
@@ -333,6 +336,7 @@ function RepositoryReviewHeader({
         sidebarVisible={sidebarVisible}
         onSidebarToggle={onSidebarToggle}
         sidebarShortcut={sidebarShortcut}
+        reviewWorldId={reviewWorldId}
         reviewLink={repositoryReview?.kind === 'github' && workspaceView === 'multi'
           ? { href: repositoryReview.pullRequest.url, label: `Open #${repositoryReview.pullRequest.number} on GitHub` }
           : undefined}
@@ -362,7 +366,6 @@ function RepositoryReviewHeader({
         body={reviewComposerBody}
         onExpandedChange={onReviewComposerExpandedChange}
         onBodyChange={onReviewComposerBodyChange}
-        onOpen={onOpenReviewSummary}
         onSubmit={onSubmitPullRequestReview}
       />
     </>
@@ -657,6 +660,7 @@ interface RepositoryDiffPanelProps {
   viewerSuspended: boolean
   workspaceView: WorkspaceView
   reviewWorldId: string
+  reviewRoot: string
   reviewSessionRevision: number
   reviewPaths: readonly string[]
   diffStyle: DiffStyle
@@ -682,7 +686,7 @@ interface RepositoryDiffPanelProps {
   pendingRemoteThreadId: string | null
   onReplyToRemoteThread(threadId: string, body: string): void
   onResolveRemoteThread(threadId: string, resolved: boolean): void
-  onAttachToAgent(selection: AgentSelection): void
+  onAttachToAgent(selection: AgentSelection, prompt?: string): void
   reviewCommand: { command: ReviewCommand; path: string; revision: number } | null
   surfaceComparison: FileComparison | null
   surfaceLoading: boolean
@@ -741,7 +745,7 @@ function useRepositoryReviewHeader({
   reviewWorldSource: 'desk' | 'patch'
   preferences: AppPreferences
   fileEdit: FileEditControls
-  submittingPullRequestReview: boolean
+  submittingPullRequestReview: PullRequestReviewEvent | null
   pullRequestReviewMessage: string | null
   inlineCommentCount: number
   orphanedCommentCount: number
@@ -840,6 +844,7 @@ const RepositoryDiffPanel = memo(function RepositoryDiffPanel({
   viewerSuspended,
   workspaceView,
   reviewWorldId,
+  reviewRoot,
   reviewSessionRevision,
   reviewPaths,
   diffStyle,
@@ -898,7 +903,7 @@ const RepositoryDiffPanel = memo(function RepositoryDiffPanel({
 
   return (
     <section ref={surfaceRef} className={`diff-panel ${isFilePreview ? 'file-preview-mode' : ''}`} id="repository-diff">
-      <RepositoryReviewHeader {...header} />
+      <RepositoryReviewHeader {...header} reviewWorldId={reviewWorldId} />
       <FindBar />
       <EditConflictBar conflict={conflict} onKeepDraft={onKeepDraft} onReloadFromDisk={onReloadFromDisk} />
       <ConversationErrorBar message={conversationUnavailable} onRetry={onRetryConversation} />
@@ -912,6 +917,7 @@ const RepositoryDiffPanel = memo(function RepositoryDiffPanel({
             <MultiFileReview
               key={reviewSessionRevision}
               worldId={reviewWorldId}
+              reviewRoot={reviewRoot}
               workingDrafts={workingDrafts}
               autosaveOnBlur={autosaveOnBlur}
               onError={onError}
@@ -966,7 +972,6 @@ const RepositoryDiffPanel = memo(function RepositoryDiffPanel({
         body={header.reviewComposerBody}
         onExpandedChange={header.onReviewComposerExpandedChange}
         onBodyChange={header.onReviewComposerBodyChange}
-        onOpen={header.onOpenReviewSummary}
         onSubmit={header.onSubmitPullRequestReview}
       />
       {showStatusBar ? (
@@ -1518,13 +1523,15 @@ const RepositoryWorkspace = memo(function RepositoryWorkspace({
   // The field stays on the urgent value; the scan over every path (and the tree
   // rebuild behind it) runs on the deferred one, so typing is never behind it.
   const deferredFileFilter = useDeferredValue(fileFilter)
+  // `.gitattributes` decides "generated" for the changed files it has answered for.
+  const isGenerated = useGeneratedPathTest(snapshot.root)
   const visibleTreePaths = useMemo(
-    () => applyReviewFileFilter(treeSourcePaths, deferredFileFilter),
-    [deferredFileFilter, treeSourcePaths]
+    () => applyReviewFileFilter(treeSourcePaths, deferredFileFilter, isGenerated),
+    [deferredFileFilter, treeSourcePaths, isGenerated]
   )
   const visibleReviewPaths = useMemo(
-    () => applyReviewFileFilter(reviewPaths, deferredFileFilter),
-    [deferredFileFilter, reviewPaths]
+    () => applyReviewFileFilter(reviewPaths, deferredFileFilter, isGenerated),
+    [deferredFileFilter, reviewPaths, isGenerated]
   )
   const { threadsByPath, setThreadsByPath, viewedFiles, setViewedFiles, load: reviewLoad } =
     useRepositoryReviewSession({
@@ -1716,7 +1723,7 @@ const RepositoryWorkspace = memo(function RepositoryWorkspace({
       <Explorer filePaths={explorerPaths} model={model} theme={preferences.editorTheme}
         sidebarVisible={sidebarVisible} onSidebarToggle={onSidebarToggle} sidebarShortcut={sidebarShortcut}
         isGit={snapshot.kind === 'git'} branchName={snapshot.kind === 'git' ? snapshot.branch : null}
-        reviewMode={treeSourcePaths !== snapshot.paths}
+        reviewMode={treeSourcePaths !== snapshot.paths} isGenerated={isGenerated}
         onBranchesOpen={onBranchesOpen} onRowActivate={activateTreeRow}
         fileFilter={fileFilter} onFileFilterChange={setFileFilter}
         unfilteredFilePaths={treeSourcePaths} />
@@ -1734,6 +1741,7 @@ const RepositoryWorkspace = memo(function RepositoryWorkspace({
         viewerSuspended={viewerSuspended}
         workspaceView={workspaceView}
         reviewWorldId={reviewWorldId}
+        reviewRoot={snapshot.root}
         reviewSessionRevision={reviewSessionRevision}
         reviewPaths={visibleReviewPaths}
         diffStyle={diffStyle}

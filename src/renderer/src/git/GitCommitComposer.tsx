@@ -1,5 +1,5 @@
 import { useCallback, useRef, useState } from 'react'
-import { IconCheck, IconChevronSm, IconRefresh } from '@pierre/icons'
+import { IconCheck, IconChevronSm, IconRefresh, IconSparkles } from '@pierre/icons'
 
 import { usePopoverDismiss } from '../app/usePopoverDismiss'
 import { commitButtonLabel } from './gitChangesModel'
@@ -54,6 +54,12 @@ function CommitMenu({ amend, label, available, canAmend, onPush, onToggleAmend }
   )
 }
 
+/** Errors from main arrive wrapped ("Error invoking remote method …: Error: …"). */
+function plainError(error: unknown): string {
+  const text = error instanceof Error ? error.message : String(error)
+  return text.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, '')
+}
+
 function CommitButtonContent({ committing, amend, label }: {
   committing: boolean
   amend: boolean
@@ -81,6 +87,10 @@ export function GitCommitComposer({
   const [amend, setAmend] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
   const [needsMessage, setNeedsMessage] = useState(false)
+  const [suggesting, setSuggesting] = useState(false)
+  const [suggestError, setSuggestError] = useState<string | null>(null)
+  // Bumped by Stop, so an answer that lands after it is dropped.
+  const suggestTicket = useRef(0)
   const splitRef = useRef<HTMLDivElement>(null)
   const messageRef = useRef<HTMLTextAreaElement>(null)
   const closeMenu = useCallback(() => setMenuOpen(false), [])
@@ -119,6 +129,42 @@ export function GitCommitComposer({
     setAmend(false)
   }
 
+  // The agent dock's provider and model write the message; the staged diff is
+  // read in main, so nothing here waits on it.
+  const suggest = (): void => {
+    if (suggesting) {
+      suggestTicket.current += 1
+      setSuggesting(false)
+      void window.repository?.cancelCommitMessage()
+      return
+    }
+    const agent = window.__kodiReviewGuide?.agent
+    const repository = window.repository
+    if (repository == null) return
+    if (agent == null) {
+      setSuggestError('Choose an agent in the agent panel first.')
+      return
+    }
+    setSuggesting(true)
+    setSuggestError(null)
+    const ticket = ++suggestTicket.current
+    // A promise chain, not try/finally: the React Compiler skips a component
+    // with a `finally` clause.
+    repository.suggestCommitMessage({ provider: agent.provider, model: agent.model, effort: agent.effort }).then(
+      ({ title, body }) => {
+        if (ticket !== suggestTicket.current) return
+        setSuggesting(false)
+        updateMessage(body === '' ? title : `${title}\n\n${body}`)
+      },
+      (error: unknown) => {
+        if (ticket !== suggestTicket.current) return
+        setSuggesting(false)
+        const text = plainError(error)
+        if (!/cancel/i.test(text)) setSuggestError(text)
+      }
+    )
+  }
+
   const placeholder = commitPlaceholder(amend, lastCommitSubject, branch)
 
   return (
@@ -136,6 +182,7 @@ export function GitCommitComposer({
           <button type="button" onClick={() => setAmend(false)}>Cancel</button>
         </div>
       ) : null}
+      <div className="scm-message-wrap">
       <textarea
         ref={messageRef}
         name="commit-message"
@@ -147,6 +194,8 @@ export function GitCommitComposer({
         spellCheck
         placeholder={placeholder}
         value={message}
+        readOnly={suggesting}
+        aria-busy={suggesting}
         onChange={(event) => updateMessage(event.target.value)}
         onKeyDown={(event) => {
           if (event.key !== 'Enter' || !(event.metaKey || event.ctrlKey)) return
@@ -154,6 +203,21 @@ export function GitCommitComposer({
           void submit(event.shiftKey)
         }}
       />
+      <button
+        className="scm-suggest"
+        type="button"
+        data-scm-suggest=""
+        disabled={stagedCount === 0 && !suggesting}
+        aria-label={suggesting ? 'Stop writing the commit message' : 'Suggest a commit message from the staged changes'}
+        title={stagedCount === 0 ? 'Stage changes to suggest a message' : suggesting ? 'Stop' : 'Suggest a message from the staged changes'}
+        onClick={suggest}
+      >
+        {suggesting ? <IconRefresh className="spin" aria-hidden="true" /> : <IconSparkles aria-hidden="true" />}
+      </button>
+      </div>
+      {suggestError != null ? (
+        <p className="scm-message-hint" role="alert">{suggestError}</p>
+      ) : null}
       {needsMessage ? (
         <p id="scm-message-hint" className="scm-message-hint" role="status">Write a message to commit.</p>
       ) : null}

@@ -1,11 +1,12 @@
-import { IconApproved, IconComment, IconWarningOctogonFill, IconX } from '@pierre/icons'
+import { IconApproved, IconComment, IconRefresh, IconWarningOctogonFill, IconX } from '@pierre/icons'
 
 import type { PullRequestReviewEvent } from '../../../shared/contracts'
 
 export interface PullRequestReviewActionsProps {
   /** The finish variant has no Cancel: it lives at the foot of the review. */
   showCancel: boolean
-  submitting: boolean
+  /** The decision being posted to GitHub, or null. Its button says so meanwhile. */
+  submitting: PullRequestReviewEvent | null
   /** Orphaned comments block every decision until they are dealt with. */
   blocked: boolean
   hasReviewContent: boolean
@@ -29,27 +30,32 @@ export function PullRequestReviewActions({
   const approveTitle = viewerCanSubmitDecision
     ? undefined
     : 'You cannot approve your own pull request.'
+  const spinner = <IconRefresh className="spin" />
   return (
     <div>
       {showCancel ? (
-        <button className="bar-button" type="button" onClick={onCancel} disabled={submitting}><IconX />Cancel</button>
+        <button className="bar-button" type="button" onClick={onCancel} disabled={submitting != null}><IconX />Cancel</button>
       ) : null}
       <button className="bar-button" type="button" onClick={() => onSubmit('comment')}
-        disabled={blocked || !hasReviewContent}><IconComment />Comment</button>
+        disabled={blocked || !hasReviewContent} aria-busy={submitting === 'comment'}>
+        {submitting === 'comment' ? <>{spinner}Commenting…</> : <><IconComment />Comment</>}
+      </button>
       <button
         className="bar-button danger"
         type="button"
         title={requestChangesTitle}
         onClick={() => onSubmit('request-changes')}
         disabled={blocked || !hasReviewContent || !viewerCanSubmitDecision}
-      ><IconWarningOctogonFill />Request Changes</button>
+        aria-busy={submitting === 'request-changes'}
+      >{submitting === 'request-changes' ? <>{spinner}Requesting Changes…</> : <><IconWarningOctogonFill />Request Changes</>}</button>
       <button
         className="bar-button primary"
         type="button"
         title={approveTitle}
         onClick={() => onSubmit('approve')}
         disabled={blocked || !viewerCanSubmitDecision}
-      ><IconApproved />Approve</button>
+        aria-busy={submitting === 'approve'}
+      >{submitting === 'approve' ? <>{spinner}Approving…</> : <><IconApproved />Approve</>}</button>
     </div>
   )
 }

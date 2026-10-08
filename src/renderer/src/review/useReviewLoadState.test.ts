@@ -196,11 +196,21 @@ describe('requestWorkingTreePatch', () => {
     expect(calls).toBe(1)
   })
 
-  it('gives up after a few supersessions in a row', async () => {
+  // Giving up after three fell through to one request per file: 24k of them
+  // when a status tick landed every 1.5 s while a 24k-file patch was building.
+  it('keeps asking while writes keep superseding it, waiting at most a second between asks', async () => {
     let calls = 0
-    const repository = { getWorkingTreePatch: async () => { calls += 1; throw aborted } }
-    await expect(requestWorkingTreePatch(repository, ['x'], 'r', () => false, noWait)).rejects.toThrow(COMMAND_ABORTED_MESSAGE)
-    expect(calls).toBe(4)
+    const waits: number[] = []
+    const repository = {
+      getWorkingTreePatch: async () => {
+        calls += 1
+        if (calls <= 15) throw aborted
+        return patch
+      }
+    }
+    expect(await requestWorkingTreePatch(repository, ['x'], 'r', () => false, async (ms) => { waits.push(ms) })).toEqual(patch)
+    expect(calls).toBe(16)
+    expect(Math.max(...waits)).toBe(1_000)
   })
 })
 

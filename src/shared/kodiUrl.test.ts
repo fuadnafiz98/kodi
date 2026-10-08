@@ -1,6 +1,14 @@
 import { describe, expect, it } from 'bun:test'
 
-import { findKodiFolderRequest, findKodiReviewRequest, formatKodiReviewUrl, parseKodiReviewUrl } from './kodiUrl.js'
+import {
+  findKodiClaudeSessionRequest,
+  findKodiFolderRequest,
+  findKodiGuideFileRequest,
+  findKodiRefRequest,
+  findKodiReviewRequest,
+  formatKodiReviewUrl,
+  parseKodiReviewUrl
+} from './kodiUrl.js'
 
 const pullRequestUrl = 'https://github.com/acme/app/pull/9'
 
@@ -164,5 +172,48 @@ describe('findKodiFolderRequest', () => {
       '--kodi-folder=/tmp/real-folder',
       '-psn_0_12345'
     ], true)).toBe('/tmp/real-folder')
+  })
+})
+
+describe('findKodiRefRequest', () => {
+  it('reads a full SHA in both flag forms', () => {
+    expect(findKodiRefRequest(['Kodi', '--kodi-ref=0123456789abcdef0123456789abcdef01234567'])).toBe('0123456789abcdef0123456789abcdef01234567')
+    expect(findKodiRefRequest(['Kodi', '--kodi-ref', '0123456789ABCDEF0123456789ABCDEF01234567'])).toBe('0123456789abcdef0123456789abcdef01234567')
+  })
+
+  it('survives a switch-first argv', () => {
+    expect(findKodiRefRequest(['Kodi', '--kodi-folder=/repo', '--kodi-ref=0123456789abcdef0123456789abcdef01234567', '--allow-file-access', '/repo'])).toBe('0123456789abcdef0123456789abcdef01234567')
+    expect(findKodiRefRequest(['Kodi', '--kodi-ref', '--allow-file-access', '/repo'])).toBeNull()
+  })
+
+  it('rejects anything but a 40-hex commit', () => {
+    expect(findKodiRefRequest(['Kodi', '--kodi-ref=main'])).toBeNull()
+    expect(findKodiRefRequest(['Kodi', '--kodi-ref=0123abc'])).toBeNull()
+    expect(findKodiRefRequest(['Kodi'])).toBeNull()
+  })
+})
+
+describe('findKodiGuideFileRequest', () => {
+  it('reads an absolute path, spaces included', () => {
+    expect(findKodiGuideFileRequest(['Kodi', '--kodi-guide-file=/tmp/my guides/g.json'])).toBe('/tmp/my guides/g.json')
+    expect(findKodiGuideFileRequest(['Kodi', '--kodi-folder=/repo', '--kodi-guide-file', '/tmp/g.json'])).toBe('/tmp/g.json')
+  })
+
+  it('rejects a relative path', () => {
+    expect(findKodiGuideFileRequest(['Kodi', '--kodi-guide-file=g.json'])).toBeNull()
+    expect(findKodiGuideFileRequest(['Kodi', '--kodi-guide-file', '--no-sandbox'])).toBeNull()
+  })
+
+  it('never reads a guide or ref value as the folder', () => {
+    expect(findKodiFolderRequest(['Kodi', '--kodi-guide-file', '/tmp/g.json', '/repo'], true)).toBe('/repo')
+    expect(findKodiFolderRequest(['Kodi', '--kodi-ref', '0123456789abcdef0123456789abcdef01234567'], true)).toBeNull()
+  })
+})
+
+describe('findKodiClaudeSessionRequest', () => {
+  it('reads a session uuid and rejects anything else', () => {
+    expect(findKodiClaudeSessionRequest(['Kodi', '--kodi-claude-session=1B4E28BA-2FA1-11D2-883F-0016D3CCA427']))
+      .toBe('1b4e28ba-2fa1-11d2-883f-0016d3cca427')
+    expect(findKodiClaudeSessionRequest(['Kodi', '--kodi-claude-session=../../etc/passwd'])).toBeNull()
   })
 })

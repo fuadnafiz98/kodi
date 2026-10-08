@@ -14,6 +14,13 @@ export interface KodiReviewRequest {
 
 const KODI_URL_FLAGS = ['--kodi-url', '--horus-url'] as const
 const KODI_FOLDER_FLAG = '--kodi-folder'
+const KODI_REF_FLAG = '--kodi-ref'
+const KODI_GUIDE_FILE_FLAG = '--kodi-guide-file'
+const KODI_CLAUDE_SESSION_FLAG = '--kodi-claude-session'
+// Flags whose space-form value must never be read as a folder.
+const KODI_VALUE_FLAGS = [...KODI_URL_FLAGS, KODI_REF_FLAG, KODI_GUIDE_FILE_FLAG, KODI_CLAUDE_SESSION_FLAG] as const
+const FULL_SHA = /^[0-9a-f]{40}$/i
+const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const URL_SCHEME = /^[a-z][a-z0-9+.-]*:/i
 
 /**
@@ -118,8 +125,8 @@ export function findKodiFolderRequest(argv: readonly string[], allowPositional =
       flagged = argument.slice(KODI_FOLDER_FLAG.length + 1)
       continue
     }
-    // A URL flag's value is never a folder candidate.
-    if (KODI_URL_FLAGS.some((flag) => argument === flag)) {
+    // A URL, ref or guide flag's value is never a folder candidate.
+    if (KODI_VALUE_FLAGS.some((flag) => argument === flag)) {
       index += 1
       continue
     }
@@ -141,4 +148,45 @@ function parseKodiProtocolArgument(value: string): KodiReviewRequest | null {
 function extractReviewRequest(value: string): KodiReviewRequest | null {
   const url = extractGitHubPullRequestUrl(value)
   return url == null ? null : { url, intent: 'open' }
+}
+
+/**
+ * The value of `--kodi-<name>=<value>` (what the bundled CLI passes) or of the
+ * space form. A second-instance argv arrives switch-first, so a space-form
+ * value that starts with a dash is an injected switch, not the value.
+ */
+function findFlagValue(argv: readonly string[], flag: string): string | null {
+  let found: string | null = null
+  for (let index = 0; index < argv.length; index += 1) {
+    const argument = argv[index]
+    if (argument == null || argument === '') continue
+    if (argument.startsWith(`${flag}=`)) {
+      found = argument.slice(flag.length + 1)
+      continue
+    }
+    if (argument === flag) {
+      const value = argv[index + 1]
+      index += 1
+      if (value != null && value !== '' && !value.startsWith('-')) found = value
+    }
+  }
+  return found
+}
+
+/** `kodi <ref>`: the commit the CLI resolved, as a full SHA; null for anything else. */
+export function findKodiRefRequest(argv: readonly string[]): string | null {
+  const value = findFlagValue(argv, KODI_REF_FLAG)?.trim()
+  return value != null && FULL_SHA.test(value) ? value.toLowerCase() : null
+}
+
+/** `kodi --guide-file <json>`: an absolute path to a guide an agent wrote; null otherwise. */
+export function findKodiGuideFileRequest(argv: readonly string[]): string | null {
+  const value = findFlagValue(argv, KODI_GUIDE_FILE_FLAG)
+  return value != null && value.startsWith('/') && !value.includes('\0') ? value : null
+}
+
+/** The Claude Code session that wrote the guide, so its last messages travel with it. */
+export function findKodiClaudeSessionRequest(argv: readonly string[]): string | null {
+  const value = findFlagValue(argv, KODI_CLAUDE_SESSION_FLAG)?.trim()
+  return value != null && SESSION_ID.test(value) ? value.toLowerCase() : null
 }

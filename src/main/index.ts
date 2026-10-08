@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
 import { isAbsolute, join, resolve } from 'node:path'
 import { stat } from 'node:fs/promises'
@@ -19,7 +20,10 @@ import {
 import { displayUserPath, folderNameFromPath } from '../shared/folderPath.js'
 import { omitHeldPaths } from '../shared/heldPaths.js'
 import {
+  findKodiClaudeSessionRequest,
   findKodiFolderRequest,
+  findKodiGuideFileRequest,
+  findKodiRefRequest,
   findKodiReviewRequest,
   KODI_PROTOCOL,
   LEGACY_KODI_PROTOCOL,
@@ -34,11 +38,11 @@ import {
 import { AgentService, coalesceAgentTextEvents } from './agentService.js'
 import { BUILD_TIME, formatBuildTime } from './buildInfo.js'
 import { migrateLegacyReviewDirectory } from './agentReviewBundle.js'
-import { parseAgentAskRequest } from './agentRequest.js'
+import { decodeAgentSubject, parseAgentAskRequest } from './agentRequest.js'
 import { FolderIndex, resolveOpenableFolder } from './folderIndex.js'
 import { getAvatarDataUrl } from './avatars.js'
 import { loadMarkdownMedia } from './markdownMedia.js'
-import { conversationCacheEntryCount, isPathWithinApprovedRoots, loadGlobalPullRequestInbox, parseRemotes, pullRequestTargetsRemotes } from './repository.js'
+import { conversationCacheEntryCount, isPathWithinApprovedRoots, RIPGREP_EXECUTABLE, loadGlobalPullRequestInbox, parseRemotes, pullRequestTargetsRemotes } from './repository.js'
 import { normalizeInboxRepos } from '../shared/inboxRepos.js'
 import { PullRequestRootResolver } from './pullRequestRoots.js'
 import { clipboardWarmupDecision, warmupCooledDown } from './pullRequestWarmup.js'
@@ -138,6 +142,27 @@ app.setName(PRODUCT_NAME)
 process.title = PRODUCT_NAME
 
 const agentService = new AgentService()
+// Loaded with the first guide request: none of it is needed to open a window.
+let reviewGuideService: import('./reviewGuide/service.js').ReviewGuideService | null = null
+let reviewGuideServiceLoad: Promise<import('./reviewGuide/service.js').ReviewGuideService> | null = null
+
+function loadReviewGuideService(): Promise<import('./reviewGuide/service.js').ReviewGuideService> {
+  reviewGuideServiceLoad ??= import('./reviewGuide/service.js').then(({ ReviewGuideService }) => {
+    reviewGuideService = new ReviewGuideService({
+      userDataPath,
+      resolvePatch: (subject) => repositorySessions.require(subject.repositoryRoot).resolveReviewPatch(subject),
+      runStructured: (request) => agentService.runStructured(request),
+      cancelRun: (id) => agentService.cancel(id),
+      readAttributes: async (subject, paths) => {
+        const { markReviewFiles } = await import('./generatedFiles.js')
+        const revision = subject.source === 'workingTree' ? null : subject.headOid
+        return (await markReviewFiles(subject.repositoryRoot, paths, revision)).attributes
+      }
+    })
+    return reviewGuideService
+  })
+  return reviewGuideServiceLoad
+}
 const terminalService = new TerminalService()
 const folderIndex = new FolderIndex(homedir())
 const repositorySessions = new RepositorySessionRegistry(
@@ -150,6 +175,10 @@ const repositorySessions = new RepositorySessionRegistry(
 )
 
 const MAX_AUTOMATIC_RECOVERIES = 3
+// A review's files are marked in one call; past this the heuristics alone decide.
+const MAX_MARKED_REVIEW_FILES = 50_000
+let commitMessageRunId: string | null = null
+const cancelledCommitRuns = new Set<string>()
 const RECOVERY_WINDOW_MS = 60_000
 const UNRESPONSIVE_RECOVERY_DELAY_MS = 8_000
 const MAX_RENDERER_TERMINATION_RECORDS = 20
@@ -177,6 +206,33 @@ const queuedFolderOpens: string[] = []
 // The folder a `kodi <folder>` opened while the app was up, until the window
 // takes it.
 let pendingExternalFolderRoot: string | null = null
+// What a `kodi <commit>` or `kodi --guide-file` asked for beyond its folder:
+// the commit to review and the guide to show, until the window takes them
+// (`takeExternalTarget`, then `takeExternalGuide` once the review is up).
+interface ExternalTarget {
+  folder: string
+  oid: string | null
+  guideFile: string | null
+  claudeSession: string | null
+}
+let pendingExternalTarget: ExternalTarget | null = null
+let pendingExternalGuide: ExternalTarget | null = null
+
+function rememberExternalTarget(argv: readonly string[], folder: string | null): void {
+  const oid = findKodiRefRequest(argv)
+  const guideFile = findKodiGuideFileRequest(argv)
+  if (folder == null) return
+  // A later `kodi <folder>` asks for that folder alone: an earlier commit or
+  // guide that was never taken must not open on it.
+  if (oid == null && guideFile == null) {
+    pendingExternalTarget = null
+    return
+  }
+  pendingExternalTarget = { folder: resolve(folder), oid, guideFile, claudeSession: findKodiClaudeSessionRequest(argv) }
+}
+// The folder a `kodi <folder>` launch named, until the window has asked what to
+// paint first (`startupWorkspaceCache`).
+let launchFolderToPaint: string | null = null
 const warmupFlights = new Map<string, Promise<void>>()
 const recentlyWarmedAt = new Map<string, number>()
 let clipboardWarmupTimer: ReturnType<typeof setInterval> | null = null
@@ -354,6 +410,7 @@ function stopClipboardWarmup(): void {
 function hibernationBlocker(): string | null {
   if (terminalService.sessionCount > 0) return 'a terminal session is running'
   if (agentService.busyCount > 0) return 'an agent turn is in flight'
+  if ((reviewGuideService?.busyCount ?? 0) > 0) return 'a review guide is being written'
   if (commandSemaphore.running > 0 || commandSemaphore.waiting > 0) return 'a git command is in flight'
   return null
 }
@@ -443,6 +500,7 @@ const launchRequest = findKodiReviewRequest(process.argv)
 if (launchRequest != null) enqueueExternalReview(launchRequest)
 const launchFolder = findKodiFolderRequest(process.argv, app.isPackaged)
 if (launchFolder != null) queuedFolderOpens.push(launchFolder)
+rememberExternalTarget(process.argv, launchFolder)
 app.on('open-url', (event, url) => {
   event.preventDefault()
   acceptExternalReview(url)
@@ -1000,14 +1058,28 @@ function localReviewProgressSender(
   }
 }
 
+/**
+ * What the window paints before its session answers: the last folder as it was
+ * left. A `kodi <folder>` launch asks for that folder's changes instead, so it
+ * paints the folder only if it was left on its review — never another folder,
+ * nor the one file the last session had open. With nothing painted the window
+ * picks the view from the folder's snapshot, the review when anything changed.
+ */
+function startupWorkspaceCache(): WorkspaceCache | null {
+  const named = launchFolderToPaint
+  launchFolderToPaint = null
+  if (named == null) return lastWorkspaceCache(workspaceCacheStore)
+  const root = resolveExistingRoot(resolve(named))
+  const cached = root == null ? null : cachedWorkspaceForRoot(root)
+  return cached?.workspaceView === 'multi' ? cached : null
+}
+
 function registerIpcHandlers(): void {
   ipcMain.on(IPC_CHANNELS.getRestoreHint, (event) => {
     event.returnValue = currentRestoreHint()
   })
   ipcMain.on(IPC_CHANNELS.getWorkspaceCache, (event) => {
-    event.returnValue = currentRestoreHint().restoring
-      ? lastWorkspaceCache(workspaceCacheStore)
-      : null
+    event.returnValue = currentRestoreHint().restoring ? startupWorkspaceCache() : null
   })
   ipcMain.handle(IPC_CHANNELS.persistWorkspaceUi, (_event, raw: unknown) => {
     const snapshot = repositorySessions.getActiveSnapshot()
@@ -1112,6 +1184,20 @@ function registerIpcHandlers(): void {
       throw new Error('Reveal path must stay inside the open repository.')
     }
     shell.showItemInFolder(candidate)
+  })
+  ipcMain.handle(IPC_CHANNELS.openInEditor, async (_event, relativePath: unknown, line: unknown, editorCommand: unknown) => {
+    const snapshot = repositorySessions.getActiveSnapshot()
+    if (snapshot == null) throw new Error('Open a repository before opening a file in an editor.')
+    if (typeof relativePath !== 'string' || relativePath === '' || isAbsolute(relativePath)) {
+      throw new Error('The file must be a relative repository path.')
+    }
+    const file = join(snapshot.root, relativePath)
+    if (!isPathWithinApprovedRoots([snapshot.root], file)) throw new Error('The file must stay inside the open repository.')
+    const { openInEditor } = await import('./editorOpener.js')
+    const target = { file, line: typeof line === 'number' && Number.isInteger(line) && line > 0 ? line : null, repo: snapshot.root }
+    if (await openInEditor(typeof editorCommand === 'string' ? editorCommand.slice(0, 2_000) : '', target)) return
+    const failure = await shell.openPath(file)
+    if (failure !== '') throw new Error(`Could not open ${relativePath}: ${failure}`)
   })
   ipcMain.handle(IPC_CHANNELS.refresh, (_event, held: unknown) =>
     repositorySessions.requireActive().refresh().then((snapshot) => replyWithSnapshot(snapshot, held)))
@@ -1223,6 +1309,128 @@ function registerIpcHandlers(): void {
     }
   })
   ipcMain.handle(IPC_CHANNELS.cancelAgent, (_event, id: unknown) => agentService.cancel(id))
+  ipcMain.handle(IPC_CHANNELS.getReviewGuide, async (event, value: unknown) => {
+    const { decodeReviewGuideRequest } = await import('./reviewGuide/request.js')
+    const request = decodeReviewGuideRequest(value)
+    repositorySessions.require(request.subject.repositoryRoot)
+    const sender = event.sender
+    const guides = await loadReviewGuideService()
+    return guides.generate({
+      ...request,
+      onPhase: (phase) => {
+        if (!sender.isDestroyed()) {
+          sender.send(IPC_CHANNELS.reviewGuideProgress, { tabId: request.subject.tabId, phase })
+        }
+      }
+    })
+  })
+  ipcMain.handle(IPC_CHANNELS.cancelReviewGuide, (_event, tabId: unknown) => {
+    if (typeof tabId !== 'string' || tabId === '') return
+    reviewGuideService?.cancel(tabId)
+  })
+  ipcMain.handle(IPC_CHANNELS.takeExternalTarget, () => {
+    const target = pendingExternalTarget
+    if (target == null) return null
+    // Only the repository it named takes it; the window asks again each time
+    // a folder comes to the front.
+    const active = repositorySessions.getActiveSnapshot()
+    const folder = resolveExistingRoot(target.folder) ?? target.folder
+    const root = active == null ? null : resolveExistingRoot(active.root) ?? active.root
+    if (root == null || (!rootsMatch(root, folder) && !folder.startsWith(`${root}/`))) return null
+    pendingExternalTarget = null
+    if (target.guideFile != null) pendingExternalGuide = target
+    return { oid: target.oid, guide: target.guideFile != null }
+  })
+  ipcMain.handle(IPC_CHANNELS.takeExternalGuide, async (_event, value: unknown) => {
+    const target = pendingExternalGuide
+    if (target?.guideFile == null) return null
+    const subject = decodeAgentSubject(value)
+    if (subject == null) return null
+    // The guide waits for the review it was written for: its commit, or the
+    // folder's working tree.
+    const folder = resolveExistingRoot(target.folder) ?? target.folder
+    const root = resolveExistingRoot(subject.repositoryRoot) ?? subject.repositoryRoot
+    if (!rootsMatch(root, folder) && !folder.startsWith(`${root}/`)) return null
+    if (target.oid == null ? subject.source !== 'workingTree' : subject.headOid !== target.oid) return null
+    pendingExternalGuide = null
+    const [{ readClaudeSessionContext, readGuideFile }, guides] = await Promise.all([
+      import('./reviewGuide/external.js'),
+      loadReviewGuideService()
+    ])
+    let raw: unknown
+    try {
+      raw = await readGuideFile(target.guideFile)
+    } catch (error) {
+      return { status: 'unavailable', reason: error instanceof Error ? error.message : 'The guide file could not be read.', code: 'failed' }
+    }
+    const messages = target.claudeSession == null ? [] : await readClaudeSessionContext(homedir(), target.claudeSession).catch(() => [])
+    return guides.normalizeExternal(subject, raw, { messages, source: 'Claude Code' })
+  })
+  ipcMain.handle(IPC_CHANNELS.suggestCommitMessage, async (_event, value: unknown) => {
+    const snapshot = repositorySessions.getActiveSnapshot()
+    if (snapshot == null || snapshot.kind !== 'git') throw new Error('Open a Git repository first.')
+    const request = value as { provider?: unknown; model?: unknown; effort?: unknown } | null
+    if (request?.provider !== 'claude' && request?.provider !== 'codex') throw new Error('Choose an agent in the agent panel.')
+    if (typeof request.model !== 'string' || (request.model !== '' && !/^[A-Za-z0-9][A-Za-z0-9._:/[\]-]{0,127}$/.test(request.model))) {
+      throw new Error('The selected agent model is not valid.')
+    }
+    if (typeof request.effort !== 'string' || !/^[a-z0-9-]{0,32}$/i.test(request.effort)) {
+      throw new Error('The selected reasoning effort is not valid.')
+    }
+    // The id is taken before the first await, so Stop pressed while the
+    // module loads or git reads the staged diff still stops this run.
+    if (commitMessageRunId != null) cancelledCommitRuns.add(commitMessageRunId)
+    if (commitMessageRunId != null) agentService.cancel(commitMessageRunId)
+    const id = `commit:${randomUUID()}`
+    commitMessageRunId = id
+    try {
+      const { suggestCommitMessage } = await import('./commitMessage.js')
+      return await suggestCommitMessage({
+        id,
+        root: snapshot.root,
+        name: snapshot.name,
+        branch: snapshot.branch ?? null,
+        provider: request.provider,
+        model: request.model === '' ? 'default' : request.model,
+        effort: request.effort === '' ? 'default' : request.effort
+      }, {
+        stagedDiff: async (root) => (await runCommand('git', ['diff', '--cached', '--no-color', '--no-ext-diff', '--no-renames'], root)).stdout.toString('utf8'),
+        runStructured: (structured) => {
+          if (cancelledCommitRuns.has(id)) return Promise.reject(new Error('The commit message was cancelled.'))
+          return agentService.runStructured(structured)
+        }
+      })
+    } finally {
+      cancelledCommitRuns.delete(id)
+      if (commitMessageRunId === id) commitMessageRunId = null
+    }
+  })
+  ipcMain.handle(IPC_CHANNELS.findDefinitions, async (_event, identifier: unknown, fromPath: unknown) => {
+    const snapshot = repositorySessions.getActiveSnapshot()
+    if (snapshot == null || typeof identifier !== 'string' || typeof fromPath !== 'string') return []
+    const { findDefinitions } = await import('./definitionSearch.js')
+    return findDefinitions({ root: snapshot.root, identifier, fromPath, ripgrep: RIPGREP_EXECUTABLE })
+  })
+  ipcMain.handle(IPC_CHANNELS.cancelCommitMessage, () => {
+    if (commitMessageRunId != null) cancelledCommitRuns.add(commitMessageRunId)
+    if (commitMessageRunId != null) agentService.cancel(commitMessageRunId)
+    commitMessageRunId = null
+  })
+  ipcMain.handle(IPC_CHANNELS.getReviewFileMarks, async (_event, root: unknown, paths: unknown, revision: unknown) => {
+    // Null, not an empty answer: an empty one would read as "nothing here is
+    // generated" and open every lockfile the path heuristics had folded.
+    if (typeof root !== 'string' || !Array.isArray(paths) || paths.length > MAX_MARKED_REVIEW_FILES) return null
+    const session = repositorySessions.tryGet(root)
+    if (session == null) return null
+    const valid = paths.filter((path): path is string => typeof path === 'string' && path !== '' && !path.includes('\0'))
+    const { markReviewFiles } = await import('./generatedFiles.js')
+    const marks = await markReviewFiles(root, valid, typeof revision === 'string' ? revision : null)
+    return { generated: [...marks.generated], categories: Object.fromEntries(marks.categories) }
+  })
+  ipcMain.handle(IPC_CHANNELS.getReviewGuideFormat, async () => {
+    const { guideFormatDocument } = await import('./reviewGuide/formatText.js')
+    return guideFormatDocument()
+  })
   ipcMain.handle(IPC_CHANNELS.respondAgentApproval, (_event, requestId: unknown, decision: unknown) =>
     agentService.respondApproval(requestId, decision))
   ipcMain.handle(IPC_CHANNELS.createTerminal, (event, columns: unknown, rows: unknown) => {
@@ -1573,6 +1781,8 @@ app.whenReady().then(() => {
   const initialReviews = queuedExternalReviews.splice(0)
   holdWindowHidden = probeHidden || shouldHoldWindowHidden(startHidden, initialReviews)
   if (startHidden || holdWindowHidden) app.dock?.hide()
+  const initialFolder = queuedFolderOpens.splice(0).at(-1) ?? null
+  launchFolderToPaint = initialFolder
   registerIpcHandlers()
   // Half-bounce first. Hydrating 20k cached paths must not delay window.show()
   // or the pending PR URL that Cmd+H / kodi:// already queued.
@@ -1582,7 +1792,6 @@ app.whenReady().then(() => {
   // Kodi's name. The About panel draws the application icon, which this sets.
   if (!app.isPackaged) setImmediate(() => app.dock?.setIcon(join(app.getAppPath(), 'build', 'icon.png')))
   for (const request of initialReviews) void applyExternalReview(request)
-  const initialFolder = queuedFolderOpens.splice(0).at(-1) ?? null
   if (initialFolder != null) {
     // `kodi <folder>` names the session; the old last-folder restore must not
     // hydrate over it. A failed open falls back to the usual restore inside the
@@ -1630,6 +1839,8 @@ app.whenReady().then(() => {
     }
     const folder = findKodiFolderRequest(argv, true)
     if (folder != null) {
+      // Before the folder's push: the window takes the target right after it.
+      rememberExternalTarget(argv, folder)
       pendingFolderOpen = applyExternalFolder(folder).catch((error: unknown) => {
         console.warn(`Could not open folder ${folder}:`, error)
       })

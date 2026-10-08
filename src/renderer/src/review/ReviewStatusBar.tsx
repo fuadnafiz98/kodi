@@ -1,12 +1,13 @@
 import type { PullRequestReviewEvent, RepositoryReview } from '../../../shared/contracts'
-import { PullRequestReviewBar } from '../github/PullRequestReviewBar'
+import { createLazyModule, useLazyModule } from '../app/lazyModule'
 import { PullRequestReviewSummaryBar, type NewRevisionNotice } from '../github/PullRequestReviewSummaryBar'
 import { reviewBarMode, type ReviewWorldSource } from './reviewHeaderModel'
 
 export interface ReviewStatusBarProps {
   review: RepositoryReview | null
   reviewWorldSource: ReviewWorldSource
-  submitting: boolean
+  /** The decision being posted to GitHub, or null. */
+  submitting: PullRequestReviewEvent | null
   message: string | null
   inlineCommentCount: number
   orphanedCommentCount: number
@@ -14,9 +15,15 @@ export interface ReviewStatusBarProps {
   body: string
   onExpandedChange(expanded: boolean): void
   onBodyChange(body: string): void
-  onOpen(): void
   onSubmit(event: PullRequestReviewEvent, body: string): Promise<boolean>
 }
+
+/**
+ * The pull request review composer (its decisions, notices and actions) only
+ * draws for a GitHub pull request in submit mode, so it loads with the first
+ * one rather than with every session. Shared with `ReviewFinishBar`.
+ */
+export const pullRequestReviewBarModule = createLazyModule(() => import('../github/PullRequestReviewBar'))
 
 /**
  * The composer, and only while it is open. Everything the collapsed bar used to
@@ -34,12 +41,13 @@ export function ReviewStatusBar({
   body,
   onExpandedChange,
   onBodyChange,
-  onOpen,
   onSubmit
 }: ReviewStatusBarProps): React.JSX.Element | null {
-  if (!expanded || review?.kind !== 'github' || reviewBarMode(review, reviewWorldSource) !== 'submit') return null
+  const wanted = expanded && review?.kind === 'github' && reviewBarMode(review, reviewWorldSource) === 'submit'
+  const bar = useLazyModule(pullRequestReviewBarModule, wanted)
+  if (!wanted || review?.kind !== 'github' || bar == null) return null
   return (
-    <PullRequestReviewBar
+    <bar.PullRequestReviewBar
       submitting={submitting}
       message={message}
       inlineCommentCount={inlineCommentCount}
@@ -49,7 +57,6 @@ export function ReviewStatusBar({
       body={body}
       onExpandedChange={onExpandedChange}
       onBodyChange={onBodyChange}
-      onOpen={onOpen}
       onSubmit={onSubmit}
     />
   )

@@ -44,6 +44,8 @@ interface AgentPanelProps {
   authenticatingProvider: AgentProvider | null
   statusError: string | null
   attachments: readonly AgentAttachment[]
+  /** Text for the composer (Ask agent on a review comment), once per id. */
+  prefill?: { id: number; text: string } | null
   contextLabel: string
   onProviderChange(provider: AgentProvider): void
   onModelChange(model: string): void
@@ -63,11 +65,18 @@ interface AgentPanelProps {
   onClose(): void
 }
 
+let lastPrefillId = 0
+function takePrefill(id: number): boolean {
+  if (id <= lastPrefillId) return false
+  lastPrefillId = id
+  return true
+}
+
 export const AgentPanel = memo(function AgentPanel({
   answer, blocks, streaming, error, question, references, activity, approvals, usage, history, chatId,
   startedAt, completedAt, provider, model, effort, accessMode, accessModeLocked, models, efforts,
   loadingModels, statuses, loadingStatuses, authenticatingProvider, statusError,
-  attachments, contextLabel, onProviderChange, onModelChange, onEffortChange,
+  attachments, prefill = null, contextLabel, onProviderChange, onModelChange, onEffortChange,
   onAccessModeChange, onConfirm, onRefreshStatuses, onLogin, onApprovalDecision,
   onRemoveAttachment, onAsk, onCancel, onReset, onOpenChat, onOpenReference, onDeleteChat, onClose
 }: AgentPanelProps): React.JSX.Element {
@@ -90,6 +99,14 @@ export const AgentPanel = memo(function AgentPanel({
   useEffect(() => {
     if (latestAttachmentId != null) composerRef.current?.focus()
   }, [latestAttachmentId])
+  const prefillId = prefill?.id ?? null
+  const prefillText = prefill?.text ?? ''
+  useEffect(() => {
+    // Once: a dock reopened later must not put an old question back.
+    if (prefillId == null || !takePrefill(prefillId)) return
+    setDraft(prefillText)
+    composerRef.current?.focus()
+  }, [prefillId, prefillText])
 
   const send = (prompt: string): void => {
     const trimmed = prompt.trim()

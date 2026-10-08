@@ -92,6 +92,7 @@
   transition: scale var(--duration-fast) var(--ease-out);
 }
 .review-summary-toolbar button svg { width: var(--icon-sm); height: var(--icon-sm); flex: none; }
+.review-summary-md { font-family: var(--font-mono); font-size: 10px; font-weight: 600; letter-spacing: 0.02em; }
 .review-summary-toolbar button[data-copy-state="copied"] { color: var(--status-success-text); }
 .review-summary-toolbar button[data-copy-state="failed"] { width: auto; padding: 0 7px; color: var(--status-danger-text); }
 .review-summary-toolbar button:hover:not(:disabled) { background: var(--control-fill-hover); color: var(--text); }

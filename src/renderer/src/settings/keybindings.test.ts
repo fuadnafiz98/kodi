@@ -23,6 +23,10 @@ describe('keybindings', () => {
     expect(formatKeybinding('Meta+Shift+KeyF')).toBe('⇧⌘F')
     expect(commandFromEvent(keyboardEvent('KeyK', { metaKey: true }), DEFAULT_KEYBINDINGS)).toBe('openCommandPalette')
     expect(commandFromEvent(keyboardEvent('KeyJ', { metaKey: true }), DEFAULT_KEYBINDINGS)).toBe('toggleTerminal')
+    expect(commandFromEvent(keyboardEvent('KeyF', { metaKey: true, shiftKey: true }), DEFAULT_KEYBINDINGS)).toBe('searchContent')
+    expect(commandFromEvent(keyboardEvent('KeyG', { metaKey: true, shiftKey: true }), DEFAULT_KEYBINDINGS)).toBe('toggleReviewGuide')
+    expect(commandFromEvent(keyboardEvent('KeyO', { metaKey: true, shiftKey: true }), DEFAULT_KEYBINDINGS)).toBe('openInEditor')
+    expect(commandFromEvent(keyboardEvent('KeyO', { metaKey: true }), DEFAULT_KEYBINDINGS)).toBe('openFolder')
     expect(isTerminalToggleShortcut(keyboardEvent('KeyJ', { metaKey: true }), DEFAULT_KEYBINDINGS)).toBe(true)
     expect(isTerminalToggleShortcut(keyboardEvent('KeyJ', { ctrlKey: true }), DEFAULT_KEYBINDINGS)).toBe(true)
     expect(isTerminalToggleShortcut(keyboardEvent('Backquote', { ctrlKey: true }), DEFAULT_KEYBINDINGS)).toBe(false)
@@ -44,6 +48,15 @@ describe('keybindings', () => {
       openFolder: DEFAULT_KEYBINDINGS.toggleSidebar
     })
     expect(conflicts).toEqual(new Set(['openFolder', 'toggleSidebar']))
+  })
+
+  test('the same chord written in another modifier order is a conflict', () => {
+    const conflicts = findKeybindingConflicts({
+      ...DEFAULT_KEYBINDINGS,
+      openFolder: 'Shift+Meta+KeyG'
+    })
+    expect(conflicts.has('openFolder')).toBe(true)
+    expect(conflicts.has('toggleReviewGuide')).toBe(true)
   })
 
   test('skips non-Meta bindings while typing', () => {
@@ -77,6 +90,12 @@ describe('reviewCommandFromEvent', () => {
     expect(reviewCommandFromEvent(event('KeyC', { metaKey: true }), null)).toBeNull()
     expect(reviewCommandFromEvent(event('KeyV', { shiftKey: true }), null)).toBeNull()
     expect(reviewCommandFromEvent(event('KeyC', { altKey: true }), null)).toBeNull()
+  })
+
+  it('maps shifted brackets to the guide\'s sections, keeping plain brackets on files', () => {
+    expect(reviewCommandFromEvent(event('BracketRight', { shiftKey: true }), null)).toBe('nextGuideSection')
+    expect(reviewCommandFromEvent(event('BracketLeft', { shiftKey: true }), null)).toBe('previousGuideSection')
+    expect(reviewCommandFromEvent(event('BracketRight'), null)).toBe('nextReviewFile')
   })
 
   it('yields to typing surfaces', () => {

@@ -246,3 +246,210 @@ describe('coalesceAgentTextEvents', () => {
     expect(first.activity?.detail).toBe('one')
   })
 })
+
+describe('runStructured', () => {
+  const connected = (provider: 'claude' | 'codex'): Promise<import('../shared/contracts.js').AgentProviderStatus> =>
+    Promise.resolve({ provider, installed: true, authenticated: true, label: 'Connected', detail: '' })
+
+  // A stand-in for the SDK's query(): an async iterable with close().
+  function fakeClaude(
+    script: (model: string | undefined) => Record<string, unknown>[],
+    calls: Array<Record<string, unknown>> = []
+  ): () => Promise<never> {
+    return () => Promise.resolve(((args: { prompt: string; options: Record<string, unknown> }) => {
+      calls.push(args.options)
+      const messages = script(args.options.model as string | undefined)
+      let closed = false
+      return {
+        close() { closed = true },
+        async *[Symbol.asyncIterator]() {
+          for (const message of messages) {
+            if (closed) return
+            if (message.type === 'wait') {
+              await new Promise((resolve) => setTimeout(resolve, message.ms as number))
+              continue
+            }
+            yield message
+          }
+        }
+      }
+    }) as never)
+  }
+
+  const streamEvent = (event: Record<string, unknown>): Record<string, unknown> => ({ type: 'stream_event', event })
+  const request = (overrides: Partial<import('./agentService.js').StructuredRunRequest> = {}): import('./agentService.js').StructuredRunRequest => ({
+    id: 'run-1',
+    provider: 'claude',
+    model: 'default',
+    effort: '',
+    prompt: 'Return JSON.',
+    schema: { type: 'object' },
+    cwd: '/work/repository',
+    timeoutMs: 30_000,
+    ...overrides
+  })
+
+  test('returns the structured output and reports thinking, then writing', async () => {
+    const { AgentService } = await import('./agentService.js')
+    const calls: Array<Record<string, unknown>> = []
+    const service = new AgentService({
+      providerStatus: connected,
+      resolveExecutable: () => Promise.resolve('/bin/claude'),
+      loadClaudeQuery: fakeClaude(() => [
+        streamEvent({ type: 'content_block_start', index: 0, content_block: { type: 'thinking' } }),
+        streamEvent({ type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'hm' } }),
+        streamEvent({ type: 'content_block_start', index: 1, content_block: { type: 'text' } }),
+        { type: 'result', subtype: 'success', is_error: false, result: '', structured_output: { a: 1 } }
+      ], calls)
+    })
+    const phases: string[] = []
+
+    const result = await service.runStructured(request({ onPhase: (phase) => { if (phases.at(-1) !== phase) phases.push(phase) } }))
+
+    expect(result.json).toEqual({ a: 1 })
+    expect(result.model).toBe('default')
+    expect(phases).toEqual(['thinking', 'writing'])
+    expect(calls[0]).toMatchObject({
+      outputFormat: { type: 'json_schema', schema: { type: 'object' } },
+      tools: [],
+      persistSession: false,
+      settingSources: []
+    })
+    expect(calls[0]?.model).toBeUndefined()
+    expect(service.busyCount).toBe(0)
+  })
+
+  test('falls back once to the default model when the named one is unavailable', async () => {
+    const { AgentService } = await import('./agentService.js')
+    const calls: Array<Record<string, unknown>> = []
+    const service = new AgentService({
+      providerStatus: connected,
+      resolveExecutable: () => Promise.resolve('/bin/claude'),
+      loadClaudeQuery: fakeClaude((model) => model === 'opus'
+        ? [{ type: 'result', subtype: 'success', is_error: true, result: 'model_not_found: opus' }]
+        : [{ type: 'result', subtype: 'success', is_error: false, result: '', structured_output: { ok: true } }], calls)
+    })
+
+    const result = await service.runStructured(request({ model: 'opus' }))
+
+    expect(result).toMatchObject({ json: { ok: true }, model: 'default' })
+    expect(calls.map((call) => call.model ?? 'default')).toEqual(['opus', 'default'])
+  })
+
+  test('a second availability error is not retried again', async () => {
+    const { AgentService } = await import('./agentService.js')
+    const calls: Array<Record<string, unknown>> = []
+    const service = new AgentService({
+      providerStatus: connected,
+      resolveExecutable: () => Promise.resolve('/bin/claude'),
+      loadClaudeQuery: fakeClaude(() => [{ type: 'result', subtype: 'success', is_error: true, result: 'model_not_found' }], calls)
+    })
+
+    await expect(service.runStructured(request({ model: 'opus' }))).rejects.toThrow('model_not_found')
+    expect(calls).toHaveLength(2)
+  })
+
+  test('a result with neither structured output nor JSON text is rejected', async () => {
+    const { AgentService } = await import('./agentService.js')
+    const service = new AgentService({
+      providerStatus: connected,
+      resolveExecutable: () => Promise.resolve('/bin/claude'),
+      loadClaudeQuery: fakeClaude(() => [{ type: 'result', subtype: 'success', is_error: false, result: 'Sure! Here you go.' }])
+    })
+
+    await expect(service.runStructured(request())).rejects.toThrow('The model did not return JSON.')
+  })
+
+  test('refuses to run when the provider is signed out', async () => {
+    const { AgentService } = await import('./agentService.js')
+    const service = new AgentService({
+      providerStatus: (provider) => Promise.resolve({ provider, installed: true, authenticated: false, label: 'Sign-in required', detail: '' }),
+      resolveExecutable: () => Promise.resolve('/bin/claude'),
+      loadClaudeQuery: fakeClaude(() => [])
+    })
+
+    await expect(service.runStructured(request())).rejects.toThrow('Claude Code is not connected.')
+  })
+
+  test('cancel stops a running Claude run and forgets it', async () => {
+    const { AgentService, StructuredRunCancelled } = await import('./agentService.js')
+    const service = new AgentService({
+      providerStatus: connected,
+      resolveExecutable: () => Promise.resolve('/bin/claude'),
+      loadClaudeQuery: fakeClaude(() => [
+        streamEvent({ type: 'content_block_start', index: 0, content_block: { type: 'thinking' } }),
+        { type: 'wait', ms: 200 },
+        { type: 'result', subtype: 'success', is_error: false, result: '', structured_output: { late: true } }
+      ])
+    })
+    const running = service.runStructured(request({ id: 'cancel-me' }))
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(service.busyCount).toBe(1)
+
+    service.cancel('cancel-me')
+
+    await expect(running).rejects.toBeInstanceOf(StructuredRunCancelled)
+    expect(service.busyCount).toBe(0)
+  })
+
+  test('a cancel while the CLI is still being found is not lost', async () => {
+    const { AgentService, StructuredRunCancelled } = await import('./agentService.js')
+    let started = 0
+    let release!: (path: string) => void
+    const service = new AgentService({
+      providerStatus: connected,
+      resolveExecutable: () => new Promise((resolve) => { release = resolve }),
+      loadClaudeQuery: () => { started += 1; return fakeClaude(() => [])() }
+    })
+    const running = service.runStructured(request({ id: 'early' }))
+    expect(service.busyCount).toBe(1)
+    service.cancel('early')
+    release('/bin/claude')
+
+    await expect(running).rejects.toBeInstanceOf(StructuredRunCancelled)
+    expect(started).toBe(0)
+    expect(service.busyCount).toBe(0)
+  })
+
+  test('Codex runs on its own server and parses the final message', async () => {
+    const { AgentService } = await import('./agentService.js')
+    const received: Array<Record<string, unknown>> = []
+    let stopped = 0
+    const service = new AgentService({
+      providerStatus: connected,
+      resolveExecutable: () => Promise.resolve('/bin/codex'),
+      createCodexServer: () => ({
+        runStructured: (options) => {
+          received.push(options as unknown as Record<string, unknown>)
+          options.onPhase?.('writing')
+          return Promise.resolve('```json\n{"a":1}\n```')
+        },
+        interrupt() {},
+        stop() { stopped += 1 }
+      })
+    })
+
+    const result = await service.runStructured(request({ provider: 'codex', model: 'gpt-x', effort: 'low' }))
+
+    expect(result).toMatchObject({ json: { a: 1 }, model: 'gpt-x' })
+    expect(received[0]).toMatchObject({ model: 'gpt-x', effort: 'low', schema: { type: 'object' } })
+    expect(stopped).toBeGreaterThan(0)
+  })
+})
+
+describe('parseJsonLoose and extractStructuredJson', () => {
+  test('reads bare, fenced and embedded objects', async () => {
+    const { parseJsonLoose } = await import('./agentService.js')
+    expect(parseJsonLoose('{"a":1}')).toEqual({ a: 1 })
+    expect(parseJsonLoose('Here:\n```json\n{"a":2}\n```')).toEqual({ a: 2 })
+    expect(parseJsonLoose('Sure {"a":{"b":"}"}} trailing')).toEqual({ a: { b: '}' } })
+    expect(parseJsonLoose('no json here')).toBeUndefined()
+  })
+
+  test('an error result throws its text', async () => {
+    const { extractStructuredJson } = await import('./agentService.js')
+    expect(() => extractStructuredJson({ type: 'result', subtype: 'error_max_turns', is_error: true, errors: ['too many turns'] }))
+      .toThrow('too many turns')
+    expect(extractStructuredJson({ type: 'result', subtype: 'success', is_error: false, result: '{"x":1}' })).toEqual({ x: 1 })
+  })
+})

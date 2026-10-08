@@ -12,22 +12,12 @@ export const DRAG_SELECTION_CSS = `
     --diffs-line-bg: var(--diffs-computed-hovered-line-bg);
   }
 
+  ${/* The rail is an inset shadow, not a pseudo-element: a unified diff draws
+     its old line number in the number cell's ::after, and the two rules merged
+     into a 3ch accent block over the number. */ ''}
   [data-gutter] [data-drag-range],
   [data-gutter] [data-selected-line] {
-    position: relative;
-  }
-
-  [data-gutter] [data-drag-range]::after,
-  [data-gutter] [data-selected-line]::after {
-    content: "";
-    position: absolute;
-    z-index: 2;
-    top: 0;
-    right: 0;
-    bottom: 0;
-    width: 2px;
-    background: var(--accent);
-    pointer-events: none;
+    box-shadow: inset -2px 0 var(--accent);
   }
 
 `

@@ -8,6 +8,8 @@ export type AppCommand =
   | 'toggleFoldUnchanged'
   | 'toggleTerminal'
   | 'openSettings'
+  | 'toggleReviewGuide'
+  | 'openInEditor'
 
 export type KeybindingMap = Record<AppCommand, string>
 
@@ -23,7 +25,9 @@ export const DEFAULT_KEYBINDINGS: KeybindingMap = {
   // some of the time.
   toggleFoldUnchanged: 'Meta+Alt+KeyU',
   toggleTerminal: 'Meta+KeyJ',
-  openSettings: 'Meta+Comma'
+  openSettings: 'Meta+Comma',
+  toggleReviewGuide: 'Meta+Shift+KeyG',
+  openInEditor: 'Meta+Shift+KeyO'
 }
 
 export const KEYBINDING_COMMANDS: ReadonlyArray<{
@@ -36,6 +40,8 @@ export const KEYBINDING_COMMANDS: ReadonlyArray<{
   { command: 'toggleWordWrap', label: 'Toggle word wrap', description: 'Wrap or scroll long code lines.' },
   { command: 'toggleFoldUnchanged', label: 'Toggle context folding', description: 'Fold or expand unchanged diff regions.' },
   { command: 'toggleTerminal', label: 'Toggle terminal', description: 'Show or hide the project terminal.' },
+  { command: 'toggleReviewGuide', label: 'Show guide', description: 'Switch the review between its diff and its guide.' },
+  { command: 'openInEditor', label: 'Open in editor', description: 'Open the current file in your editor, at the selected line.' },
   { command: 'goToFile', label: 'Go to file', description: 'Open the command palette to search files and content.' },
   { command: 'searchContent', label: 'Search in files', description: 'Open the command palette to search file contents.' },
   { command: 'openFolder', label: 'Open folder', description: 'Search recent folders or open the macOS picker.' },
@@ -44,14 +50,18 @@ export const KEYBINDING_COMMANDS: ReadonlyArray<{
 
 const MODIFIER_CODES = new Set(['AltLeft', 'AltRight', 'ControlLeft', 'ControlRight', 'MetaLeft', 'MetaRight', 'ShiftLeft', 'ShiftRight'])
 
-export type ReviewCommand = 'nextReviewFile' | 'previousReviewFile' | 'toggleReviewViewed' | 'toggleReviewCollapsed' | 'toggleReviewMarkdownPreview'
+export type ReviewCommand = 'nextReviewFile' | 'previousReviewFile' | 'toggleReviewViewed' | 'toggleReviewCollapsed'
+  | 'toggleReviewMarkdownPreview' | 'nextGuideSection' | 'previousGuideSection'
 
-export const REVIEW_KEYBINDINGS: ReadonlyArray<{ code: string; command: ReviewCommand; key: string; label: string }> = [
+export const REVIEW_KEYBINDINGS: ReadonlyArray<{ code: string; command: ReviewCommand; key: string; label: string; shift?: true }> = [
   { code: 'BracketRight', command: 'nextReviewFile', key: ']', label: 'Next file in review' },
   { code: 'BracketLeft', command: 'previousReviewFile', key: '[', label: 'Previous file in review' },
   { code: 'KeyV', command: 'toggleReviewViewed', key: 'V', label: 'Toggle viewed on the current file' },
   { code: 'KeyC', command: 'toggleReviewCollapsed', key: 'C', label: 'Collapse or expand the current file' },
-  { code: 'KeyP', command: 'toggleReviewMarkdownPreview', key: 'P', label: 'Toggle markdown preview on the current file' }
+  { code: 'KeyP', command: 'toggleReviewMarkdownPreview', key: 'P', label: 'Toggle markdown preview on the current file' },
+  // The Guide view moves by section itself; listed here so the keys are known.
+  { code: 'BracketRight', command: 'nextGuideSection', key: '}', label: 'Next section of the guide', shift: true },
+  { code: 'BracketLeft', command: 'previousGuideSection', key: '{', label: 'Previous section of the guide', shift: true }
 ]
 
 const TYPING_TAGS = new Set(['INPUT', 'TEXTAREA', 'SELECT'])
@@ -73,9 +83,10 @@ export function deepActiveElement(root: DocumentOrShadowRoot): Element | null {
 }
 
 export function reviewCommandFromEvent(event: KeyboardEvent, activeElement: Element | null): ReviewCommand | null {
-  if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return null
+  if (event.metaKey || event.ctrlKey || event.altKey) return null
   if (isTypingElement(activeElement)) return null
-  return REVIEW_KEYBINDINGS.find((binding) => binding.code === event.code)?.command ?? null
+  return REVIEW_KEYBINDINGS.find((binding) => binding.code === event.code && event.shiftKey === (binding.shift === true))
+    ?.command ?? null
 }
 
 export function keybindingFromEvent(event: KeyboardEvent): string | null {
@@ -91,6 +102,15 @@ export function keybindingFromEvent(event: KeyboardEvent): string | null {
   ].filter(Boolean).join('+')
 }
 
+const MODIFIER_ORDER = ['Control', 'Alt', 'Shift', 'Meta']
+
+/** A binding with its modifiers in the order `keybindingFromEvent` writes them. */
+export function canonicalKeybinding(binding: string): string {
+  const parts = binding.split('+')
+  const code = parts.pop() ?? ''
+  return [...MODIFIER_ORDER.filter((modifier) => parts.includes(modifier)), code].join('+')
+}
+
 export function commandFromEvent(
   event: KeyboardEvent,
   keybindings: KeybindingMap,
@@ -102,7 +122,9 @@ export function commandFromEvent(
   // characters such as Ω from comment fields.
   if (isTypingElement(activeElement) && !event.metaKey) return null
   for (const { command } of KEYBINDING_COMMANDS) {
-    if (keybindings[command] === binding) return command
+    // Defaults and saved bindings write ⌘⇧F as `Meta+Shift+KeyF`; the event reads
+    // `Shift+Meta+KeyF`. Compared as written, ⌘⇧F never matched.
+    if (canonicalKeybinding(keybindings[command]) === binding) return command
   }
   return null
 }
@@ -140,10 +162,13 @@ export function findKeybindingConflicts(keybindings: KeybindingMap): Set<AppComm
   const commandsByBinding = new Map<string, AppCommand[]>()
   const conflicts = new Set<AppCommand>()
   for (const { command } of KEYBINDING_COMMANDS) {
-    const commands = commandsByBinding.get(keybindings[command]) ?? []
+    // Matching is canonical (Shift+Meta and Meta+Shift are one chord), so the
+    // conflict check is too.
+    const binding = canonicalKeybinding(keybindings[command])
+    const commands = commandsByBinding.get(binding) ?? []
     commands.push(command)
-    commandsByBinding.set(keybindings[command], commands)
-    if (command !== 'toggleTerminal' && RESERVED_TERMINAL_BINDINGS.has(keybindings[command])) {
+    commandsByBinding.set(binding, commands)
+    if (command !== 'toggleTerminal' && RESERVED_TERMINAL_BINDINGS.has(binding)) {
       conflicts.add(command)
     }
   }

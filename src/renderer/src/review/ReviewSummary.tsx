@@ -1,7 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import { IconCheck, IconChevronSm, IconCopy, IconRefresh, IconTrash, IconX } from '@pierre/icons'
 
+import type { CodeViewItem } from '@pierre/diffs'
+
 import { formatCompactSelectedRange, formatSelectedRange, type ReviewThread } from './ReviewComments'
+import { formatReviewCommentsMarkdown } from './reviewCommentsMarkdown'
 
 export interface ReviewSummaryEntry {
   path: string
@@ -31,6 +34,8 @@ interface ReviewSummaryProps {
   onCancelReattach(): void
   onDrop(entry: ReviewSummaryEntry): void
   onDropAll(): void
+  /** The review's item for a path, so Markdown can quote the lines around each note. */
+  itemFor?(path: string): CodeViewItem<unknown> | undefined
 }
 
 export function ReviewSummary({
@@ -39,15 +44,21 @@ export function ReviewSummary({
   onBeginReattach,
   onCancelReattach,
   onDrop,
-  onDropAll
+  onDropAll,
+  itemFor
 }: ReviewSummaryProps): React.JSX.Element | null {
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle')
+  const [markdownState, setMarkdownState] = useState<'idle' | 'copied' | 'failed'>('idle')
+  const markdownTimerRef = useRef(0)
   const [confirmingClear, setConfirmingClear] = useState(false)
   const [open, setOpen] = useState(false)
   const resetTimerRef = useRef(0)
   const rootRef = useRef<HTMLElement>(null)
 
-  useEffect(() => () => window.clearTimeout(resetTimerRef.current), [])
+  useEffect(() => () => {
+    window.clearTimeout(resetTimerRef.current)
+    window.clearTimeout(markdownTimerRef.current)
+  }, [])
   useEffect(() => {
     if (!confirmingClear) return
     const timer = window.setTimeout(() => setConfirmingClear(false), CLEAR_CONFIRM_MS)
@@ -95,6 +106,18 @@ export function ReviewSummary({
     }
   }
 
+  const copyMarkdown = async (): Promise<void> => {
+    let state: 'copied' | 'failed' = 'copied'
+    try {
+      await navigator.clipboard.writeText(formatReviewCommentsMarkdown(entries, (path) => itemFor?.(path)))
+    } catch {
+      state = 'failed'
+    }
+    window.clearTimeout(markdownTimerRef.current)
+    setMarkdownState(state)
+    markdownTimerRef.current = window.setTimeout(() => setMarkdownState('idle'), COPY_STATE_MS[state])
+  }
+
   const requestClear = (): void => {
     if (entries.length === 1 || confirmingClear) {
       onDropAll()
@@ -132,6 +155,17 @@ export function ReviewSummary({
               <IconCopy /><IconCheck />
             </span>
             {copyState === 'failed' ? <span className="review-copy-label">Copy failed</span> : null}
+          </button>
+          <button
+            type="button"
+            className="review-summary-markdown"
+            data-copy-state={markdownState}
+            title="Copy as Markdown, with the lines each note is about"
+            aria-label="Copy notes as Markdown"
+            onClick={() => void copyMarkdown()}
+          >
+            {markdownState === 'copied' ? <IconCheck /> : <span className="review-summary-md" aria-hidden="true">MD</span>}
+            {markdownState === 'failed' ? <span className="review-copy-label">Copy failed</span> : null}
           </button>
           <button
             className="review-summary-clear"

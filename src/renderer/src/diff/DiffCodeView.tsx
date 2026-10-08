@@ -9,6 +9,7 @@ import { reportCopiedPath, syncCopyFilePathLifecycle } from './copyFilePath'
 import { GutterActions } from './GutterActions'
 import { syncDragGuideLifecycle } from './dragSelection'
 import { syncSplitDiffResizeLifecycle } from './splitDiffResize'
+import { noteEditorLine } from '../review/editorTarget'
 import { syncReviewCaretLifecycle, type PlaceEditCaret } from '../review/reviewCaret'
 import { VIEWER_BASE_CSS } from './viewerCss'
 import { CODE_FONTS, getEditorThemeType, INTERFACE_FONTS, type AppPreferences } from '../settings/preferences'
@@ -136,6 +137,7 @@ export function DiffCodeView({
     enableGutterUtility: DIFF_OPTIONS.enableGutterUtility,
     lineHoverHighlight: DIFF_OPTIONS.lineHoverHighlight,
     onLineSelectionEnd: (range: SelectedLineRange | null) => {
+      noteEditorLine(comparisonPath ?? null, range?.side === 'deletions' ? null : range?.start ?? null)
       if (range == null) {
         setReviewCursor({ path: comparisonPath, selectedLines: null, draftRange: null })
         return

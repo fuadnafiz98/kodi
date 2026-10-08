@@ -99,6 +99,27 @@ describe('loadPreferences', () => {
   })
 })
 
+describe('guide preferences', () => {
+  it('start guides for pull requests and open them on the diff by default', () => {
+    expect(loadPreferences()).toMatchObject({ guideAutoGenerate: 'pull-requests', guideOpensFirst: false })
+  })
+
+  it('keep a valid choice and drop anything else', () => {
+    localStorage.setItem('kodi:preferences:v1', JSON.stringify({ guideAutoGenerate: 'all-reviews', guideOpensFirst: true }))
+    expect(loadPreferences()).toMatchObject({ guideAutoGenerate: 'all-reviews', guideOpensFirst: true })
+    localStorage.setItem('kodi:preferences:v1', JSON.stringify({ guideAutoGenerate: 'always', guideOpensFirst: 'yes' }))
+    expect(loadPreferences()).toMatchObject({ guideAutoGenerate: 'pull-requests', guideOpensFirst: false })
+  })
+})
+
+describe('editor command', () => {
+  it('defaults to empty (VS Code) and keeps a saved command', () => {
+    expect(loadPreferences().editorCommand).toBe('')
+    localStorage.setItem('kodi:preferences:v1', JSON.stringify({ editorCommand: 'subl "{file}:{line}"' }))
+    expect(loadPreferences().editorCommand).toBe('subl "{file}:{line}"')
+  })
+})
+
 describe('loadKeybindings', () => {
   it('keeps a rebound shortcut', () => {
     expect(loadKeybindings({ toggleFoldUnchanged: 'Meta+Shift+KeyY' }, undefined).toggleFoldUnchanged)

@@ -14,10 +14,11 @@ import type {
   AgentProvider,
   AgentProviderStatus,
   AgentProviderStatuses,
-  AgentStreamEvent
+  AgentStreamEvent,
+  AgentUsageUpdate
 } from '../shared/contracts.js'
 
-import { CodexAppServer } from './codexAppServer.js'
+import { CODEX_TOOLLESS_CONFIG, CodexAppServer } from './codexAppServer.js'
 import {
   AGENT_READ_ONLY_TOOLS,
   AGENT_REVIEW_TOOLS,
@@ -379,6 +380,148 @@ export function coalesceAgentTextEvents(send: (event: AgentEvent) => void): {
   }
 }
 
+export interface StructuredRunRequest {
+  /** Chosen by the caller, so `cancel(id)` can stop the run. */
+  id: string
+  provider: AgentProvider
+  /** '' or 'default' means the provider's default model. */
+  model: string
+  effort: string
+  prompt: string
+  /** A JSON Schema with an object at its root. */
+  schema: Record<string, unknown>
+  /** The repository root. The model gets no tools, so it cannot read it. */
+  cwd: string
+  /** Absolute cap; silence is capped separately. */
+  timeoutMs: number
+  onPhase?(phase: 'thinking' | 'writing'): void
+}
+
+export interface StructuredRunResult {
+  /** Parsed, but not validated against the schema: the caller normalises it. */
+  json: unknown
+  /** The model that answered, after any fallback to the provider default. */
+  model: string
+  usage: AgentUsageUpdate | null
+}
+
+const MAX_STRUCTURED_PROMPT_CHARS = 400_000
+// Matched against a failed run's text; only these say "this model, not this request".
+const MODEL_UNAVAILABLE = /model[_ ]not[_ ]found|unknown model|invalid model|not available|not supported|does not have access|do not have access|don't have access|\b403\b|\b404\b/i
+
+export class StructuredRunCancelled extends Error {
+  constructor() {
+    super('The agent run was cancelled.')
+    this.name = 'StructuredRunCancelled'
+  }
+}
+
+/**
+ * The answer of a structured Claude run: the SDK's `structured_output` when the
+ * schema tool ran, otherwise the result text parsed as JSON.
+ */
+export function extractStructuredJson(result: Record<string, unknown>): unknown {
+  const errorText = (): string => {
+    const errors = Array.isArray(result.errors)
+      ? result.errors.filter((value): value is string => typeof value === 'string')
+      : []
+    const text = typeof result.result === 'string' ? result.result : ''
+    return [text, ...errors].filter((value) => value !== '').join('\n') || 'Claude could not finish the turn.'
+  }
+  if (result.is_error === true || (typeof result.subtype === 'string' && result.subtype.startsWith('error_'))) {
+    throw new Error(errorText())
+  }
+  if (result.structured_output !== undefined && result.structured_output !== null) return result.structured_output
+  const text = typeof result.result === 'string' ? result.result : ''
+  const parsed = parseJsonLoose(text)
+  if (parsed === undefined) throw new Error('The model did not return JSON.')
+  return parsed
+}
+
+/**
+ * JSON text as models return it: bare, or inside a ```json fence, or after a
+ * sentence of preamble. Takes the first balanced object; undefined when none parses.
+ */
+export function parseJsonLoose(text: string): unknown {
+  const trimmed = text.trim()
+  if (trimmed === '') return undefined
+  try {
+    return JSON.parse(trimmed)
+  } catch {
+    // Fall through to the fenced and embedded forms.
+  }
+  const fenced = /```(?:json)?\s*\n([\s\S]*?)\n?```/.exec(trimmed)?.[1]
+  if (fenced != null) {
+    try {
+      return JSON.parse(fenced)
+    } catch {
+      // Try the balanced scan below.
+    }
+  }
+  const start = trimmed.indexOf('{')
+  if (start === -1) return undefined
+  let depth = 0
+  let inString = false
+  let escaped = false
+  for (let index = start; index < trimmed.length; index += 1) {
+    const char = trimmed[index]
+    if (inString) {
+      if (escaped) escaped = false
+      else if (char === '\\') escaped = true
+      else if (char === '"') inString = false
+      continue
+    }
+    if (char === '"') inString = true
+    else if (char === '{') depth += 1
+    else if (char === '}') {
+      depth -= 1
+      if (depth === 0) {
+        try {
+          return JSON.parse(trimmed.slice(start, index + 1))
+        } catch {
+          return undefined
+        }
+      }
+    }
+  }
+  return undefined
+}
+
+function readClaudeUsage(result: Record<string, unknown>, model: string): AgentUsageUpdate | null {
+  const usage = typeof result.usage === 'object' && result.usage != null
+    ? result.usage as Record<string, unknown>
+    : null
+  if (usage == null) return null
+  const number = (value: unknown): number => typeof value === 'number' && Number.isFinite(value) ? value : 0
+  const inputTokens = number(usage.input_tokens)
+  const outputTokens = number(usage.output_tokens)
+  const cachedInputTokens = number(usage.cache_read_input_tokens)
+  const cacheWriteInputTokens = number(usage.cache_creation_input_tokens)
+  return {
+    model,
+    inputTokens,
+    outputTokens,
+    cachedInputTokens,
+    cacheWriteInputTokens,
+    totalTokens: inputTokens + outputTokens + cachedInputTokens + cacheWriteInputTokens
+  }
+}
+
+type ClaudeQuery = ClaudeSdk['query']
+
+interface StructuredCodexServer {
+  runStructured: CodexAppServer['runStructured']
+  interrupt(): void
+  stop(): void
+}
+
+export interface AgentServiceDependencies {
+  loadClaudeQuery?: () => Promise<ClaudeQuery>
+  createCodexServer?: () => StructuredCodexServer
+  providerStatus?: (provider: AgentProvider) => Promise<AgentProviderStatus>
+  resolveExecutable?: (provider: AgentProvider) => Promise<string>
+}
+
 export class AgentService {
   #active = new Map<string, { close(): void }>()
   // Reused across turns: starting the app-server also starts the user's MCP
@@ -393,11 +536,18 @@ export class AgentService {
   // toggled far more often than the installed models change.
   #models = new Map<string, { catalog: AgentModelCatalog; expires: number }>()
   #statuses = new Map<AgentProvider, { value: AgentProviderStatus; expires: number }>()
+  // Structured runs answer one prompt and keep nothing; each has its own close.
+  #structured = new Map<string, { close(): void }>()
+  #deps: AgentServiceDependencies
+
+  constructor(deps: AgentServiceDependencies = {}) {
+    this.#deps = deps
+  }
 
   async #providerStatus(provider: AgentProvider, force = false): Promise<AgentProviderStatus> {
     const cached = this.#statuses.get(provider)
     if (!force && cached != null && cached.expires > Date.now()) return cached.value
-    const value = await getProviderStatus(provider)
+    const value = await (this.#deps.providerStatus ?? getProviderStatus)(provider)
     this.#statuses.set(provider, { value, expires: Date.now() + AGENT_STATUS_TTL_MS })
     return value
   }
@@ -487,6 +637,12 @@ export class AgentService {
       this.#codex.interrupt()
       return
     }
+    const structured = this.#structured.get(id)
+    if (structured != null) {
+      this.#structured.delete(id)
+      structured.close()
+      return
+    }
     const child = this.#active.get(id)
     if (child == null) return
     this.#active.delete(id)
@@ -495,10 +651,11 @@ export class AgentService {
 
   /** Turns and approvals still in flight; hibernation waits for all of them. */
   get busyCount(): number {
-    return this.#active.size + this.#codexRequests.size + this.#pendingApprovals.size
+    return this.#active.size + this.#codexRequests.size + this.#pendingApprovals.size + this.#structured.size
   }
 
   cancelAll(): void {
+    for (const id of this.#structured.keys()) this.cancel(id)
     for (const id of this.#active.keys()) this.cancel(id)
     this.#codexRequests.clear()
     for (const pending of this.#pendingApprovals.values()) pending.resolve('decline')
@@ -785,6 +942,194 @@ export class AgentService {
       : failure == null
         ? { id: request.id, kind: 'done' }
         : { id: request.id, kind: 'error', text: failure })
+  }
+
+  /**
+   * One JSON document conforming to `schema`, with no tools, no saved session
+   * and no streamed text: only phases. A model the account cannot use is
+   * retried once on the provider default.
+   */
+  async runStructured(request: StructuredRunRequest): Promise<StructuredRunResult> {
+    if (this.#structured.has(request.id)) throw new Error('This run is already in progress.')
+    if (request.prompt.length > MAX_STRUCTURED_PROMPT_CHARS) throw new Error('The prompt is too long.')
+    // Registered before the first await, so a cancel while the CLI is found,
+    // its sign-in checked and the SDK loaded is not lost; each run below
+    // replaces this entry with one that stops its process.
+    const token = { cancelled: false }
+    const hold = (): void => {
+      this.#structured.set(request.id, { close: () => { token.cancelled = true } })
+    }
+    const stopIfCancelled = (): void => {
+      if (!token.cancelled) return
+      this.#structured.delete(request.id)
+      throw new StructuredRunCancelled()
+    }
+    hold()
+    try {
+      return await this.#runStructuredHeld(request, token, hold, stopIfCancelled)
+    } finally {
+      this.#structured.delete(request.id)
+    }
+  }
+
+  async #runStructuredHeld(
+    request: StructuredRunRequest,
+    token: { cancelled: boolean },
+    hold: () => void,
+    stopIfCancelled: () => void
+  ): Promise<StructuredRunResult> {
+    const executable = this.#deps.resolveExecutable != null
+      ? await this.#deps.resolveExecutable(request.provider)
+      : request.provider === 'claude'
+        ? await resolveExecutable(CLAUDE_CANDIDATES, 'claude')
+        : await resolveExecutable(CODEX_CANDIDATES, 'codex')
+    const cached = await this.#providerStatus(request.provider)
+    const status = cached.authenticated ? cached : await this.#providerStatus(request.provider, true)
+    stopIfCancelled()
+    if (!status.authenticated) {
+      throw new Error(`${request.provider === 'claude' ? 'Claude Code' : 'Codex'} is not connected. Select Sign in in the agent panel.`)
+    }
+    const run = (model: string): Promise<StructuredRunResult> => request.provider === 'claude'
+      ? this.#runClaudeStructured(request, executable, model, token)
+      : this.#runCodexStructured(request, executable, model, token)
+    const named = request.model !== '' && request.model !== 'default'
+    try {
+      return await run(request.model)
+    } catch (error) {
+      if (!named || error instanceof StructuredRunCancelled || token.cancelled ||
+          !(error instanceof Error) || !MODEL_UNAVAILABLE.test(error.message)) throw error
+      hold()
+      return await run('default')
+    }
+  }
+
+  async #runClaudeStructured(
+    request: StructuredRunRequest,
+    executable: string,
+    model: string,
+    token: { cancelled: boolean }
+  ): Promise<StructuredRunResult> {
+    const queryClaude = this.#deps.loadClaudeQuery != null
+      ? await this.#deps.loadClaudeQuery()
+      : (await loadClaudeSdk()).query
+    if (token.cancelled) throw new StructuredRunCancelled()
+    const runtime = queryClaude({
+      prompt: request.prompt,
+      options: {
+        cwd: request.cwd,
+        pathToClaudeCodeExecutable: executable,
+        outputFormat: { type: 'json_schema', schema: request.schema },
+        tools: [],
+        permissionMode: 'dontAsk',
+        persistSession: false,
+        // The schema is answered through an end-turn tool, which the CLI may
+        // retry on a validation failure.
+        maxTurns: 4,
+        settingSources: [],
+        includePartialMessages: true,
+        ...(model === '' || model === 'default' ? {} : { model }),
+        ...(request.effort === '' || request.effort === 'default'
+          ? {}
+          : { effort: request.effort as NonNullable<ClaudeOptions['effort']> })
+      }
+    })
+    let cancelled = false
+    this.#structured.set(request.id, {
+      close: () => {
+        cancelled = true
+        token.cancelled = true
+        runtime.close()
+      }
+    })
+    const deadline = Date.now() + request.timeoutMs
+    const expiry: { reason: 'idle' | 'limit' | null; timer: ReturnType<typeof setTimeout> | null } = {
+      reason: null,
+      timer: null
+    }
+    const armTimeout = (): void => {
+      if (expiry.timer != null) clearTimeout(expiry.timer)
+      const remaining = deadline - Date.now()
+      const reachedLimit = remaining <= AGENT_IDLE_TIMEOUT_MS
+      expiry.timer = setTimeout(() => {
+        expiry.reason = reachedLimit ? 'limit' : 'idle'
+        runtime.close()
+      }, Math.max(0, reachedLimit ? remaining : AGENT_IDLE_TIMEOUT_MS))
+    }
+    armTimeout()
+    let result: Record<string, unknown> | null = null
+    try {
+      for await (const value of runtime) {
+        if (cancelled) break
+        armTimeout()
+        const message = value as unknown as Record<string, unknown>
+        if (message.type === 'stream_event') {
+          const event = message.event as Record<string, unknown> | undefined
+          const block = (event?.type === 'content_block_start' ? event.content_block : event?.delta) as
+            | { type?: unknown }
+            | undefined
+          const type = block?.type
+          if (type === 'thinking' || type === 'thinking_delta') request.onPhase?.('thinking')
+          else if (type === 'text' || type === 'text_delta' || type === 'tool_use' || type === 'input_json_delta') {
+            request.onPhase?.('writing')
+          }
+        } else if (message.type === 'result') {
+          result = message
+        }
+      }
+    } finally {
+      if (expiry.timer != null) clearTimeout(expiry.timer)
+      runtime.close()
+      this.#structured.delete(request.id)
+    }
+    if (cancelled) throw new StructuredRunCancelled()
+    if (expiry.reason != null) {
+      throw new Error(expiry.reason === 'idle' ? 'Claude stopped responding.' : 'The agent request timed out.')
+    }
+    if (result == null) throw new Error('Claude stopped before answering.')
+    return { json: extractStructuredJson(result), model, usage: readClaudeUsage(result, model) }
+  }
+
+  async #runCodexStructured(
+    request: StructuredRunRequest,
+    executable: string,
+    model: string,
+    token: { cancelled: boolean }
+  ): Promise<StructuredRunResult> {
+    if (token.cancelled) throw new StructuredRunCancelled()
+    // Its own server: the chat's app-server holds one thread and one turn at a
+    // time, and a guide must neither wait for a chat nor end up in its history.
+    const server = this.#deps.createCodexServer?.() ?? new CodexAppServer({ configOverrides: CODEX_TOOLLESS_CONFIG })
+    let cancelled = false
+    this.#structured.set(request.id, {
+      close: () => {
+        cancelled = true
+        token.cancelled = true
+        server.interrupt()
+        server.stop()
+      }
+    })
+    try {
+      const text = await server.runStructured({
+        executable,
+        cwd: request.cwd,
+        prompt: request.prompt,
+        model,
+        effort: request.effort,
+        schema: request.schema,
+        timeoutMs: request.timeoutMs,
+        ...(request.onPhase == null ? {} : { onPhase: request.onPhase })
+      })
+      if (cancelled) throw new StructuredRunCancelled()
+      const json = parseJsonLoose(text)
+      if (json === undefined) throw new Error('The model did not return JSON.')
+      return { json, model, usage: null }
+    } catch (error) {
+      if (cancelled) throw new StructuredRunCancelled()
+      throw error
+    } finally {
+      this.#structured.delete(request.id)
+      server.stop()
+    }
   }
 
   async ask(

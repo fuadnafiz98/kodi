@@ -7,6 +7,7 @@ import {
   IconGear,
   IconSearch,
   IconSidebar,
+  IconSparkles,
   IconTerminalFill,
   IconTypeWord
 } from '@pierre/icons'
@@ -42,14 +43,18 @@ const COMMAND_ICONS: Record<AppCommand, React.ComponentType> = {
   toggleWordWrap: IconTypeWord,
   toggleFoldUnchanged: IconCollapsedRow,
   toggleTerminal: IconTerminalFill,
-  openSettings: IconGear
+  openSettings: IconGear,
+  toggleReviewGuide: IconSparkles,
+  openInEditor: IconFileCode
 }
 
 const PROJECT_COMMANDS = new Set<AppCommand>([
   'toggleSidebar',
   'toggleWordWrap',
   'toggleFoldUnchanged',
-  'toggleTerminal'
+  'toggleTerminal',
+  'toggleReviewGuide',
+  'openInEditor'
 ])
 
 const PALETTE_ONLY_COMMANDS = new Set<AppCommand>([

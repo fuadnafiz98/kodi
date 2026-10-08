@@ -320,6 +320,18 @@ export const VIEWER_BASE_CSS = `
   ${GUTTER_UTILITY_CSS}
   ${UNIFIED_LINE_NUMBERS_CSS}
 
+  ${/* The caret's line: a faint tint, not the theme's line-highlight border
+     (the editor boxes the row with \`editor.lineHighlightBorder\`, gray in the
+     light themes). The editor's stylesheet is unlayered and this one is not,
+     so the border needs !important to lose. */ ''}
+  [data-content] [data-line][data-editor-active-line] {
+    --diffs-computed-editor-active-line-bg: color-mix(in lab, var(--diffs-computed-selected-line-bg) 95%, var(--diffs-fg));
+  }
+
+  [data-line][data-editor-active-line]::after {
+    box-shadow: none !important;
+  }
+
   [data-expand-button] {
     border-radius: var(--corner-compact) !important;
     corner-shape: squircle !important;

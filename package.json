@@ -11,9 +11,9 @@
     "build": "electron-vite build",
     "icon": "bash scripts/generate-macos-icon.sh && node scripts/generate-windows-icon.mjs",
     "icon:mac": "bun run icon",
-    "dist:mac": "bun run icon && bun run build && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac dmg zip --arm64",
-    "dist:win": "bun run icon && bun run build && electron-builder --win nsis",
-    "dist:linux": "bun run icon && bun run build && electron-builder --linux AppImage deb",
+    "dist:mac": "bun run icon && bun run build && bun scripts/write-guide-resources.ts && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac dmg zip --arm64",
+    "dist:win": "bun run icon && bun run build && bun scripts/write-guide-resources.ts && electron-builder --win nsis",
+    "dist:linux": "bun run icon && bun run build && bun scripts/write-guide-resources.ts && electron-builder --linux AppImage deb",
     "install:mac": "bash scripts/install-macos-app.sh",
     "update:mac": "bun run dist:mac && bun run install:mac",
     "open:mac": "env -u ELECTRON_RUN_AS_NODE -u ELECTRON_NO_ASAR open -a \"Kodi\"",
@@ -114,6 +114,7 @@
     "files": [
       "out/**/*",
       "!out/renderer/assets/*.map",
+      "!out/review-guide/**",
       "package.json",
       "!node_modules/@anthropic-ai/claude-agent-sdk-*/**"
     ],
@@ -157,6 +158,14 @@
       {
         "from": "resources/kodi",
         "to": "kodi"
+      },
+      {
+        "from": "out/review-guide",
+        "to": "review-guide"
+      },
+      {
+        "from": "resources/skills",
+        "to": "skills"
       }
     ],
     "dmg": {

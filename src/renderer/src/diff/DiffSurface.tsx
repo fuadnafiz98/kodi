@@ -22,7 +22,7 @@ import {
 } from '../editor/selectionAction'
 import { useViewerContext, type EditorAnnotations } from '../editor/ViewerProviders'
 import { createDiffAnnotation, createFileAnnotation, selectedRangeLastLine } from '../review/reviewAnnotations'
-import { copyCodeReference, copyReviewComment } from '../review/codeReferenceClipboard'
+import { copyCodeReference, copyReviewComment, reviewCommentCode } from '../review/codeReferenceClipboard'
 import type { AppPreferences } from '../settings/preferences'
 import {
   AnnotationFrame,
@@ -49,7 +49,7 @@ export interface DiffSurfaceProps {
   onDraftFileChange(file: FileContents): void
   onEditorAttach(editor: Editor<ReviewAnnotationMetadata>): void
   onEditorBlur(): void
-  onAttachToAgent(selection: AgentSelection): void
+  onAttachToAgent(selection: AgentSelection, prompt?: string): void
   threadsByPath: Record<string, ReviewThread[]>
   setThreadsByPath: Dispatch<SetStateAction<Record<string, ReviewThread[]>>>
 }
@@ -68,7 +68,8 @@ type DiffContentsProps = Omit<DiffSurfaceProps, 'threadsByPath'> & { threads: Re
 function useReviewComments(
   comparison: FileComparison | null,
   threads: ReviewThread[],
-  setThreadsByPath: Dispatch<SetStateAction<Record<string, ReviewThread[]>>>
+  setThreadsByPath: Dispatch<SetStateAction<Record<string, ReviewThread[]>>>,
+  onAttachToAgent: DiffSurfaceProps['onAttachToAgent']
 ) {
   const [reviewCursor, setReviewCursor] = useState<{
     path: string | undefined
@@ -153,10 +154,29 @@ function useReviewComments(
             replies: [...current.replies, { id: crypto.randomUUID(), body }]
           }))}
           onToggleResolved={() => updateThread(thread.id, (current) => ({ ...current, resolved: !current.resolved }))}
+          onAskAgent={() => {
+            if (comparisonPath == null) return
+            const contents = { additions: comparison?.newFile?.contents, deletions: comparison?.oldFile?.contents }
+            const code = reviewCommentCode(thread, contents)
+            if (code == null || code === '') {
+              showToast('This comment’s lines are no longer in the file')
+              return
+            }
+            const side = thread.range.side ?? 'additions'
+            const file = side === 'deletions' ? comparison?.oldFile : comparison?.newFile
+            onAttachToAgent({
+              path: comparisonPath,
+              startLine: Math.min(thread.range.start, thread.range.end),
+              endLine: Math.max(thread.range.start, thread.range.end),
+              side,
+              selectedText: code,
+              blobOid: file?.cacheKey ?? null
+            }, `About this comment: ${thread.body}`)
+          }}
         />
       </AnnotationFrame>
     )
-  }, [comparison, comparisonPath, saveComment, updateThread])
+  }, [comparison, comparisonPath, onAttachToAgent, saveComment, updateThread])
 
   const reviewMetadata = useMemo<ReviewAnnotationMetadata[]>(() => [
     ...threads.map((thread) => ({ kind: 'thread' as const, thread })),
@@ -208,7 +228,7 @@ function DiffContents({
     renderReviewAnnotation,
     fileAnnotations,
     diffAnnotations
-  } = useReviewComments(comparison, threads, setThreadsByPath)
+  } = useReviewComments(comparison, threads, setThreadsByPath, onAttachToAgent)
 
   // The editor remaps annotation coordinates as the document changes and hands
   // back the whole authoritative collection. Ignoring it left comment cards on

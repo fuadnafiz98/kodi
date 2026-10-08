@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type Dispatch, type SetStateAction } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useState, type Dispatch, type SetStateAction } from 'react'
 import type { CodeViewItem, CodeViewLineSelection, SelectedLineRange } from '@pierre/diffs'
 
 import type { ReviewAnnotationMetadata, ReviewThread } from './ReviewComments'
@@ -8,6 +8,8 @@ import {
   attachReviewThreadToRange,
   createReviewCommentAnchor
 } from './reviewThreadAnchors'
+import { noteEditorLine } from './editorTarget'
+import { generatedCollapseChanges } from './reviewFileMarks'
 import { worldViewCache } from './worldViewCache'
 
 export interface DraftReviewComment {
@@ -38,6 +40,8 @@ interface ReviewThreadsOptions {
   threadsByPath: Readonly<Record<string, ReviewThread[]>>
   setThreadsByPath: Dispatch<SetStateAction<Record<string, ReviewThread[]>>>
   worldId?: string | null
+  /** Generated files by `.gitattributes`; null until main answers (path heuristics meanwhile). */
+  generatedPaths?: ReadonlySet<string> | null
 }
 
 export interface ReattachingReviewThread {
@@ -71,7 +75,8 @@ export function useReviewThreads({
   items,
   threadsByPath,
   setThreadsByPath,
-  worldId = null
+  worldId = null,
+  generatedPaths = null
 }: ReviewThreadsOptions): ReviewThreadsApi {
   const [selectedLines, setSelectedLines] = useState<CodeViewLineSelection | null>(null)
   const [draftComment, setDraftComment] = useState<DraftReviewComment | null>(null)
@@ -149,6 +154,9 @@ export function useReviewThreads({
 
   const handleSelectedLinesChange = useCallback((selection: CodeViewLineSelection | null) => {
     setSelectedLines(selection)
+    if (selection != null) {
+      noteEditorLine(pathFromItemId(selection.id), selection.range.side === 'deletions' ? null : selection.range.start)
+    }
   }, [])
 
   const saveComment = useCallback((body: string) => {
@@ -236,6 +244,23 @@ export function useReviewThreads({
     if (worldId == null) return
     worldViewCache.rememberCollapsed(worldId, collapsedItemIds)
   }, [collapsedItemIds, worldId])
+
+  // A lockfile or snapshot starts as its header; before paint, so it never
+  // draws open first.
+  useLayoutEffect(() => {
+    if (worldId == null || items.length === 0) return
+    const { collapse, expand } = generatedCollapseChanges(
+      worldId, items.map((item) => item.id), pathFromItemId, generatedPaths, collapsedItemIds
+    )
+    if (collapse.length === 0 && expand.length === 0) return
+    setCollapsedItemIds((current) => {
+      const next = new Set(current)
+      for (const id of collapse) next.add(id)
+      for (const id of expand) next.delete(id)
+      return next
+    })
+    bumpPathVersions([...collapse, ...expand].map(pathFromItemId))
+  }, [bumpPathVersions, collapsedItemIds, generatedPaths, items, worldId])
 
   return {
     selectedLines,

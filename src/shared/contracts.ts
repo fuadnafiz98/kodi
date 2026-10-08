@@ -1,5 +1,6 @@
 import type { SessionRestoreHint } from './sessionRestore.js'
 import type { CachedFileText, WorkspaceCache, WorkspaceUiState } from './workspaceCache.js'
+import type { GuideFileCategory, ReviewGuideProgressEvent, ReviewGuideReply, ReviewGuideRequest } from './reviewGuide.js'
 
 export type { CachedFileText, SessionRestoreHint, WorkspaceCache, WorkspaceUiState }
 
@@ -13,6 +14,14 @@ export type RepositoryFileStatus =
   | 'modified'
   | 'renamed'
   | 'untracked'
+
+/** A line that likely declares an identifier (WS-K), found by ripgrep and a per-language pattern. */
+export interface DefinitionCandidate {
+  path: string
+  line: number
+  kind: 'function' | 'class' | 'interface' | 'type' | 'variable'
+  preview: string
+}
 
 export interface RepositoryStatusEntry {
   path: string
@@ -230,6 +239,11 @@ export interface PullRequestFile {
   headBlobOid?: string
   /** Hash of the complete patch section when a full blob ID is unavailable. */
   patchHash?: string
+}
+
+export interface ReviewFileMarksReply {
+  generated: string[]
+  categories: Record<string, GuideFileCategory>
 }
 
 export interface RemoteReviewComment {
@@ -727,6 +741,12 @@ export interface RepositoryApi {
   onHibernateRequest(listener: () => string | null): () => void
   readClipboardText(type?: string): Promise<string>
   revealPath(path: string): Promise<void>
+  /**
+   * Opens a file of the open repository in the reader's editor: their
+   * `editorCommand` (`{file}`, `{line}`, `{repo}`), or VS Code, then the
+   * system's default app.
+   */
+  openInEditor(path: string, line: number | null, editorCommand: string): Promise<void>
   refresh(): Promise<RepositorySnapshot>
   getComparison(path: string): Promise<FileComparison>
   /** A text file at a commit, or null when the object is missing, binary or oversized. */
@@ -809,6 +829,32 @@ export interface RepositoryApi {
   cancelAgent(id: string): Promise<void>
   respondAgentApproval(requestId: string, decision: AgentApprovalDecision): Promise<void>
   onAgentEvent(listener: (event: AgentStreamEvent) => void): () => void
+  /** A stored guide, or a new one from the dock's model; progress arrives on onReviewGuideProgress. */
+  getReviewGuide(request: ReviewGuideRequest): Promise<ReviewGuideReply>
+  cancelReviewGuide(tabId: string): Promise<void>
+  onReviewGuideProgress(listener: (event: ReviewGuideProgressEvent) => void): () => void
+  /** The authoring guide and public schema `kodi --guide-format` prints. */
+  getReviewGuideFormat(): Promise<string>
+  /**
+   * What a `kodi <commit>` or `kodi --guide-file` asked for beyond its folder,
+   * once, after the window took the folder; null when nothing is waiting.
+   */
+  takeExternalTarget(): Promise<{ oid: string | null; guide: boolean } | null>
+  /**
+   * The guide a `kodi --guide-file` named, normalised against this subject's
+   * live diff; null while it waits for another review (its commit, its folder).
+   */
+  takeExternalGuide(subject: AgentRequestSubject): Promise<ReviewGuideReply | null>
+  /**
+   * Which of a review's files are generated, and each one's review category,
+   * from `.gitattributes` (at `revision` where git can) and path heuristics.
+   */
+  /** A commit message for the open repository's staged diff, from the agent dock's model; nothing is committed. */
+  suggestCommitMessage(request: { provider: AgentProvider; model: string; effort: string }): Promise<{ title: string; body: string }>
+  cancelCommitMessage(): Promise<void>
+  /** Likely declarations of `identifier` in the open repository's working tree, best first. */
+  findDefinitions(identifier: string, fromPath: string): Promise<DefinitionCandidate[]>
+  getReviewFileMarks(root: string, paths: readonly string[], revision: string | null): Promise<ReviewFileMarksReply | null>
   createTerminal(columns: number, rows: number): Promise<TerminalSession>
   readyTerminal(sessionId: string): void
   writeTerminal(sessionId: string, data: string): void
@@ -853,6 +899,7 @@ export const IPC_CHANNELS = {
   hibernationState: 'app:hibernation-state',
   readClipboardText: 'app:clipboard-read-text',
   revealPath: 'app:reveal-path',
+  openInEditor: 'repository:open-in-editor',
   refresh: 'repository:refresh',
   getComparison: 'repository:get-comparison',
   getRevisionFile: 'repository:get-revision-file',
@@ -895,6 +942,16 @@ export const IPC_CHANNELS = {
   cancelAgent: 'agent:cancel',
   respondAgentApproval: 'agent:respond-approval',
   agentEvent: 'agent:event',
+  getReviewGuide: 'review-guide:get',
+  cancelReviewGuide: 'review-guide:cancel',
+  reviewGuideProgress: 'review-guide:progress',
+  getReviewGuideFormat: 'review-guide:format',
+  takeExternalTarget: 'app:take-external-target',
+  takeExternalGuide: 'review-guide:take-external',
+  getReviewFileMarks: 'review:file-marks',
+  suggestCommitMessage: 'repository:suggest-commit-message',
+  cancelCommitMessage: 'repository:cancel-commit-message',
+  findDefinitions: 'repository:find-definitions',
   createTerminal: 'terminal:create',
   readyTerminal: 'terminal:ready',
   writeTerminal: 'terminal:write',

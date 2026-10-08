@@ -1064,6 +1064,18 @@ await runSuite('scroll-under-writes', async (suite, cleanup) => {
   suite.record('the folder review opens', !ready.timedOut, { files: changed.length, lockfile })
   if (ready.timedOut) return
   await Bun.sleep(2_500)
+  // A lockfile starts collapsed as generated (WS-G); this suite reads inside
+  // one, so the reader opens it first, as they would, and it stays open.
+  if (lockfile != null && await cdp.eval(`window.__INSTANCE.getItem(${JSON.stringify(`review:${lockfile}`)})?.collapsed === true`)) {
+    await cdp.eval(`window.__INSTANCE.scrollTo({ type: 'item', id: ${JSON.stringify(`review:${lockfile}`)}, align: 'start', behavior: 'instant' })`)
+    const expand = deepQuery(`[data-review-collapse-button][aria-label="Expand ${lockfile}"]`)
+    const found = await cdp.waitFor(`${expand} != null`, 5_000, 16)
+    if (!found.timedOut) await press(cdp, `${expand}.click()`)
+    const opened = await cdp.waitFor(`window.__INSTANCE.getItem(${JSON.stringify(`review:${lockfile}`)})?.collapsed !== true`, 5_000, 16)
+    suite.record('the generated lockfile opens with a click', !found.timedOut && !opened.timedOut)
+    await cdp.eval(`window.__INSTANCE.scrollTo({ type: 'item', id: window.__INSTANCE.items[0].id, align: 'start', behavior: 'instant' })`)
+    await Bun.sleep(1_000)
+  }
   await cdp.eval(INSTRUMENT)
 
   // Main: every invoke the renderer makes while the reader scrolls, by channel.

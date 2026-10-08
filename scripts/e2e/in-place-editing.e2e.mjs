@@ -144,15 +144,30 @@ await runSuite('in-place-editing', async (suite, cleanup) => {
     await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: point.x, y: point.y, button: 'left', clickCount: 1 })
     await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: point.x, y: point.y, button: 'left', clickCount: 1 })
   }
+  // Every scroll position the review and the single-file view are at, so a
+  // point is only taken once nothing moves: opening a file from the tree eases
+  // the review to it over a few hundred milliseconds.
+  const scrollPositions = `${deepAll('.multi-file-code-view, .diff-scroll')}.map((element) => element.scrollTop).join(',')`
+  const untilStill = async () => {
+    let last = null
+    let still = 0
+    for (let attempt = 0; attempt < 80 && still < 4; attempt += 1) {
+      const now = await cdp.eval(scrollPositions)
+      still = now === last ? still + 1 : 0
+      last = now
+      await Bun.sleep(50)
+    }
+  }
   const pointFor = async (expression, label = '') => {
     const result = await cdp.waitFor(`${expression} != null`, 10_000, 16)
     if (result.timedOut) throw new Error(`no point for ${label}`)
     // The point scrolls its line into view, so it is only true once that scroll
-    // has settled: measured again until two readings agree. The list also turns
-    // pointer events off on its items while it scrolls.
+    // and any the review was already making have settled: measured again, with
+    // the views still, until two readings agree.
+    await untilStill()
     let point = await cdp.eval(expression)
     for (let attempt = 0; attempt < 20; attempt += 1) {
-      await Bun.sleep(120)
+      await untilStill()
       const again = await cdp.eval(expression)
       const settled = again != null && point != null && again.x === point.x && again.y === point.y
       point = again

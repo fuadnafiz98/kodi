@@ -34,6 +34,8 @@ export interface CodexTurnHandlers {
   onChunk(chunk: AgentStreamChunk): void
   onRateLimit?(limit: CodexRateLimit): void
   onApproval?(approval: AgentApprovalRequest): Promise<AgentApprovalDecision>
+  /** The turn object of turn/completed, which carries `status` and `error`. */
+  onTurnCompleted?(turn: Record<string, unknown>): void
 }
 
 export function getCodexThreadAccess(accessMode: AgentAccessMode): {
@@ -59,7 +61,55 @@ export function getCodexTurnSandbox(accessMode: AgentAccessMode, cwd: string): R
   return { type: 'dangerFullAccess' }
 }
 
+// Provider errors arrive as the HTTP body's JSON in a string; its inner message
+// is the sentence worth showing.
+export function readCodexErrorMessage(value: unknown): string | null {
+  if (typeof value !== 'string' || value.trim() === '') return null
+  try {
+    const parsed = JSON.parse(value) as { error?: { message?: unknown }; message?: unknown }
+    const inner = parsed.error?.message ?? parsed.message
+    if (typeof inner === 'string' && inner !== '') return inner
+  } catch {
+    // Plain text already.
+  }
+  return value
+}
+
+function modelParams(model: string, effort: string): Record<string, string> {
+  return {
+    ...(model === '' || model === 'default' ? {} : { model }),
+    ...(effort === '' || effort === 'default' ? {} : { effort })
+  }
+}
+
+/**
+ * Config overrides for a server that only answers in text: no MCP servers, no
+ * shell, no web, browser, apps, plugins or sub-agents. A structured run's
+ * prompt carries diff text from other people's pull requests, and
+ * `approvalPolicy: 'never'` would let an injected instruction run whatever
+ * tool the user's config enables. Unknown keys are ignored by older CLIs.
+ */
+export const CODEX_TOOLLESS_CONFIG: readonly string[] = [
+  'mcp_servers={}',
+  'web_search="disabled"',
+  ...[
+    'shell_tool', 'unified_exec', 'apps', 'plugins', 'remote_plugin', 'browser_use', 'browser_use_external',
+    'in_app_browser', 'computer_use', 'image_generation', 'view_image', 'multi_agent', 'hooks', 'tool_suggest',
+    'skill_search', 'skill_mcp_dependency_install', 'memories'
+  ].map((feature) => `features.${feature}=false`)
+]
+
+export function codexServerArgs(configOverrides: readonly string[]): string[] {
+  return ['app-server', ...configOverrides.flatMap((override) => ['-c', override])]
+}
+
 export class CodexAppServer {
+  readonly #configOverrides: readonly string[]
+
+  constructor(options: { configOverrides?: readonly string[] } = {}) {
+    this.#configOverrides = options.configOverrides ?? []
+  }
+
   #child: ChildProcess | null = null
   #pending = new Map<number, PendingRequest>()
   #handlers: CodexTurnHandlers | null = null
@@ -87,7 +137,7 @@ export class CodexAppServer {
     this.#cwd = cwd
 
     this.#stderrTail = ''
-    const child = spawn(executable, ['app-server'], { cwd, stdio: ['pipe', 'pipe', 'pipe'] })
+    const child = spawn(executable, codexServerArgs(this.#configOverrides), { cwd, stdio: ['pipe', 'pipe', 'pipe'] })
     this.#child = child
     child.stdout?.setEncoding('utf8')
     child.stdout?.on('data', (chunk: string) => this.#readStdout(chunk))
@@ -181,7 +231,11 @@ export class CodexAppServer {
         const turn = (message.params as { turn?: { id?: unknown } } | undefined)?.turn
         if (typeof turn?.id === 'string') this.#currentTurnId = turn.id
       }
-      if (message.method === 'turn/completed') this.#finishTurn(null)
+      if (message.method === 'turn/completed') {
+        const turn = params.turn
+        if (typeof turn === 'object' && turn != null) this.#handlers?.onTurnCompleted?.(turn as Record<string, unknown>)
+        this.#finishTurn(null)
+      }
       if (message.method === 'turn/failed') this.#finishTurn(null)
       const limit = readCodexRateLimit(notification)
       if (limit != null) this.#handlers?.onRateLimit?.(limit)
@@ -352,10 +406,23 @@ export class CodexAppServer {
       handlers.onChunk({ kind: 'session', sessionId: threadId })
     }
 
+    await this.#runTurn({
+      threadId: this.#threadId,
+      input: [{ type: 'text', text: prompt }],
+      approvalPolicy: getCodexThreadAccess(accessMode).approvalPolicy,
+      sandboxPolicy: getCodexTurnSandbox(accessMode, cwd),
+      summary: 'detailed',
+      ...modelParams(model, effort)
+    }, CODEX_TURN_TIMEOUT_MS)
+  }
+
+  // Starts a turn and waits for turn/completed or turn/failed: `turn/start`
+  // replies as soon as the turn exists. Silence ends it, and so does the cap.
+  async #runTurn(params: Record<string, unknown>, limitMs: number): Promise<void> {
     const completed = new Promise<void>((resolve, reject) => {
       this.#turnCompletion = { resolve, reject }
     })
-    const deadline = Date.now() + CODEX_TURN_TIMEOUT_MS
+    const deadline = Date.now() + limitMs
     let timeout: ReturnType<typeof setTimeout> | null = null
     const armTimeout = (): void => {
       if (timeout != null) clearTimeout(timeout)
@@ -368,21 +435,82 @@ export class CodexAppServer {
     armTimeout()
     this.#turnActivity = armTimeout
     try {
-      await this.#request(CODEX_METHODS.turnStart, {
-        threadId: this.#threadId,
-        input: [{ type: 'text', text: prompt }],
-        approvalPolicy: getCodexThreadAccess(accessMode).approvalPolicy,
-        sandboxPolicy: getCodexTurnSandbox(accessMode, cwd),
-        summary: 'detailed',
-        ...(model === '' || model === 'default' ? {} : { model }),
-        ...(effort === '' || effort === 'default' ? {} : { effort })
-      }, CODEX_STARTUP_TIMEOUT_MS)
+      await this.#request(CODEX_METHODS.turnStart, params, CODEX_STARTUP_TIMEOUT_MS)
       await completed
     } finally {
       if (timeout != null) clearTimeout(timeout)
       this.#turnActivity = null
       this.#turnCompletion = null
     }
+  }
+
+  /**
+   * One schema-constrained answer on an ephemeral, read-only thread. Returns the
+   * final agent message's text; the caller parses it. Any approval request is
+   * declined, since nothing here may touch the machine.
+   */
+  async runStructured(options: {
+    executable: string
+    cwd: string
+    prompt: string
+    model: string
+    effort: string
+    schema: Record<string, unknown>
+    timeoutMs: number
+    onPhase?(phase: 'thinking' | 'writing'): void
+  }): Promise<string> {
+    const { executable, cwd, prompt, model, effort, schema, timeoutMs, onPhase } = options
+    await this.#ensureStarted(cwd, executable)
+    let message: string | null = null
+    let streamed = ''
+    let failure: string | null = null
+    this.#handlers = {
+      onChunk: (chunk) => {
+        if (chunk.kind === 'activity' && (chunk.activity?.kind === 'reasoning' ||
+            chunk.activities?.some((activity) => activity.kind === 'reasoning') === true)) {
+          onPhase?.('thinking')
+        } else if (chunk.kind === 'text' && chunk.text != null) {
+          if (chunk.source === 'message') message = chunk.text
+          else {
+            streamed += chunk.text
+            onPhase?.('writing')
+          }
+        } else if (chunk.kind === 'result' && chunk.failed === true) {
+          failure = chunk.text == null || chunk.text === '' ? 'Codex could not finish the turn.' : chunk.text
+        }
+      },
+      onApproval: () => Promise.resolve('decline'),
+      // A refused model or a provider error ends the turn as `failed`, with no
+      // turn/failed notification and no message.
+      onTurnCompleted: (turn) => {
+        if (turn.status !== 'failed') return
+        const error = turn.error as { message?: unknown } | null | undefined
+        failure = readCodexErrorMessage(error?.message) ?? 'Codex could not finish the turn.'
+      }
+    }
+    const started = await this.#request(CODEX_METHODS.threadStart, {
+      cwd,
+      sandbox: 'read-only',
+      approvalPolicy: 'never',
+      ephemeral: true,
+      ...modelParams(model, '')
+    }, CODEX_STARTUP_TIMEOUT_MS)
+    const thread = started.thread as { id?: unknown } | undefined
+    const threadId = typeof thread?.id === 'string' ? thread.id : null
+    if (threadId == null) throw new Error('Codex did not return a thread.')
+    this.#threadId = threadId
+    await this.#runTurn({
+      threadId,
+      input: [{ type: 'text', text: prompt }],
+      approvalPolicy: 'never',
+      sandboxPolicy: { type: 'readOnly', networkAccess: false },
+      outputSchema: schema,
+      ...modelParams(model, effort)
+    }, timeoutMs)
+    if (failure != null) throw new Error(failure)
+    const text = message ?? streamed
+    if (text.trim() === '') throw new Error('The model did not return JSON.')
+    return text
   }
 
   async listModels(executable: string, cwd: string): Promise<AgentModelOption[]> {
