@@ -1,4 +1,6 @@
-import { access } from 'node:fs/promises'
+import { access, readFile } from 'node:fs/promises'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 import { constants as fileConstants } from 'node:fs'
 import { spawn } from 'node:child_process'
 import type {
@@ -223,6 +225,42 @@ async function executableVersion(executable: string): Promise<string | undefined
   }
 }
 
+type AccountDetails = NonNullable<AgentProviderStatus['account']>
+
+function accountDetails(email: unknown, plan: unknown, organization: unknown): AccountDetails | null {
+  const text = (value: unknown): string | undefined =>
+    typeof value === 'string' && value.trim() !== '' ? value.trim().slice(0, 200) : undefined
+  const details: AccountDetails = {}
+  const address = text(email)
+  const tier = text(plan)
+  const org = text(organization)
+  if (address != null) details.email = address
+  if (tier != null) details.plan = tier
+  if (org != null) details.organization = org
+  return Object.keys(details).length === 0 ? null : details
+}
+
+/**
+ * The ChatGPT account Codex is signed in with, from the claims of its local
+ * id token (`$CODEX_HOME/auth.json`). Only the email and plan are read; the
+ * tokens never leave this function.
+ */
+async function codexAccount(): Promise<AccountDetails | null> {
+  try {
+    const home = process.env.CODEX_HOME ?? join(homedir(), '.codex')
+    const auth = JSON.parse(await readFile(join(home, 'auth.json'), 'utf8')) as { tokens?: { id_token?: unknown } }
+    const token = auth.tokens?.id_token
+    if (typeof token !== 'string') return null
+    const payload = token.split('.')[1]
+    if (payload == null) return null
+    const claims = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as Record<string, unknown>
+    const openai = claims['https://api.openai.com/auth'] as Record<string, unknown> | undefined
+    return accountDetails(claims.email, openai?.chatgpt_plan_type, undefined)
+  } catch {
+    return null
+  }
+}
+
 async function getProviderStatus(provider: AgentProvider): Promise<AgentProviderStatus> {
   const candidates = provider === 'claude' ? CLAUDE_CANDIDATES : CODEX_CANDIDATES
   const fallback = provider === 'claude' ? 'claude' : 'codex'
@@ -242,6 +280,7 @@ async function getProviderStatus(provider: AgentProvider): Promise<AgentProvider
       const account = typeof parsed.email === 'string'
         ? parsed.email
         : typeof parsed.subscriptionType === 'string' ? parsed.subscriptionType : null
+      const details = accountDetails(parsed.email, parsed.subscriptionType, parsed.orgName)
       return {
         provider,
         installed: true,
@@ -250,17 +289,20 @@ async function getProviderStatus(provider: AgentProvider): Promise<AgentProvider
         detail: authenticated
           ? account ?? 'Claude Code is ready.'
           : 'The Claude OAuth session is missing or expired.',
-        ...(version == null ? {} : { version })
+        ...(version == null ? {} : { version }),
+        ...(authenticated && details != null ? { account: details } : {})
       }
     }
     const authenticated = result.code === 0 && /logged in/i.test(`${result.stdout}\n${result.stderr}`)
+    const details = authenticated ? await codexAccount() : null
     return {
       provider,
       installed: true,
       authenticated,
       label: authenticated ? 'Connected' : 'Sign-in required',
       detail: authenticated ? result.stdout.trim() || 'Codex is ready.' : 'Sign in with ChatGPT to use Codex.',
-      ...(version == null ? {} : { version })
+      ...(version == null ? {} : { version }),
+      ...(details == null ? {} : { account: details })
     }
   } catch (error) {
     return {

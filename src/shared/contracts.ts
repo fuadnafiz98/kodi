@@ -534,6 +534,20 @@ export type AgentProvider = 'claude' | 'codex'
 
 export type AgentAccessMode = 'review' | 'auto' | 'full-access'
 
+export interface ReviewTextSearchRequest {
+  root: string
+  /** The review's head commit; null searches the working tree. */
+  revision: string | null
+  paths: readonly string[]
+  query: string
+  caseSensitive: boolean
+}
+
+export interface ReviewTextSearchReply {
+  lines: Array<{ path: string; line: number; text: string }>
+  truncated: boolean
+}
+
 export interface AgentModelOption {
   id: string
   label: string
@@ -552,6 +566,8 @@ export interface AgentProviderStatus {
   label: string
   detail: string
   version?: string
+  /** Who is signed in: an email when the CLI says, and its plan and organization. */
+  account?: { email?: string; plan?: string; organization?: string }
 }
 
 export type AgentProviderStatuses = Record<AgentProvider, AgentProviderStatus>
@@ -855,6 +871,8 @@ export interface RepositoryApi {
   /** Likely declarations of `identifier` in the open repository's working tree, best first. */
   findDefinitions(identifier: string, fromPath: string): Promise<DefinitionCandidate[]>
   getReviewFileMarks(root: string, paths: readonly string[], revision: string | null): Promise<ReviewFileMarksReply | null>
+  /** Every line of the review's files (new side, whole files) holding `query`; null when it cannot be asked. */
+  searchReviewText(request: ReviewTextSearchRequest): Promise<ReviewTextSearchReply | null>
   createTerminal(columns: number, rows: number): Promise<TerminalSession>
   readyTerminal(sessionId: string): void
   writeTerminal(sessionId: string, data: string): void
@@ -949,6 +967,7 @@ export const IPC_CHANNELS = {
   takeExternalTarget: 'app:take-external-target',
   takeExternalGuide: 'review-guide:take-external',
   getReviewFileMarks: 'review:file-marks',
+  searchReviewText: 'review:search-text',
   suggestCommitMessage: 'repository:suggest-commit-message',
   cancelCommitMessage: 'repository:cancel-commit-message',
   findDefinitions: 'repository:find-definitions',

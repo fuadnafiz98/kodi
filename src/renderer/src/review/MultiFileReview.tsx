@@ -1548,11 +1548,13 @@ const MultiFileReview = memo(function MultiFileReview({
     [guideOrder, loadState.items]
   )
   // ⌘F searches every file of the review, not only the rows the viewer drew.
+  const findRevision = repositoryReview?.headOid ?? null
   useEffect(() => publishReviewFindSource({
     viewer: () => viewerRef.current?.getInstance() as CodeViewInstance<unknown> | undefined,
     items: () => orderedItems,
-    expand: (id) => setCollapsedById(id, false)
-  }), [orderedItems, setCollapsedById])
+    expand: (id) => setCollapsedById(id, false),
+    scope: () => reviewRoot == null ? null : { root: reviewRoot, revision: findRevision }
+  }), [findRevision, orderedItems, reviewRoot, setCollapsedById])
   const handleImagePreview = useCallback((path: string, image: FileImagePreview) => {
     setImagePreviews((current) => {
       const existing = current.get(path)

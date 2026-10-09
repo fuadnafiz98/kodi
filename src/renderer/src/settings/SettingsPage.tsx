@@ -291,15 +291,15 @@ function PullRequestsSection({ preferences, update }: SettingsSectionProps): Rea
       <section className="settings-block">
         <div className="settings-block-heading">
           <h2>Guides</h2>
-          <p>A guide explains a review section by section. It is written by the agent dock’s model, which reads the diff, not your repository.</p>
+          <p>A guide explains a review section by section. It is written by the model chosen in the Guide (the agent dock’s until you pick one), which reads the diff, not your repository.</p>
         </div>
         <SettingRow controlId="guide-auto-generate" label="Generate guides" description="Start a review’s guide as it opens, so it is ready when you switch to it. Reviews over 120 files or 400 hunks wait for a click.">
           <SelectControl>
             <select id="guide-auto-generate" name="guide-auto-generate" value={preferences.guideAutoGenerate}
               onChange={(event) => update('guideAutoGenerate', event.target.value as GuideAutoGenerate)}>
+              <option value="off">Only when asked</option>
               <option value="pull-requests">For pull requests</option>
               <option value="all-reviews">For every review</option>
-              <option value="off">Only when asked</option>
             </select>
           </SelectControl>
         </SettingRow>

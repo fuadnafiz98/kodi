@@ -205,6 +205,7 @@ const repositoryApi: RepositoryApi = {
   cancelCommitMessage: () => ipcRenderer.invoke(IPC_CHANNELS.cancelCommitMessage),
   findDefinitions: (identifier, fromPath) => ipcRenderer.invoke(IPC_CHANNELS.findDefinitions, identifier, fromPath),
   getReviewFileMarks: (root, paths, revision) => ipcRenderer.invoke(IPC_CHANNELS.getReviewFileMarks, root, paths, revision),
+  searchReviewText: (request) => ipcRenderer.invoke(IPC_CHANNELS.searchReviewText, request),
   createTerminal: (columns, rows) => ipcRenderer.invoke(IPC_CHANNELS.createTerminal, columns, rows),
   readyTerminal: (sessionId) => ipcRenderer.send(IPC_CHANNELS.readyTerminal, sessionId),
   writeTerminal: (sessionId, data) => {

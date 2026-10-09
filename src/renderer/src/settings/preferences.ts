@@ -45,8 +45,8 @@ export type GuideAutoGenerate = 'off' | 'pull-requests' | 'all-reviews'
 const GUIDE_AUTO_GENERATE: readonly GuideAutoGenerate[] = ['off', 'pull-requests', 'all-reviews']
 
 export const KEYBINDINGS_VERSION = 2
-/** 1: word wrap became the default. */
-export const DEFAULTS_VERSION = 1
+/** 1: word wrap became the default. 2: guides are written on request only. */
+export const DEFAULTS_VERSION = 2
 
 export const CODE_FONTS: Record<CodeFont, { label: string; fontFamily: string }> = {
   'fira-code': {
@@ -103,7 +103,7 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   terminalScrollback: 5_000,
   restoreLastFolder: true,
   inboxRepos: [],
-  guideAutoGenerate: 'pull-requests',
+  guideAutoGenerate: 'off',
   guideOpensFirst: false,
   editorCommand: '',
   keybindings: DEFAULT_KEYBINDINGS,
@@ -118,7 +118,8 @@ export function loadPreferences(): AppPreferences {
     const stored = localStorage.getItem(STORAGE_KEY)
     if (stored == null) return DEFAULT_PREFERENCES
     const parsed = JSON.parse(stored) as Partial<AppPreferences>
-    const savedUnderOldDefaults = (parsed.defaultsVersion ?? 0) < DEFAULTS_VERSION
+    const savedVersion = parsed.defaultsVersion ?? 0
+    const savedUnderOldDefaults = savedVersion < 1
     return {
       codeFont: parsed.codeFont != null && Object.hasOwn(CODE_FONTS, parsed.codeFont)
         ? parsed.codeFont
@@ -153,7 +154,9 @@ export function loadPreferences(): AppPreferences {
         ? parsed.restoreLastFolder
         : DEFAULT_PREFERENCES.restoreLastFolder,
       inboxRepos: normalizeInboxRepos(parsed.inboxRepos),
-      guideAutoGenerate: GUIDE_AUTO_GENERATE.includes(parsed.guideAutoGenerate as GuideAutoGenerate)
+      // Saved before version 2 the stored value was the old default (pull
+      // requests), not a choice: guides now wait for Generate.
+      guideAutoGenerate: savedVersion >= 2 && GUIDE_AUTO_GENERATE.includes(parsed.guideAutoGenerate as GuideAutoGenerate)
         ? parsed.guideAutoGenerate as GuideAutoGenerate
         : DEFAULT_PREFERENCES.guideAutoGenerate,
       guideOpensFirst: typeof parsed.guideOpensFirst === 'boolean' ? parsed.guideOpensFirst : DEFAULT_PREFERENCES.guideOpensFirst,

@@ -181,3 +181,89 @@ export function carryActiveIndex(previous: ReviewMatch | null, matches: readonly
   })
   return found === -1 ? 0 : found
 }
+
+/** A line of a whole file (new side) that holds the query, from main's search. */
+export interface ReviewTextLine {
+  path: string
+  line: number
+  text: string
+}
+
+function itemPath(item: CodeViewItem<unknown>): string {
+  return item.type === 'diff' ? item.fileDiff.name : item.file.name
+}
+
+// Which run a new-side line sits in: hunk h is position 2h + 1, the folded run
+// before it 2h, the one after the last hunk 2 × hunks.
+function newSidePosition(diff: FileDiffMetadata, line: number): number {
+  for (const [index, hunk] of diff.hunks.entries()) {
+    if (line < hunk.additionStart) return index * 2
+    if (line < hunk.additionStart + Math.max(1, hunk.additionCount)) return index * 2 + 1
+  }
+  return diff.hunks.length * 2
+}
+
+function matchPosition(diff: FileDiffMetadata, match: ReviewMatch): number {
+  if (match.side === 'additions') return newSidePosition(diff, match.lineNumber)
+  for (const [index, hunk] of diff.hunks.entries()) {
+    if (match.lineNumber < hunk.deletionStart + Math.max(1, hunk.deletionCount)) return index * 2 + 1
+  }
+  return diff.hunks.length * 2 - 1
+}
+
+/**
+ * Adds main's whole-file lines to the model's matches: only lines a partial
+ * diff does not carry (its folded runs), each set between the hunks around it,
+ * so stepping through matches still reads the file top to bottom. Files the
+ * model holds whole (a hydrated diff, a plain file) are already complete.
+ */
+export function mergeFoldedMatches(
+  items: readonly CodeViewItem<unknown>[],
+  local: ReviewSearchResult,
+  lines: readonly ReviewTextLine[],
+  query: string
+): ReviewSearchResult {
+  if (lines.length === 0 || query === '') return local
+  const caseSensitive = isCaseSensitive(query)
+  const byPath = new Map<string, ReviewTextLine[]>()
+  for (const line of lines) {
+    const list = byPath.get(line.path)
+    if (list == null) byPath.set(line.path, [line])
+    else list.push(line)
+  }
+  const localByItem = new Map<string, ReviewMatch[]>()
+  for (const match of local.matches) {
+    const list = localByItem.get(match.itemId)
+    if (list == null) localByItem.set(match.itemId, [match])
+    else list.push(match)
+  }
+  const merged: ReviewMatch[] = []
+  let truncated = local.truncated
+  for (const item of items) {
+    const own = localByItem.get(item.id) ?? []
+    const found = byPath.get(itemPath(item))
+    if (item.type !== 'diff' || !item.fileDiff.isPartial || found == null || item.fileDiff.type === 'deleted') {
+      merged.push(...own)
+      continue
+    }
+    const diff = item.fileDiff
+    const folded: Array<{ position: number; match: ReviewMatch }> = []
+    for (const line of found) {
+      const position = newSidePosition(diff, line.line)
+      if (position % 2 === 1) continue
+      for (const column of findInLine(line.text, query, caseSensitive)) {
+        folded.push({ position, match: { itemId: item.id, side: 'additions', lineNumber: line.line, column, length: query.length } })
+      }
+    }
+    const ordered = [
+      ...own.map((match, order) => ({ position: matchPosition(diff, match), order, match })),
+      ...folded.map((entry) => ({ ...entry, order: entry.match.lineNumber * 10_000 + entry.match.column }))
+    ].sort((left, right) => left.position - right.position || left.order - right.order)
+    for (const entry of ordered) merged.push(entry.match)
+  }
+  if (merged.length > REVIEW_SEARCH_LIMIT) {
+    merged.length = REVIEW_SEARCH_LIMIT
+    truncated = true
+  }
+  return { matches: merged, truncated }
+}

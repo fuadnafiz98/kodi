@@ -232,7 +232,7 @@ await runSuite('review-guide', async (suite, cleanup) => {
   const sha = (await git(fixture, 'rev-parse', 'HEAD')).trim()
   await second.cdp.eval(`(() => {
     const preferences = JSON.parse(localStorage.getItem('kodi:preferences:v1') ?? '{}')
-    localStorage.setItem('kodi:preferences:v1', JSON.stringify({ ...preferences, guideAutoGenerate: 'all-reviews' }))
+    localStorage.setItem('kodi:preferences:v1', JSON.stringify({ ...preferences, guideAutoGenerate: 'all-reviews', defaultsVersion: 2 }))
     localStorage.setItem('kodi:guide-auto-hidden', '1')
     return true
   })()`)

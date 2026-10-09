@@ -62,7 +62,7 @@ describe('split diff resizing', () => {
   it('keeps expand chevrons in the gutter, next to the line numbers', () => {
     expect(declarationsFor(
       COLLAPSED_SEPARATOR_CSS,
-      '[data-gutter] [data-separator="line-info-basic"] [data-expand-button]'
+      '[data-gutter] [data-separator="line-info-basic"] [data-expand-button]:not([data-expand-all-button])'
     )).toContain('display: flex')
     expect(declarationsFor(
       COLLAPSED_SEPARATOR_CSS,

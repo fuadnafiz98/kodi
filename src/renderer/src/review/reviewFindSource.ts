@@ -14,6 +14,8 @@ export interface ReviewFindSource {
   viewer(): CodeView<unknown> | null | undefined
   items(): readonly CodeViewItem<unknown>[]
   expand(itemId: string): void
+  /** Where the files live, for searching their folded lines: the root and the review's head (null for the working tree). */
+  scope?(): { root: string; revision: string | null } | null
 }
 
 declare global {

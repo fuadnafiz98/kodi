@@ -64,6 +64,21 @@ afterEach(() => {
 })
 
 describe('ReviewGuideView', () => {
+  test('Generate offers the model, effort, focus and the account it runs as', async () => {
+    setup({ status: 'unavailable', reason: 'none', code: 'not-cached' })
+    const repository = window.repository as unknown as Record<string, unknown>
+    repository.getAgentModels = async () => ({ claude: [], codex: [{ id: 'gpt-test', label: 'GPT Test', description: '', efforts: ['low', 'high'], defaultEffort: 'low' }] })
+    repository.getAgentStatuses = async () => ({
+      claude: { provider: 'claude', installed: true, authenticated: false, label: '', detail: '' },
+      codex: { provider: 'codex', installed: true, authenticated: true, label: '', detail: '', account: { email: 'reader@example.com', plan: 'pro' } }
+    })
+    await act(async () => {})
+    expect(document.querySelector('#guide-agent-provider')).not.toBeNull()
+    expect(document.querySelector('#guide-agent-model')).not.toBeNull()
+    expect(document.querySelector('#guide-agent-effort')).not.toBeNull()
+    expect(document.querySelector('#guide-agent-instructions')).not.toBeNull()
+  })
+
   test('with nothing stored it offers Generate, asking the disk only', async () => {
     const { getReviewGuide } = setup({ status: 'unavailable', reason: 'none', code: 'not-cached' })
     await act(async () => {})
@@ -135,5 +150,18 @@ describe('ReviewGuideView', () => {
     await act(async () => { fireEvent.click(screen.getByText('Regenerate')) })
     expect(getReviewGuide.mock.calls.at(-1)![0]).toMatchObject({ force: true })
     expect(reviewGuideStore.get(worldId).status).toBe('ready')
+  })
+
+  test('the walkthrough column resizes from its edge and keeps the width', async () => {
+    setup({ status: 'ready', guide: testGuide(), cached: true })
+    await act(async () => {})
+    const handle = document.querySelector<HTMLElement>('[data-guide-resizer]')!
+    const column = document.querySelector<HTMLElement>('[data-guide-column]')!
+    const before = Number.parseInt(column.style.width, 10)
+    fireEvent.keyDown(handle, { key: 'ArrowRight' })
+    expect(Number.parseInt(column.style.width, 10)).toBe(before + 16)
+    expect(localStorage.getItem('kodi:guide-column-width')).toBe(String(before + 16))
+    fireEvent.doubleClick(handle)
+    expect(column.style.width).toBe('296px')
   })
 })

@@ -2,6 +2,7 @@ import type { AgentRequestSubject } from '../../../shared/contracts'
 import type { GuideAutoGenerate } from '../settings/preferences'
 import type { GuideAgentContext } from './reviewGuideHost'
 import { reviewGuideStore } from './reviewGuideStore'
+import { guideAgentChoice, resolveGuideRun } from './guideAgentSettings'
 
 export interface AutoGuideCandidate {
   worldId: string
@@ -41,7 +42,7 @@ export function autoGuideAllowed(mode: GuideAutoGenerate, candidate: AutoGuideCa
 
 /**
  * Starts a review's guide without a click, once per review head: the stored one
- * when there is one, otherwise a model run with the dock's choice. Returns
+ * when there is one, otherwise a model run with the Guide's model. Returns
  * whether it asked.
  */
 export function autoGenerateGuide(
@@ -57,8 +58,10 @@ export function autoGenerateGuide(
   started.add(key)
   const host = window.__kodiReviewGuide
   if (host != null) reviewGuideStore.connect(host)
-  void reviewGuideStore.request(candidate.worldId, subject, agent, { cachedOnly: true }).then(() => {
-    if (reviewGuideStore.get(candidate.worldId).status === 'idle') void reviewGuideStore.request(candidate.worldId, subject, agent)
+  // The Guide's own model when one is chosen there, the dock's otherwise.
+  const run = resolveGuideRun(guideAgentChoice(), agent)
+  void reviewGuideStore.request(candidate.worldId, subject, run, { cachedOnly: true }).then(() => {
+    if (reviewGuideStore.get(candidate.worldId).status === 'idle') void reviewGuideStore.request(candidate.worldId, subject, run)
   })
   return true
 }

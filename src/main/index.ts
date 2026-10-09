@@ -1427,6 +1427,21 @@ function registerIpcHandlers(): void {
     const marks = await markReviewFiles(root, valid, typeof revision === 'string' ? revision : null)
     return { generated: [...marks.generated], categories: Object.fromEntries(marks.categories) }
   })
+  ipcMain.handle(IPC_CHANNELS.searchReviewText, async (_event, request: unknown) => {
+    if (typeof request !== 'object' || request == null) return null
+    const { root, revision, paths, query, caseSensitive } = request as Record<string, unknown>
+    if (typeof root !== 'string' || repositorySessions.tryGet(root) == null) return null
+    if (revision !== null && (typeof revision !== 'string' || !/^[0-9a-f]{7,64}$/i.test(revision))) return null
+    if (!Array.isArray(paths) || paths.length > MAX_MARKED_REVIEW_FILES || typeof query !== 'string' || typeof caseSensitive !== 'boolean') return null
+    const { searchReviewText } = await import('./reviewTextSearch.js')
+    return searchReviewText({
+      root,
+      revision,
+      paths: paths.filter((path): path is string => typeof path === 'string'),
+      query,
+      caseSensitive
+    }, { ripgrep: RIPGREP_EXECUTABLE })
+  })
   ipcMain.handle(IPC_CHANNELS.getReviewGuideFormat, async () => {
     const { guideFormatDocument } = await import('./reviewGuide/formatText.js')
     return guideFormatDocument()

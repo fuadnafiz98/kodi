@@ -4,7 +4,7 @@
    on a 4 px grid; corners come from the app's squircle radii. */
 .multi-file-review[data-review-guide] {
   display: grid;
-  grid-template-columns: 296px minmax(0, 1fr);
+  grid-template-columns: auto minmax(0, 1fr);
   grid-template-rows: auto minmax(0, 1fr);
   grid-template-areas:
     "header header"
@@ -85,7 +85,9 @@
    follow), and the open step is scrolled into view from script. */
 .guide-column {
   grid-area: column;
+  width: 296px;
   min-height: 0;
+  position: relative;
   overflow: hidden;
   padding: 16px 12px 24px 16px;
   border-right: 1px solid var(--border);
@@ -135,17 +137,6 @@
 
 .guide-steps { position: relative; margin: 0; padding: 0; list-style: none; }
 
-/* The thread through the step marks, behind them. */
-.guide-steps::before {
-  content: "";
-  position: absolute;
-  top: 14px;
-  bottom: 14px;
-  left: 9.5px;
-  width: 1px;
-  background: var(--border);
-}
-
 .guide-step { position: relative; }
 
 .guide-step-head {
@@ -172,15 +163,14 @@
   place-items: center;
   width: 20px;
   height: 20px;
-  border: 1px solid var(--border-strong);
   border-radius: var(--corner-inset);
-  background: var(--canvas);
-  color: var(--muted);
+  background: transparent;
+  color: var(--faint);
   font-family: var(--font-mono);
   font-size: 10px;
   font-variant-numeric: tabular-nums;
   line-height: 1;
-  transition: background-color var(--duration-base) var(--ease-out), border-color var(--duration-base) var(--ease-out), color var(--duration-base) var(--ease-out);
+  transition: background-color var(--duration-base) var(--ease-out), color var(--duration-base) var(--ease-out);
 }
 
 .guide-step-mark svg { width: 11px; height: 11px; }
@@ -197,9 +187,8 @@
 .guide-step[data-viewed] .guide-step-mark { color: var(--status-success-text); }
 
 .guide-step[data-active] .guide-step-mark {
-  border-color: var(--text);
-  background: var(--text);
-  color: var(--canvas);
+  background: var(--control-fill-selected);
+  color: var(--text);
 }
 
 .guide-step-title {
@@ -211,7 +200,7 @@
   transition: color var(--duration-base) var(--ease-out);
 }
 
-.guide-step[data-active] .guide-step-title { color: var(--text); font-weight: 600; }
+.guide-step[data-active] .guide-step-title { color: var(--text); }
 
 .guide-step-body {
   padding: 4px 0 16px 32px;
@@ -249,7 +238,7 @@
   border: 0;
   border-radius: var(--corner-compact);
   background: transparent;
-  color: var(--text);
+  color: var(--text-secondary);
   font: inherit;
   font-size: var(--text-sm);
   text-align: left;
@@ -257,7 +246,7 @@
 }
 
 .guide-file-row:hover { background: var(--surface-hover); }
-.guide-file-row[data-current] { background: var(--panel-subtle); box-shadow: inset 2px 0 0 var(--accent); }
+.guide-file-row[data-current] { background: var(--control-fill-selected); color: var(--text); }
 .guide-file-row:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
 .guide-file-name { flex: none; max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
@@ -308,27 +297,17 @@
 .guide-state[data-guide-state="loading"] .guide-button { margin-left: auto; }
 .guide-state-actions { display: flex; gap: 8px; }
 
+/* A line of text, not a card: what changed, and the one thing to do about it. */
 .guide-notice {
   display: flex;
   flex-wrap: wrap;
-  align-items: center;
+  align-items: baseline;
   gap: 4px 8px;
-  width: 100%;
   margin: 0 0 16px;
-  padding: 8px 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--corner-card);
-  background: var(--panel-subtle);
-  color: var(--text-secondary);
-  font: inherit;
+  color: var(--muted);
   font-size: var(--text-sm);
-  line-height: 16px;
-  text-align: left;
+  line-height: 18px;
 }
-
-.guide-notice-action { border-color: color-mix(in srgb, var(--accent) 45%, transparent); cursor: pointer; }
-.guide-notice-action strong { color: var(--accent); font-weight: var(--weight-medium); }
-.guide-notice-action:hover { background: var(--accent-soft); }
 
 /* ── buttons ────────────────────────────────────────────────────────────── */
 
@@ -472,3 +451,130 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* ── resize handle ──────────────────────────────────────────────────────── */
+
+/* Sits on the column's right edge, over its border; the line lights up on hover
+   and while dragging, the same as the explorer's. */
+.guide-resizer {
+  position: absolute;
+  z-index: 1;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 6px;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.guide-resizer::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 1px;
+  background: transparent;
+  transition: background-color var(--duration-fast) var(--ease-out);
+}
+
+.guide-resizer:hover::before,
+.guide-resizer:focus-visible::before,
+.guide-resizer[data-dragging]::before { background: color-mix(in srgb, var(--accent) 78%, transparent); }
+
+.guide-resizer:focus-visible { outline: 0; }
+.multi-file-review[data-guide-resizing],
+.multi-file-review[data-guide-resizing] * { cursor: col-resize !important; user-select: none !important; }
+
+/* ── model picker ───────────────────────────────────────────────────────── */
+
+.guide-agent-picker {
+  display: grid;
+  grid-template-columns: 56px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px 12px;
+  width: 100%;
+  margin: 4px 0;
+}
+
+.guide-field { display: contents; }
+.guide-field > label { color: var(--muted); font-size: var(--text-xs); }
+.guide-field-wide > label { align-self: start; padding-top: 6px; }
+
+.guide-select { position: relative; display: flex; align-items: center; min-width: 0; }
+
+.guide-select select {
+  width: 100%;
+  min-width: 0;
+  height: 28px;
+  padding: 0 28px 0 8px;
+  border: 0;
+  border-radius: var(--corner-compact);
+  appearance: none;
+  background: var(--control-fill);
+  color: var(--text);
+  font: inherit;
+  font-size: var(--text-sm);
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.guide-select select:hover:not(:disabled) { background: var(--control-fill-hover); }
+.guide-select select:disabled { color: var(--muted); cursor: default; }
+.guide-select select:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+
+.guide-select svg {
+  position: absolute;
+  right: 8px;
+  width: 11px;
+  height: 11px;
+  color: var(--muted);
+  pointer-events: none;
+}
+
+.guide-agent-picker textarea {
+  width: 100%;
+  min-width: 0;
+  min-height: 52px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: var(--corner-compact);
+  background: var(--control-fill);
+  color: var(--text);
+  font: inherit;
+  font-size: var(--text-sm);
+  line-height: 18px;
+  resize: vertical;
+}
+
+.guide-agent-picker textarea::placeholder { color: var(--faint); }
+.guide-agent-picker textarea:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+
+.guide-field-label { color: var(--muted); font-size: var(--text-xs); }
+
+.guide-account {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  height: 28px;
+  color: var(--muted);
+  font-size: var(--text-sm);
+}
+
+.guide-account > svg { flex: none; width: 12px; height: 12px; }
+.guide-account-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.guide-account[data-guide-account="signed-in"] .guide-account-text { color: var(--text-secondary); }
+.guide-account-plan { color: var(--muted); }
+.guide-account-plan::before { content: "·"; margin: 0 6px; color: var(--faint); }
+
+.guide-model-popover {
+  width: 320px;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 12px;
+  padding: 12px;
+}
+
+.guide-model-popover > .guide-button { align-self: flex-end; }

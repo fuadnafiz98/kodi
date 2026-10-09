@@ -1,11 +1,14 @@
-import type { CodeView, CodeViewItem } from '@pierre/diffs'
+import type { CodeView, CodeViewItem, FileDiffMetadata } from '@pierre/diffs'
 
 import type { ReviewFindSource } from './reviewFindSource'
 import {
   carryActiveIndex,
+  isCaseSensitive,
+  mergeFoldedMatches,
   nextMatchIndex,
   searchReviewItems,
-  type ReviewMatch
+  type ReviewMatch,
+  type ReviewTextLine
 } from './reviewSearch'
 import { clearReviewFind, paintIsStale, paintReviewFind } from './reviewSearchHighlights'
 
@@ -49,14 +52,81 @@ export function visibleReviewSource(): ReviewFindSource | null {
   return null
 }
 
-function showsUnchangedLines(viewer: CodeView<unknown>): boolean {
-  return (viewer as unknown as { options?: { expandUnchanged?: boolean } }).options?.expandUnchanged === true
+const FOLDED_SEARCH_DELAY_MS = 120
+const REVEAL_RETRY_FRAMES = 12
+// A partial diff loads its whole files before a fold can open (~2 s at most).
+const HYDRATE_WAIT_FRAMES = 120
+
+/** The query and the review's partial files: main's answer holds while both do. */
+function foldedKey(query: string, items: readonly CodeViewItem<unknown>[]): string {
+  let key = query
+  for (const item of items) {
+    if (item.type === 'diff' && item.fileDiff.isPartial) key += `\n${item.id}:${item.fileDiff.cacheKey ?? item.fileDiff.hunks.length}`
+  }
+  return key
+}
+
+interface ItemInstance {
+  fileDiff?: FileDiffMetadata
+  options?: { expandUnchanged?: boolean }
+  loadFilesIfNecessary?(): void
+  revealLine?(line: number): boolean
+}
+
+function itemInstance(viewer: CodeView<unknown>, itemId: string): ItemInstance | undefined {
+  return (viewer as unknown as { idToItem?: Map<string, { instance?: ItemInstance }> }).idToItem?.get(itemId)?.instance
+}
+
+/**
+ * A match in a patch's fold needs the whole file first: asks the item to load
+ * both files and waits for the hydrated diff. True when the move was abandoned.
+ */
+async function loadWholeFile(viewer: CodeView<unknown>, itemId: string, abandoned: () => boolean): Promise<boolean> {
+  const instance = itemInstance(viewer, itemId)
+  if (instance?.fileDiff?.isPartial !== true) return false
+  try {
+    instance.loadFilesIfNecessary?.()
+  } catch {
+    return false
+  }
+  for (let frame = 0; frame < HYDRATE_WAIT_FRAMES && instance.fileDiff?.isPartial === true; frame += 1) {
+    await new Promise((resolve) => window.requestAnimationFrame(resolve))
+    if (abandoned()) return true
+  }
+  return false
+}
+
+/**
+ * Whether the line is outside every fold already: inside a hunk, or the file
+ * shows all its lines. A line in an open hunk needs no reveal and none of its
+ * retries.
+ */
+function lineIsDrawable(viewer: CodeView<unknown>, match: ReviewMatch): boolean {
+  const instance = itemInstance(viewer, match.itemId)
+  const diff = instance?.fileDiff
+  if (diff == null || instance?.options?.expandUnchanged === true) return true
+  return diff.hunks.some((hunk) => match.lineNumber >= hunk.additionStart && match.lineNumber < hunk.additionStart + Math.max(1, hunk.additionCount))
+}
+
+/**
+ * Opens the folded run of unchanged lines that holds `lineNumber` (new side),
+ * through the file's own `revealLine` — the call its editor makes for a caret
+ * landing in a fold. True when it opened something; the layout then needs a
+ * frame before the line can be scrolled to.
+ */
+function revealFoldedLine(viewer: CodeView<unknown>, itemId: string, lineNumber: number): boolean {
+  try {
+    return itemInstance(viewer, itemId)?.revealLine?.(lineNumber) === true
+  } catch {
+    return false
+  }
 }
 
 /**
  * ⌘F over a multi-file review: searches the diff model of every file (drawn
- * or not, collapsed or not), paints the drawn matches, and moves between them —
- * opening a collapsed file and scrolling the viewer to the line.
+ * or not, collapsed or not, folded unchanged lines included), paints the drawn
+ * matches, and moves between them — opening a collapsed file or a fold and
+ * scrolling the viewer to the line.
  */
 export class ReviewFindController {
   private query = ''
@@ -75,6 +145,10 @@ export class ReviewFindController {
   private redrawFrame = 0
   private observed = new WeakSet<ShadowRoot>()
   private moveToken = 0
+  // Main's whole-file lines for the current query and items, and the ask in flight.
+  private folded: { key: string; lines: readonly ReviewTextLine[]; truncated: boolean } | null = null
+  private foldedTimer = 0
+  private foldedToken = 0
 
   constructor(private readonly onChange: (state: ReviewFindState | null) => void) {}
 
@@ -118,6 +192,10 @@ export class ReviewFindController {
     this.matches = []
     this.byItem = new Map()
     this.active = -1
+    window.clearTimeout(this.foldedTimer)
+    this.foldedTimer = 0
+    this.foldedToken += 1
+    this.folded = null
     clearReviewFind()
   }
 
@@ -171,9 +249,15 @@ export class ReviewFindController {
     const previous = fromReadingPlace
       ? this.readingPlace(viewer)
       : keepPlace ? this.matches[this.active] ?? null : null
-    const result = searchReviewItems(shown, this.query, { includeUnchanged: viewer != null && showsUnchangedLines(viewer) })
+    // Folded unchanged code is searched too: a match there opens its fold. The
+    // model holds it for a whole file; a patch's folds are asked of main.
+    const local = searchReviewItems(shown, this.query, { includeUnchanged: true })
+    const key = foldedKey(this.query, shown)
+    const folded = this.folded?.key === key ? this.folded : null
+    const result = folded == null ? local : mergeFoldedMatches(shown, local, folded.lines, this.query)
     this.matches = result.matches
-    this.truncated = result.truncated
+    this.truncated = result.truncated || folded?.truncated === true
+    if (folded == null) this.askFolded(source, shown, key)
     this.byItem = new Map()
     for (const match of result.matches) {
       const list = this.byItem.get(match.itemId)
@@ -183,6 +267,32 @@ export class ReviewFindController {
     this.active = carryActiveIndex(previous, result.matches, items.map((item) => item.id))
     this.publish()
     this.paint()
+  }
+
+  /** Asks main for the query's lines in the review's partial files, then merges them in. */
+  private askFolded(source: ReviewFindSource, shown: readonly CodeViewItem<unknown>[], key: string): void {
+    window.clearTimeout(this.foldedTimer)
+    const token = ++this.foldedToken
+    const scope = source.scope?.()
+    const paths = shown.flatMap((item) => item.type === 'diff' && item.fileDiff.isPartial && item.fileDiff.type !== 'deleted'
+      ? [item.fileDiff.name]
+      : [])
+    const repository = window.repository
+    if (scope == null || paths.length === 0 || typeof repository?.searchReviewText !== 'function') return
+    const query = this.query
+    // Typing settles first: one spawn per pause, not per key.
+    this.foldedTimer = window.setTimeout(() => {
+      this.foldedTimer = 0
+      void repository.searchReviewText({ ...scope, paths, query, caseSensitive: isCaseSensitive(query) }).then((reply) => {
+        if (token !== this.foldedToken || reply == null || this.query !== query) return
+        this.folded = { key, lines: reply.lines, truncated: reply.truncated }
+        trace('folded', { lines: reply.lines.length })
+        const hadMatch = this.active >= 0
+        this.research(true)
+        // Typing found nothing on screen and the folds hold the first match: go there.
+        if (!hadMatch && this.active >= 0) void this.reveal(this.matches[this.active])
+      }, () => {})
+    }, FOLDED_SEARCH_DELAY_MS)
   }
 
   private watch(): void {
@@ -257,6 +367,34 @@ export class ReviewFindController {
         await new Promise((resolve) => window.requestAnimationFrame(resolve))
         if (token !== this.moveToken) return
         if (viewer.getItem(match.itemId)?.collapsed !== true) break
+      }
+    }
+    // A fold opens in a drawn file: an off-screen one never renders, so it would
+    // neither take its loaded text nor apply the opening. Bring it on screen first.
+    if (match.side === 'additions' && !lineIsDrawable(viewer, match)) {
+      viewer.scrollTo({ type: 'line', id: match.itemId, lineNumber: match.lineNumber, side: match.side, align: 'center', behavior: 'instant' })
+      for (let frame = 0; frame < 2; frame += 1) {
+        await new Promise((resolve) => window.requestAnimationFrame(resolve))
+        if (token !== this.moveToken) return
+      }
+    }
+    if (match.side === 'additions' && await loadWholeFile(viewer, match.itemId, () => token !== this.moveToken)) return
+    // A file that just loaded whole answers from the diff it last drew until
+    // its next render, so the fold is asked again for a few frames.
+    let opened = false
+    if (match.side === 'additions' && !lineIsDrawable(viewer, match)) {
+      for (let attempt = 0; attempt < REVEAL_RETRY_FRAMES && !opened; attempt += 1) {
+        opened = revealFoldedLine(viewer, match.itemId, match.lineNumber)
+        if (opened) break
+        await new Promise((resolve) => window.requestAnimationFrame(resolve))
+        if (token !== this.moveToken) return
+      }
+    }
+    trace('reveal', { item: match.itemId, line: match.lineNumber, opened })
+    if (opened) {
+      for (let frame = 0; frame < 2; frame += 1) {
+        await new Promise((resolve) => window.requestAnimationFrame(resolve))
+        if (token !== this.moveToken) return
       }
     }
     viewer.scrollTo({

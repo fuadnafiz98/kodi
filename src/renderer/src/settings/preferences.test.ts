@@ -100,15 +100,20 @@ describe('loadPreferences', () => {
 })
 
 describe('guide preferences', () => {
-  it('start guides for pull requests and open them on the diff by default', () => {
-    expect(loadPreferences()).toMatchObject({ guideAutoGenerate: 'pull-requests', guideOpensFirst: false })
+  it('write guides only on request and open them on the diff by default', () => {
+    expect(loadPreferences()).toMatchObject({ guideAutoGenerate: 'off', guideOpensFirst: false })
+  })
+
+  it('treat a value saved under the old pull-request default as off', () => {
+    localStorage.setItem('kodi:preferences:v1', JSON.stringify({ guideAutoGenerate: 'pull-requests', defaultsVersion: 1, wordWrap: false }))
+    expect(loadPreferences()).toMatchObject({ guideAutoGenerate: 'off', wordWrap: false })
   })
 
   it('keep a valid choice and drop anything else', () => {
-    localStorage.setItem('kodi:preferences:v1', JSON.stringify({ guideAutoGenerate: 'all-reviews', guideOpensFirst: true }))
+    localStorage.setItem('kodi:preferences:v1', JSON.stringify({ guideAutoGenerate: 'all-reviews', guideOpensFirst: true, defaultsVersion: 2 }))
     expect(loadPreferences()).toMatchObject({ guideAutoGenerate: 'all-reviews', guideOpensFirst: true })
-    localStorage.setItem('kodi:preferences:v1', JSON.stringify({ guideAutoGenerate: 'always', guideOpensFirst: 'yes' }))
-    expect(loadPreferences()).toMatchObject({ guideAutoGenerate: 'pull-requests', guideOpensFirst: false })
+    localStorage.setItem('kodi:preferences:v1', JSON.stringify({ guideAutoGenerate: 'always', guideOpensFirst: 'yes', defaultsVersion: 2 }))
+    expect(loadPreferences()).toMatchObject({ guideAutoGenerate: 'off', guideOpensFirst: false })
   })
 })
 

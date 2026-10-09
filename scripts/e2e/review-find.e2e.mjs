@@ -1,5 +1,6 @@
 // ⌘F over a multi-file review finds every match in every file — files the
-// viewer has not drawn yet and collapsed ones included — counts them right,
+// viewer has not drawn yet, collapsed ones and folded unchanged lines included
+// (Enter opens the fold) — counts them right,
 // and moves the viewer to each: opening a collapsed file, landing on the
 // deleted row for a match on the old side, wrapping at the end. The count
 // follows a rewrite of a file, Escape clears the marks, and flinging with a
@@ -20,8 +21,12 @@ import {
 
 const FILES = 60
 const name = (index) => `src/f${String(index).padStart(2, '0')}.ts`
-const original = (index) => Array.from({ length: 60 }, (_unused, line) =>
-  index === 20 && line === 30 ? 'export const removed = "a needle in the old file"\n' : `export const v${index}_${line} = ${line}\n`).join('')
+// File 40's line 6 never changes: it sits in a folded run of unchanged lines.
+const original = (index) => Array.from({ length: 60 }, (_unused, line) => {
+  if (index === 20 && line === 30) return 'export const removed = "a needle in the old file"\n'
+  if (index === 40 && line === 5) return 'export const folded = "a haystack inside a fold"\n'
+  return `export const v${index}_${line} = ${line}\n`
+}).join('')
 const edited = (index, { keepNeedle55 = true } = {}) => original(index).split('\n').map((text, line) => {
   if (line !== 30) return text
   if (index === 3) return 'export const collapsed = "a needle in a collapsed file"'
@@ -169,6 +174,15 @@ await runSuite('review-find', async (suite, cleanup) => {
   const tasks = await takeLongTasks(cdp)
   suite.record('flinging with a search open has no long task', scroller != null && tasks.longestMs < 50,
     { longTasks: tasks, frames })
+
+  // ── a word only in folded unchanged code: counted, and Enter opens its fold ─
+  await cdp.eval(`(() => { const input = document.querySelector('.find-bar input'); input.focus(); input.select(); return true })()`)
+  await cdp.send('Input.insertText', { text: 'haystack' })
+  const foldCounted = await cdp.waitFor(`${COUNT} === '1/1'`, 5_000, 16)
+  const foldShown = await settled(cdp, `(() => { const a = ${ACTIVE}; return a != null && a.onScreen && a.file === '${name(40)}' && a.line === '6' })()`, 8_000)
+  suite.record('a match in folded unchanged code is counted and its fold opens on it', !foldCounted.timedOut && foldShown,
+    { count: await cdp.eval(COUNT), active: await cdp.eval(ACTIVE), ...(foldShown ? {} : await failureTrace(cdp)),
+      ...(foldShown ? {} : { item: await cdp.eval(`(() => { const r = window.__INSTANCE.idToItem?.get('review:${name(40)}'); const i = r?.instance; return { found: r != null, partial: i?.fileDiff?.isPartial ?? null, load: typeof i?.loadFilesIfNecessary, reveal: typeof i?.revealLine, top: window.__INSTANCE.getTopForItem('review:${name(40)}'), pending: i?.pendingExpansions ?? null, hunks: i?.fileDiff?.hunks?.map((h) => [h.additionStart, h.additionCount, h.collapsedBefore]), expanded: [...(i?.hunksRenderer?.getExpandedHunksMap?.() ?? new Map()).entries()], expandUnchanged: i?.options?.expandUnchanged, threshold: i?.options?.collapsedContextThreshold, scrollTop: window.__INSTANCE.root?.scrollTop, trace: (window.__kodiReviewFindTrace ?? []).filter((e) => e[1] !== 'paint').slice(-12) } })()`) }) })
 
   // ── Escape clears every mark ──────────────────────────────────────────────
   await cdp.escape()

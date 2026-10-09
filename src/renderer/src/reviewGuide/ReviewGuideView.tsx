@@ -6,6 +6,7 @@ import {
   IconChevronSm,
   IconCopy,
   IconEllipsis,
+  IconGear,
   IconRefresh,
   IconSparkles
 } from '@pierre/icons'
@@ -13,6 +14,8 @@ import {
 import type { RepositoryReview } from '../../../shared/contracts'
 import type { GuideFile, GuideSection, NormalizedGuide } from '../../../shared/reviewGuide'
 import { formatGuideMarkdown } from './formatGuideMarkdown'
+import { GuideAgentPicker } from './GuideAgentPicker'
+import { resolveGuideRun, useGuideAgentChoice } from './guideAgentSettings'
 import { guideHomeFiles, guideItemId, guideItemOrder, sectionLabel } from './guideOrder'
 import type { GuideAgentContext, GuideItemOrder, ReviewGuideHost } from './reviewGuideHost'
 import { reviewGuideStore, useGuideState, type GuideState } from './reviewGuideStore'
@@ -38,6 +41,87 @@ export interface ReviewGuideViewProps {
 
 const READING_THROTTLE_MS = 90
 const NARROW_WIDTH = 980
+const COLUMN_WIDTH = 296
+const MIN_COLUMN_WIDTH = 240
+const MAX_COLUMN_WIDTH = 640
+// The review keeps at least this much beside a dragged column.
+const MIN_REVIEW_WIDTH = 480
+const COLUMN_WIDTH_KEY = 'kodi:guide-column-width'
+
+function storedColumnWidth(): number {
+  try {
+    const value = Number(localStorage.getItem(COLUMN_WIDTH_KEY))
+    return Number.isFinite(value) && value >= MIN_COLUMN_WIDTH && value <= MAX_COLUMN_WIDTH ? value : COLUMN_WIDTH
+  } catch {
+    return COLUMN_WIDTH
+  }
+}
+
+function saveColumnWidth(width: number): void {
+  try {
+    localStorage.setItem(COLUMN_WIDTH_KEY, String(Math.round(width)))
+  } catch {
+    // Private storage: the width lasts until the window closes.
+  }
+}
+
+/**
+ * The handle on the column's right edge: drag to widen or narrow it, arrows
+ * step by 16 px, a double-click puts it back. The width is written to the
+ * column directly while dragging and kept in state once the pointer lifts.
+ */
+function GuideColumnResizer({ columnRef, width, onWidth }: {
+  columnRef: RefObject<HTMLElement | null>
+  width: number
+  onWidth(width: number): void
+}): React.JSX.Element {
+  const [dragging, setDragging] = useState(false)
+  const clamp = (value: number): number => {
+    // A review not laid out yet (width 0) does not limit the column.
+    const available = columnRef.current?.parentElement?.clientWidth ?? 0
+    const room = available > 0 ? available - MIN_REVIEW_WIDTH : Infinity
+    return Math.round(Math.min(Math.max(value, MIN_COLUMN_WIDTH), Math.max(MIN_COLUMN_WIDTH, Math.min(MAX_COLUMN_WIDTH, room))))
+  }
+  return (
+    <div className="guide-resizer" role="separator" aria-orientation="vertical" aria-label="Resize the walkthrough"
+      aria-valuemin={MIN_COLUMN_WIDTH} aria-valuemax={MAX_COLUMN_WIDTH} aria-valuenow={width} tabIndex={0}
+      data-dragging={dragging ? '' : undefined} data-guide-resizer=""
+      onDoubleClick={() => onWidth(COLUMN_WIDTH)}
+      onKeyDown={(event) => {
+        if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
+        event.preventDefault()
+        onWidth(clamp(width + (event.key === 'ArrowRight' ? 16 : -16)))
+      }}
+      onPointerDown={(event) => {
+        const column = columnRef.current
+        if (event.button !== 0 || column == null) return
+        event.preventDefault()
+        const handle = event.currentTarget
+        handle.setPointerCapture(event.pointerId)
+        const startX = event.clientX
+        const startWidth = column.offsetWidth
+        let next = startWidth
+        const review = column.parentElement
+        review?.setAttribute('data-guide-resizing', '')
+        setDragging(true)
+        const move = (moveEvent: PointerEvent): void => {
+          next = clamp(startWidth + moveEvent.clientX - startX)
+          column.style.width = `${next}px`
+        }
+        const end = (): void => {
+          handle.removeEventListener('pointermove', move)
+          handle.removeEventListener('pointerup', end)
+          handle.removeEventListener('pointercancel', end)
+          review?.removeAttribute('data-guide-resizing')
+          setDragging(false)
+          onWidth(next)
+        }
+        handle.addEventListener('pointermove', move)
+        handle.addEventListener('pointerup', end)
+        handle.addEventListener('pointercancel', end)
+      }} />
+  )
+}
 const FAR_HUNK_LINE = 200
 
 // One order object per guide, so the review's memo sees the same identity on
@@ -316,7 +400,6 @@ function GuideStateMessage({
       </div>
     )
   }
-  const model = agent == null ? '' : modelLabel(agent, agent.provider, agent.model)
   if (state.status === 'unavailable') {
     const noMatch = state.code === 'no-match'
     return (
@@ -338,7 +421,8 @@ function GuideStateMessage({
     <div className="guide-state" data-guide-state="idle">
       <IconSparkles className="guide-state-mark" aria-hidden="true" />
       <strong>Generate a guide for this review</strong>
-      <p>{model === '' ? 'The agent dock’s model' : model} reads the diff, not your repository, and explains it section by section, core first.</p>
+      <p>The model reads the diff, not your repository, and explains it section by section, core first.</p>
+      <GuideAgentPicker dock={agent} />
       <button type="button" className="guide-button primary" data-guide-generate="" disabled={!subjectReady} onClick={onGenerate}>
         Generate
       </button>
@@ -346,7 +430,7 @@ function GuideStateMessage({
   )
 }
 
-function GuideHeaderMenu({ guide, agent }: { guide: NormalizedGuide; agent: GuideAgentContext | null }): React.JSX.Element {
+function GuideHeaderMenu({ guide }: { guide: NormalizedGuide }): React.JSX.Element {
   const [open, setOpen] = useState(false)
   const menuRef = useRef<HTMLDivElement | null>(null)
   useEffect(() => {
@@ -367,10 +451,6 @@ function GuideHeaderMenu({ guide, agent }: { guide: NormalizedGuide; agent: Guid
             void navigator.clipboard.writeText(formatGuideMarkdown(guide)).catch(() => {})
             setOpen(false)
           }}><IconCopy aria-hidden="true" />Copy guide as Markdown</button>
-          <button type="button" role="menuitem" onClick={() => {
-            agent?.openAgent()
-            setOpen(false)
-          }}><IconSparkles aria-hidden="true" />Change model…</button>
           {guide.context == null || guide.context.messages.length === 0 ? null : (
             <div className="guide-menu-context">
               <span>From the agent’s session</span>
@@ -379,6 +459,44 @@ function GuideHeaderMenu({ guide, agent }: { guide: NormalizedGuide; agent: Guid
               ))}
             </div>
           )}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+/** The model the next run uses, from the header: pick, then Regenerate. */
+function GuideModelPopover({ agent, regenerating, onRegenerate }: {
+  agent: GuideAgentContext | null
+  regenerating: boolean
+  onRegenerate(): void
+}): React.JSX.Element {
+  const [open, setOpen] = useState(false)
+  const popoverRef = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    if (!open) return
+    const close = (event: PointerEvent): void => {
+      if (!popoverRef.current?.contains(event.target as Node)) setOpen(false)
+    }
+    const escape = (event: KeyboardEvent): void => { if (event.key === 'Escape') setOpen(false) }
+    window.addEventListener('pointerdown', close, true)
+    window.addEventListener('keydown', escape)
+    return () => {
+      window.removeEventListener('pointerdown', close, true)
+      window.removeEventListener('keydown', escape)
+    }
+  }, [open])
+  return (
+    <div className="guide-menu" ref={popoverRef}>
+      <button type="button" className="guide-icon-button" aria-label="Guide model" title="Model, effort and focus"
+        aria-expanded={open} data-guide-model="" onClick={() => setOpen((value) => !value)}>
+        <IconGear aria-hidden="true" />
+      </button>
+      {open ? (
+        <div className="guide-menu-popover guide-model-popover" role="dialog" aria-label="Guide model">
+          <GuideAgentPicker dock={agent} />
+          <button type="button" className="guide-button primary" disabled={regenerating}
+            onClick={() => { onRegenerate(); setOpen(false) }}>Regenerate</button>
         </div>
       ) : null}
     </div>
@@ -427,7 +545,8 @@ function GuideHeader({
         <button type="button" className="guide-button ghost" data-guide-regenerate="" disabled={regenerating} onClick={onRegenerate}>
           <IconRefresh aria-hidden="true" />Regenerate
         </button>
-        <GuideHeaderMenu guide={guide} agent={agent} />
+        <GuideModelPopover agent={agent} regenerating={regenerating} onRegenerate={onRegenerate} />
+        <GuideHeaderMenu guide={guide} />
       </div>
     </header>
   )
@@ -448,6 +567,8 @@ export function ReviewGuideView({
 }: ReviewGuideViewProps): React.JSX.Element {
   const state = useGuideState(worldId)
   const agent = useHostAgent()
+  const choice = useGuideAgentChoice()
+  const run = useMemo(() => agent == null ? null : resolveGuideRun(choice, agent), [agent, choice])
   const guide = state.guide
   const subject = agent?.subject?.tabId === worldId ? agent.subject : null
   const rootRef = useRef<HTMLDivElement | null>(null)
@@ -455,6 +576,11 @@ export function ReviewGuideView({
   const columnRef = useRef<HTMLElement | null>(null)
   const [narrow, setNarrow] = useState(false)
   const [expanded, setExpanded] = useState(false)
+  const [columnWidth, setColumnWidth] = useState(storedColumnWidth)
+  const changeColumnWidth = useCallback((width: number) => {
+    setColumnWidth(width)
+    saveColumnWidth(width)
+  }, [])
   const pendingTargetRef = useRef<{ path: string; sectionIndex: number } | null>(null)
   const itemsRef = useRef(items)
   useEffect(() => {
@@ -468,9 +594,9 @@ export function ReviewGuideView({
 
   // A stored guide shows without spending tokens.
   useEffect(() => {
-    if (subject == null || agent == null) return
-    void reviewGuideStore.request(worldId, subject, agent, { cachedOnly: true })
-  }, [agent, subject, worldId])
+    if (subject == null || run == null) return
+    void reviewGuideStore.request(worldId, subject, run, { cachedOnly: true })
+  }, [run, subject, worldId])
 
   const homeFiles = useMemo(() => guide == null ? [] : guideHomeFiles(guide), [guide])
   const sectionOfItem = useMemo(() => new Map(homeFiles.map((file) => [file.itemId, file.sectionIndex])), [homeFiles])
@@ -636,9 +762,9 @@ export function ReviewGuideView({
   }, [])
 
   const generate = useCallback((force: boolean) => {
-    if (subject == null || agent == null) return
-    void reviewGuideStore.request(worldId, subject, agent, force ? { force: true } : {})
-  }, [agent, subject, worldId])
+    if (subject == null || run == null) return
+    void reviewGuideStore.request(worldId, subject, run, force ? { force: true } : {})
+  }, [run, subject, worldId])
 
   const showOrder = useCallback(() => {
     if (guide == null) return
@@ -703,9 +829,10 @@ export function ReviewGuideView({
         </div>
       ) : null}
       {state.pendingOrder ? (
-        <button type="button" className="guide-notice guide-notice-action" data-guide-show="" onClick={showOrder}>
-          <span>The guide is ready.</span><strong>Show it</strong>
-        </button>
+        <div className="guide-notice" role="status">
+          <span>The guide is ready.</span>
+          <button type="button" className="guide-link" data-guide-show="" onClick={showOrder}>Show it</button>
+        </div>
       ) : null}
     </>
   )
@@ -755,7 +882,11 @@ export function ReviewGuideView({
           ) : null}
         </div>
       ) : (
-        <aside className="guide-column" ref={columnRef} data-guide-column="" aria-label="Review guide">{column}</aside>
+        <aside className="guide-column" ref={columnRef} data-guide-column="" aria-label="Review guide"
+          style={{ width: columnWidth }}>
+          {column}
+          <GuideColumnResizer columnRef={columnRef} width={columnWidth} onWidth={changeColumnWidth} />
+        </aside>
       )}
     </div>
   )

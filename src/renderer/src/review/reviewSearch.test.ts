@@ -5,6 +5,7 @@ import {
   carryActiveIndex,
   findInLine,
   isCaseSensitive,
+  mergeFoldedMatches,
   nextMatchIndex,
   REVIEW_SEARCH_LIMIT,
   searchReviewItems
@@ -124,5 +125,44 @@ describe('moving between matches', () => {
     expect(carryActiveIndex(at('review:a.ts', 5), matches, order)).toBe(0)
     expect(carryActiveIndex(at('review:b.ts', 99), matches, order)).toBe(0)
     expect(carryActiveIndex(null, matches, order)).toBe(0)
+  })
+})
+
+describe('mergeFoldedMatches', () => {
+  const patch = [
+    'diff --git a/d.ts b/d.ts',
+    '--- a/d.ts',
+    '+++ b/d.ts',
+    '@@ -200,3 +210,4 @@ function outer() {',
+    ' keep one',
+    '-gone needle',
+    '+fresh needle',
+    '+another needle',
+    ' keep two',
+    ''
+  ].join('\n')
+  const item = { id: 'review:d.ts', type: 'diff', fileDiff: parsePatchFiles(patch, 'test')[0]!.files[0]! } as CodeViewItem<unknown>
+
+  test('adds the folds’ lines between the hunks around them, and skips the hunk’s own', () => {
+    const local = searchReviewItems([item], 'needle')
+    const merged = mergeFoldedMatches([item], local, [
+      { path: 'd.ts', line: 5, text: 'a needle before the hunk' },
+      { path: 'd.ts', line: 211, text: 'fresh needle' },
+      { path: 'd.ts', line: 400, text: 'needle, needle after it' }
+    ], 'needle')
+    expect(merged.matches.map((match) => [match.side, match.lineNumber, match.column])).toEqual([
+      ['additions', 5, 2],
+      ['deletions', 201, 5],
+      ['additions', 211, 6],
+      ['additions', 212, 8],
+      ['additions', 400, 0],
+      ['additions', 400, 8]
+    ])
+  })
+
+  test('leaves a whole file, which the model already searched, alone', () => {
+    const whole = diffItem('w.ts', lines(10, (index) => `line ${index}`), lines(10, (index) => index === 2 ? 'needle' : `line ${index}`))
+    const local = searchReviewItems([whole], 'needle', { includeUnchanged: true })
+    expect(mergeFoldedMatches([whole], local, [{ path: 'w.ts', line: 3, text: 'needle' }], 'needle')).toEqual(local)
   })
 })

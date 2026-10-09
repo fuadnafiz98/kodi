@@ -24,9 +24,12 @@ export const COLLAPSED_SEPARATOR_CSS = `
     display: none;
   }
 
+  ${/* One row: a separator with both chevrons is two half-height rows in the
+     library, which lifted the count above the chevrons beside it. */ ''}
   [data-content] [data-separator="line-info-basic"] [data-separator-wrapper] {
     display: grid;
     grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
     width: auto;
     inset-inline: 0;
     background: inherit;
@@ -89,7 +92,14 @@ export const COLLAPSED_SEPARATOR_CSS = `
     color: var(--text-secondary);
   }
 
-  [data-gutter] [data-separator="line-info-basic"] [data-expand-button] {
+  [data-separator="line-info-basic"] [data-expand-all-button] {
+    display: none;
+  }
+
+  ${/* The library hides its "Expand all" word (a click on the count expands
+     the run); matching every expand button here showed it in the gutter, where
+     it spilled over the code and onto the count. */ ''}
+  [data-gutter] [data-separator="line-info-basic"] [data-expand-button]:not([data-expand-all-button]) {
     display: flex;
     align-items: center;
     justify-content: center;

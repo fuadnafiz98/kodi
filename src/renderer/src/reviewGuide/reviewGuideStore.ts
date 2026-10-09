@@ -87,7 +87,7 @@ class ReviewGuideStore {
   async request(
     tabId: string,
     subject: AgentRequestSubject,
-    agent: Pick<GuideAgentContext, 'provider' | 'model' | 'effort'>,
+    agent: Pick<GuideAgentContext, 'provider' | 'model' | 'effort'> & { customPrompt?: string },
     options: { force?: boolean; cachedOnly?: boolean } = {}
   ): Promise<void> {
     const current = this.get(tabId)
@@ -105,6 +105,7 @@ class ReviewGuideStore {
         provider: agent.provider,
         model: agent.model,
         effort: agent.effort,
+        ...(agent.customPrompt == null ? {} : { customPrompt: agent.customPrompt }),
         ...(options.force === true ? { force: true } : {}),
         ...(options.cachedOnly === true ? { cachedOnly: true } : {})
       })

@@ -992,7 +992,7 @@ const deepQuery = (selector) => `(() => {
 })()`
 const visibleButton = (selector) => `[...document.querySelectorAll(${JSON.stringify(selector)})].find((button) => button.offsetParent != null && button.getBoundingClientRect().width > 0)`
 const TOGGLES = {
-  style: '.editor-option-controls button[aria-label^="Switch to"]',
+  style: '.editor-option-controls button[aria-label="Split view"]',
   wrap: '.editor-option-controls button[aria-label="Toggle word wrap"]',
   fold: '.editor-option-controls button[aria-label="Toggle unchanged context folding"]'
 }
