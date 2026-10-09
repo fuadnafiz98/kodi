@@ -312,6 +312,15 @@ export const VIEWER_BASE_CSS = `
     transition-duration: 0s, var(--duration-fast);
   }
 
+  ${/* The library's code column is a horizontal scroller (overflow-x: scroll,
+     even word-wrapped) with overscroll-behavior-x: none. A trackpad gesture
+     whose first event leans sideways by a pixel latched to that column, which
+     could not move it and would not pass it on, so the whole swipe was lost
+     and the next one, starting straight, scrolled: "stuck, needs a push". */ ''}
+  [data-code] {
+    overscroll-behavior-x: auto;
+  }
+
   [data-separator="line-info-basic"] {
     border-block: 1px solid var(--border);
     background: var(--control-fill);

@@ -12,7 +12,8 @@
 // per pull.
 //
 //   Structural checks (hidden or visible): no blocking wheel listener over
-//   the review; the viewer leaves pointer-events alone; ctrl+wheel and pinch
+//   the review; the viewer leaves pointer-events alone; a swipe whose first
+//   wheel event leans a pixel sideways still scrolls; ctrl+wheel and pinch
 //   still zoom the code, and only the code.
 //   Compositor checks (KODI_E2E_VISIBLE=1 only — a hidden window never
 //   paints): a slow read scrolls on the compositor thread with ≤ 1% late
@@ -322,6 +323,34 @@ await runSuite('slow-read', async (suite, cleanup) => {
     probeInfo.pointerEventsDisabledOnScroll === false && notches.motion.pointerEventsFlips === 0,
     { pointerEventsDisabledOnScroll: probeInfo.pointerEventsDisabledOnScroll, flips: notches.motion.pointerEventsFlips,
       styleRecalcs: notches.frames.styleRecalcs, taskMs: notches.frames.taskMs })
+
+  // ── 2b. a swipe that starts a pixel sideways still scrolls ────────────────
+  // A trackpad swipe often leans sideways in its first event (-2/3, -1/1).
+  // Chromium latches the whole gesture to the first scroller on the path that
+  // can take that event or stops chaining (overscroll-behavior), and the
+  // library's code column is both an overflow-x scroller and
+  // overscroll-behavior-x: none: the old build moved 0 px for the whole swipe,
+  // and the reader's next, straighter swipe did — "stuck, needs a push".
+  const diagonal = []
+  for (const deltaX of [-2, -1, 2]) {
+    await toTop()
+    await cdp.eval('window.__slowRead.root.scrollTop = 400')
+    await Bun.sleep(300)
+    const before = await cdp.eval('window.__slowRead.root.scrollTop')
+    await cdp.send('Input.dispatchMouseEvent', { type: 'mouseWheel', x: scroller.x, y: scroller.y, deltaX, deltaY: 3, pointerType: 'mouse' })
+    for (let index = 0; index < 12; index += 1) {
+      await Bun.sleep(16)
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseWheel', x: scroller.x, y: scroller.y, deltaX: Math.sign(deltaX), deltaY: 10, pointerType: 'mouse' })
+    }
+    await Bun.sleep(400)
+    diagonal.push({ firstDeltaX: deltaX, wheelPx: 123, movedPx: Math.round(await cdp.eval('window.__slowRead.root.scrollTop') - before) })
+  }
+  const codeColumn = await cdp.eval(`(() => {
+    const walk = (root) => { const found = root.querySelector('[data-code]'); if (found != null) return found; for (const element of root.querySelectorAll('*')) { if (element.shadowRoot == null) continue; const inner = walk(element.shadowRoot); if (inner != null) return inner } return null }
+    const code = walk(window.__slowRead.root)
+    return code == null ? null : getComputedStyle(code).overscrollBehaviorX
+  })()`)
+  suite.record('a swipe that starts a pixel sideways still scrolls', diagonal.every((run) => run.movedPx >= 100), { codeOverscrollBehaviorX: codeColumn, diagonal })
 
   // ── 4. a slow read scrolls on the compositor thread ───────────────────────
   if (VISIBLE) {

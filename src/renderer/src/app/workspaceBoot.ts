@@ -1,3 +1,5 @@
+import { startTransition, useEffect, useState } from 'react'
+
 import type { WorkspaceView } from './AppView'
 
 type WorkspaceRootComponent = (typeof import('./WorkspaceRoot'))['default']
@@ -64,4 +66,29 @@ export function preloadWorkspaceViewer(
   view: WorkspaceView
 ): Promise<DiffSurfaceComponent | MultiFileReviewComponent> {
   return view === 'multi' ? preloadMultiFileReview() : preloadDiffSurface()
+}
+
+/**
+ * A lazily loaded component, swapped in as a transition. `useSyncExternalStore`
+ * rendered the swap synchronously, inside the import's microtask: the workspace
+ * and its 3,000-row tree took the main thread for ~60 ms at a launch, and every
+ * module load the first screen's highlight waits on (shiki, the theme, the
+ * grammar) sat behind it. A transition renders in slices that let them through.
+ */
+export function useLoadedModule<Component>(
+  subscribe: (listener: () => void) => () => void,
+  getSnapshot: () => Component | null
+): Component | null {
+  const [component, setComponent] = useState<{ current: Component | null }>(() => ({ current: getSnapshot() }))
+  useEffect(() => {
+    const update = (): void => {
+      const next = getSnapshot()
+      startTransition(() => setComponent((held) => held.current === next ? held : { current: next }))
+    }
+    const unsubscribe = subscribe(update)
+    // Loaded between the first render and this subscription.
+    update()
+    return unsubscribe
+  }, [getSnapshot, subscribe])
+  return component.current
 }

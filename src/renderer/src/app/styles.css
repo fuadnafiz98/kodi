@@ -633,7 +633,7 @@ kbd { border: 1px solid var(--border-strong); border-radius: var(--corner-compac
   overflow: hidden;
   border: 0;
   border-radius: inherit;
-  padding: 0 10px 0 7px;
+  padding: 0 25px 0 7px;
   background: transparent;
   color: var(--muted);
   cursor: pointer;
@@ -647,14 +647,14 @@ kbd { border: 1px solid var(--border-strong); border-radius: var(--corner-compac
 .world-source-icon[data-source="patch"] { color: var(--accent); }
 .world-source-icon[data-source="since"] { color: var(--status-success-text); }
 .world-load-signal { width: 5px; height: 5px; flex: none; border-radius: 50%; outline: 2px solid var(--accent-soft); background: var(--status-info-text); }
-/* Close takes the icon's place while the tab is under the pointer, the way
-   Safari's tabs do: the label never shifts, and a resting tab keeps its padding
-   even instead of carrying an empty slot for a hidden button. */
+/* Close sits at the tab's right end, as in Chrome and VS Code. Every tab keeps
+   its slot, so a short label is never covered and nothing shifts on hover; the
+   tab being read always shows it, a resting one under the pointer. */
 .world-close {
   width: 16px;
   height: 16px;
   position: absolute;
-  left: 7px;
+  right: 5px;
   top: calc((var(--world-item-height) - 16px) / 2);
   display: grid;
   place-items: center;
@@ -667,8 +667,7 @@ kbd { border: 1px solid var(--border-strong); border-radius: var(--corner-compac
   opacity: 0;
   transition: opacity var(--duration-fast) var(--ease-out);
 }
-.world-tab:hover .world-close, .world-close:focus-visible { opacity: 1; }
-.world-tab:hover .world-source-icon, .world-tab:has(.world-close:focus-visible) .world-source-icon { opacity: 0; }
+.world-tab[data-active="true"] .world-close, .world-tab:hover .world-close, .world-close:focus-visible { opacity: 1; }
 .world-close:hover { background: var(--world-press); color: var(--text); }
 .world-close:active:not(:disabled) { background: color-mix(in srgb, var(--text) 13%, transparent); }
 .world-close svg { width: 10px; height: 10px; }

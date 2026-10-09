@@ -78,6 +78,9 @@ export interface RepositoryChangeEvent {
 }
 
 export interface MainStartupMetrics {
+  /** Epoch ms of the process start and of the main module's first line; the rest are ms after the latter. */
+  processStartEpoch?: number
+  moduleEpoch?: number
   appReady: number | null
   windowCreated: number | null
   windowShown: number | null
@@ -885,6 +888,8 @@ export interface RepositoryApi {
   getPerformanceMetrics(detailed: boolean): Promise<PerformanceMetrics>
   setVisibility(visible: boolean): Promise<void>
   setStartupPreferences(preferences: StartupPreferences): Promise<void>
+  /** The launch's first screen is drawn and final; main shows the window it has been holding. */
+  reportFirstScreen(): void
   findInPage(query: string, forward: boolean, findNext: boolean): Promise<number>
   stopFindInPage(): Promise<void>
   onFoundInPage(listener: (result: FindInPageResult) => void): () => void
@@ -983,6 +988,7 @@ export const IPC_CHANNELS = {
   getPerformanceMetrics: 'app:get-performance-metrics',
   setVisibility: 'app:set-visibility',
   setStartupPreferences: 'app:set-startup-preferences',
+  firstScreenPainted: 'app:first-screen-painted',
   findInPage: 'app:find-in-page',
   stopFindInPage: 'app:stop-find-in-page',
   foundInPage: 'app:found-in-page',

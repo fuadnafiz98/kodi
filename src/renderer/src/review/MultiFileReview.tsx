@@ -31,6 +31,7 @@ import type { DiffStyle } from '../app/AppView'
 import { LIVE_CODE_FONT_SIZE_PROPERTY, LIVE_CODE_LINE_HEIGHT_PROPERTY } from '../diff/codeZoom'
 import { noteReviewItemRender, schedulePartialDiffHydration } from './partialDiffHydration'
 import { useReviewDiffLoader } from './useReviewDiffLoader'
+import { noteFirstScreenRender } from '../app/firstScreen'
 import { markRendererStartup } from '../app/startupMetrics'
 import { reportCopiedPath, syncCopyFilePathLifecycle } from '../diff/copyFilePath'
 import { syncDragGuideLifecycle } from '../diff/dragSelection'
@@ -688,6 +689,7 @@ export function useReviewCodeViewOptions({
         ? undefined
         : (position) => place(context.item, instance, position))
       noteReviewItemRender(instance, phase, context.item.id)
+      noteFirstScreenRender(instance, phase)
       schedulePartialDiffHydration(instance, phase, context.item, diffLoader)
     },
     lineHoverHighlight: 'number', hunkSeparators: 'line-info-basic', expandUnchanged: !foldUnchanged,

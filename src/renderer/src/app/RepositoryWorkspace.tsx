@@ -1,4 +1,4 @@
-import { memo, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type Dispatch, type Ref, type SetStateAction } from 'react'
+import { memo, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, type Dispatch, type Ref, type SetStateAction } from 'react'
 import type { FileContents } from '@pierre/diffs'
 import type { Editor } from '@pierre/diffs/edit'
 import type { FileTree as FileTreeModel } from '@pierre/trees'
@@ -60,9 +60,15 @@ import {
   getLoadedDiffSurface,
   getLoadedMultiFileReview,
   subscribeDiffSurface,
-  subscribeMultiFileReview
+  subscribeMultiFileReview,
+  useLoadedModule
 } from './workspaceBoot'
+import { reportFirstScreenAfter } from './firstScreen'
 import { markRendererStartup } from './startupMetrics'
+
+// How long a launch waits for the viewer's first highlighted render before
+// showing the window anyway.
+const WORKSPACE_FIRST_SCREEN_MS = 400
 
 type TreeFileStatus = Exclude<RepositoryFileStatus, 'conflicted'>
 
@@ -888,16 +894,8 @@ const RepositoryDiffPanel = memo(function RepositoryDiffPanel({
   workingDrafts,
   autosaveOnBlur
 }: RepositoryDiffPanelProps): React.JSX.Element {
-  const DiffSurface = useSyncExternalStore(
-    subscribeDiffSurface,
-    getLoadedDiffSurface,
-    getLoadedDiffSurface
-  )
-  const MultiFileReview = useSyncExternalStore(
-    subscribeMultiFileReview,
-    getLoadedMultiFileReview,
-    getLoadedMultiFileReview
-  )
+  const DiffSurface = useLoadedModule(subscribeDiffSurface, getLoadedDiffSurface)
+  const MultiFileReview = useLoadedModule(subscribeMultiFileReview, getLoadedMultiFileReview)
 
   useViewerChunkPreload(workspaceView, onError)
 
@@ -1504,7 +1502,12 @@ const RepositoryWorkspace = memo(function RepositoryWorkspace({
   pullRequestReviewMessage, onSubmitPullRequestReview, onComparisonSaved, onError,
   patchLoadError, reviewWorldId, sidebarVisible, onSidebarToggle, onBranchesOpen
 }: RepositoryWorkspaceProps): React.JSX.Element {
-  useLayoutEffect(() => markRendererStartup('explorerCommitted'), [])
+  useLayoutEffect(() => {
+    markRendererStartup('explorerCommitted')
+    // A workspace whose viewer draws nothing (no changes, a load still running)
+    // never reports a highlighted render; it is final enough by now.
+    reportFirstScreenAfter(WORKSPACE_FIRST_SCREEN_MS)
+  }, [])
   useEffect(markWorkspaceRender)
   const isFilePreview = workspaceView === 'file' && comparison?.mode === 'file'
   const reviewIdentity = repositoryReviewIdentity(repositoryReview)

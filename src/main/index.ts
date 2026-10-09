@@ -116,11 +116,15 @@ if (remoteDebuggingPort != null && remoteDebuggingPort !== '') {
 const DEFAULT_WINDOW_WIDTH = 1_440
 const DEFAULT_WINDOW_HEIGHT = 920
 const GEOMETRY_SAVE_DEBOUNCE_MS = 500
+// A renderer that has not reported its first screen by now is shown as it is.
+const FIRST_SCREEN_TIMEOUT_MS = 1_500
 // What Electron paints before first paint, during a resize and behind
 // overscroll. A dark value under a light theme flashes on every drag.
 const WINDOW_BACKGROUND = { dark: '#0c0d0f', light: '#f7f8fa' } as const
 const mainStartupOrigin = performance.now()
 const mainStartupMetrics: MainStartupMetrics = {
+  processStartEpoch: Math.round(performance.timeOrigin),
+  moduleEpoch: Math.round(performance.timeOrigin + mainStartupOrigin),
   appReady: null,
   windowCreated: null,
   windowShown: null,
@@ -719,10 +723,21 @@ function createMainWindow(): BrowserWindow {
       markMainStartup('windowShown')
     }
   }
-  // Fallback if the immediate reveal below was skipped (background hold).
-  // Do not wait for this on a normal launch: it fires after the renderer
-  // bundle paints, which is later than a half dock-bounce.
-  window.once('ready-to-show', tryReveal)
+  // The window stays hidden until the renderer reports its first screen final
+  // (`reportFirstScreen`): shown at once, a launch put an empty window up, then
+  // an unstyled tree, then a plain-text diff recoloured a moment later, and
+  // every one of those frames read as the app still loading. The renderer paints
+  // while hidden (`paintWhenInitiallyHidden`), so the first frame shown is the
+  // finished one. The timer covers a renderer that never reports.
+  let firstScreenTimer: ReturnType<typeof setTimeout> | null = null
+  const revealFirstScreen = (): void => {
+    if (firstScreenTimer != null) clearTimeout(firstScreenTimer)
+    firstScreenTimer = null
+    window.webContents.ipc.removeListener(IPC_CHANNELS.firstScreenPainted, revealFirstScreen)
+    tryReveal()
+  }
+  window.webContents.ipc.on(IPC_CHANNELS.firstScreenPainted, revealFirstScreen)
+  firstScreenTimer = setTimeout(revealFirstScreen, FIRST_SCREEN_TIMEOUT_MS)
   // Fires only when the renderer's beforeunload handler objected, which it does
   // while a draft is unsaved. preventDefault here means "ignore the objection
   // and close", so it is the discard branch.
@@ -795,16 +810,17 @@ function createMainWindow(): BrowserWindow {
     // Nothing is left to receive the answer, and the CLI would keep spending
     // plan tokens on it until its own timeout.
     agentService.cancelAll()
+    revealFirstScreen()
     scheduleRecovery(`renderer process exit (${details.reason})`)
   })
   window.webContents.on('did-fail-load', (_event, errorCode, errorDescription, _url, isMainFrame) => {
     if (isMainFrame && errorCode !== -3) {
+      revealFirstScreen()
       scheduleRecovery(`main document load failure (${errorCode}: ${errorDescription})`)
     }
   })
 
   loadRenderer()
-  tryReveal()
 
   return window
 }

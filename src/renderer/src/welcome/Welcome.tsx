@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { IconBolt, IconCodeSearch, IconFile, IconFolder, IconRefresh, IconX } from '@pierre/icons'
 
 import kodiIcon from '../assets/kodi-icon.png'
+import { reportFirstScreenAfter } from '../app/firstScreen'
 import type { RecentFolder } from '../explorer/recentFolders'
 import { FolderPicker } from '../explorer/FolderPicker'
 import { preloadFolderCatalog } from '../explorer/folderPickerModel'
@@ -22,6 +23,8 @@ import {
   writeWelcomeInboxCache,
   type WelcomeInboxRow
 } from './welcomeInbox'
+
+const WELCOME_FIRST_SCREEN_MS = 100
 
 interface ShortcutHintProps {
   keys: string
@@ -137,6 +140,8 @@ export function Welcome({
   const [openingPullRequestUrl, setOpeningPullRequestUrl] = useState<string | null>(null)
 
   useEffect(() => {
+    // The icon decodes a frame or two after the page commits.
+    reportFirstScreenAfter(WELCOME_FIRST_SCREEN_MS)
     welcomeEntranceShown = true
   }, [])
 

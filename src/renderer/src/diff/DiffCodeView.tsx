@@ -17,6 +17,7 @@ import type { ReviewAnnotationMetadata } from '../review/ReviewComments'
 import { VirtualizedBackToTop } from './VirtualizedBackToTop'
 import { useLineReveal } from './useLineReveal'
 import { usePrimedComparison } from './usePrimedComparison'
+import { noteFirstScreenRender } from '../app/firstScreen'
 
 const DIFF_OPTIONS = {
   diffIndicators: 'bars' as const,
@@ -150,6 +151,7 @@ export function DiffCodeView({
       syncCopyFilePathLifecycle(node, phase, reportCopiedPath)
       syncReviewCaretLifecycle(node, phase, onPlaceEditCaret)
       reportRender(node, instance, phase)
+      noteFirstScreenRender(instance, phase)
     }
   }), [beginComment, comparisonPath, onPlaceEditCaret, reportRender, setReviewCursor])
 

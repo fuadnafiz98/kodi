@@ -9,7 +9,6 @@ import {
   useRef,
   useLayoutEffect,
   useState,
-  useSyncExternalStore,
   type CSSProperties
 } from 'react'
 
@@ -68,7 +67,8 @@ import {
   getLoadedWorkspaceRoot,
   preloadWorkspaceRoot,
   preloadWorkspaceViewer,
-  subscribeWorkspaceRoot
+  subscribeWorkspaceRoot,
+  useLoadedModule
 } from './workspaceBoot'
 import { markRendererStartup } from './startupMetrics'
 import { loadRepositoryPanel } from '../git/repositoryPanelChunk'
@@ -338,11 +338,7 @@ export function App({
   const [startupSessionSnapshot] = useState(() => sessionSnapshot
     ?? window.repository?.getSessionSnapshot()
     ?? Promise.resolve(null))
-  const WorkspaceRoot = useSyncExternalStore(
-    subscribeWorkspaceRoot,
-    getLoadedWorkspaceRoot,
-    getLoadedWorkspaceRoot
-  )
+  const WorkspaceRoot = useLoadedModule(subscribeWorkspaceRoot, getLoadedWorkspaceRoot)
   const commandPalette = useCommandPaletteControls()
   // Most-recently-opened files lead the palette's empty-query list. Tracked here
   // because this is the only place that sees every selection, wherever it came from.

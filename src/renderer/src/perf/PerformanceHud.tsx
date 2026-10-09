@@ -65,7 +65,7 @@ export const PerformanceHud = memo(function PerformanceHud(): React.JSX.Element 
       }}
     >
       <summary aria-label={description}>
-        <span className={`performance-signal ${metrics == null ? 'idle' : ''} ${metrics == null && status === 'sampling' ? 'sampling' : ''} ${metrics?.production ? 'production' : ''} ${highMemory ? 'high-memory' : ''}`} aria-hidden="true" />
+        <span className={`performance-signal ${metrics == null ? 'idle' : ''} ${metrics?.production ? 'production' : ''} ${highMemory ? 'high-memory' : ''}`} aria-hidden="true" />
         <span className={`performance-memory ${highMemory ? 'high-memory' : ''}`}
           title={highMemory ? 'Working set is above 1 GB' : undefined}>
           {highMemory ? <IconCiWarningFill aria-hidden="true" /> : null}

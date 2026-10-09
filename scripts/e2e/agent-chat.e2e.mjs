@@ -84,6 +84,7 @@ const transcriptText = `(document.querySelector('.agent-dock-transcript')?.textC
 
 await runSuite('agent-chat', async (suite, cleanup) => {
   const fixture = await createRepository('agent-chat')
+  cleanup(removeLater(fixture))
   await writeFile(join(fixture, 'blob.py'), 'def parse_file_uri():\n    return "a", "b"\n')
   await git(fixture, 'add', '-A')
   await git(fixture, 'commit', '--quiet', '-m', 'Base')

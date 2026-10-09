@@ -1,4 +1,6 @@
 import { applyRestoreHintToDocument } from '../../../shared/sessionRestore'
+import { prewarmDiffWorker } from '../diff/diffWorkerConfig'
+import { requestStartupReview } from '../review/startupReviewRequest'
 import { markRendererStartup } from './startupMetrics'
 
 // Rename-era migration: Horus stored its UI state under `horus:` keys. Move any
@@ -25,3 +27,14 @@ applyRestoreHintToDocument(document.documentElement, window.repository?.restoreH
 // Kick the restore IPC before the App chunk arrives so it overlaps the download.
 const sessionSnapshot = window.repository?.getSessionSnapshot() ?? Promise.resolve(null)
 void import('./boot').then(({ mountApp }) => mountApp(sessionSnapshot))
+// The first screen's highlight worker, patch and highlight, fetched alongside
+// the boot chunk rather than after the viewer mounts. A Cmd+H launch opens a
+// pull request, not the cached review.
+if (window.repository?.cachedWorkspace != null && window.repository.restoreHint?.pendingPullRequestUrl == null) {
+  // The theme loader awaits the tokenizer core before it loads the theme, so
+  // the core is fetched now rather than once the startup module asks for it.
+  void import('shiki/core').catch(() => undefined)
+  prewarmDiffWorker()
+  requestStartupReview(() => import('../review/startupReview')
+    .then(({ startStartupReview }) => startStartupReview(sessionSnapshot)))
+}

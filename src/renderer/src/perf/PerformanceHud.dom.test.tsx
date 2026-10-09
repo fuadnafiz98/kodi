@@ -4,7 +4,6 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import type { PerformanceMetrics, RepositoryApi } from '../../../shared/contracts'
 import { PerformanceHud } from './PerformanceHud'
 import { clearMemorySamples } from './performanceHistory'
-import { SAMPLE_PRIME_DELAY_MS } from './performanceHudModel'
 
 afterEach(() => {
   cleanup()
@@ -123,7 +122,7 @@ test('asks main for nothing inside the launch window', async () => {
 
   render(<PerformanceHud />)
 
-  // The deferred prime waits out the launch window; this wait is far inside it.
+  // The prime waits for the reader's first input; nothing has been pressed yet.
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 25)) })
   expect(requestCount).toBe(0)
   expect(document.querySelector('.performance-memory strong')?.textContent).toBe('')
@@ -132,7 +131,7 @@ test('asks main for nothing inside the launch window', async () => {
   await waitFor(() => expect(requestCount).toBe(1))
 })
 
-test('primes the badge with one deferred idle sample, then stays quiet', async () => {
+test('primes the badge with one idle sample after the first input, then stays quiet', async () => {
   let requestCount = 0
   let idleCallback: IdleRequestCallback | null = null
   window.requestIdleCallback = ((callback: IdleRequestCallback) => {
@@ -141,8 +140,6 @@ test('primes the badge with one deferred idle sample, then stays quiet', async (
   }) as typeof window.requestIdleCallback
   window.cancelIdleCallback = (() => {}) as typeof window.cancelIdleCallback
   const realSetTimeout = window.setTimeout
-  window.setTimeout = ((callback: () => void, ms?: number, ...args: unknown[]) =>
-    ms === SAMPLE_PRIME_DELAY_MS ? realSetTimeout(callback, 0) : realSetTimeout(callback, ms, ...args)) as typeof window.setTimeout
   window.repository = {
     getPerformanceMetrics: async () => {
       requestCount += 1
@@ -155,6 +152,10 @@ test('primes the badge with one deferred idle sample, then stays quiet', async (
     // The unsampled badge is neutral, not a warning.
     expect(document.querySelector('.performance-signal.idle')).toBeTruthy()
 
+    // A launch shows its final frame: no reading lands until the reader moves.
+    await act(async () => { await new Promise((resolve) => realSetTimeout(resolve, 25)) })
+    expect(idleCallback).toBeNull()
+    window.dispatchEvent(new Event('pointerdown'))
     await waitFor(() => expect(idleCallback).not.toBeNull())
     await act(async () => { idleCallback?.({ didTimeout: false, timeRemaining: () => 50 }) })
 

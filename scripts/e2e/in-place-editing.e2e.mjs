@@ -8,7 +8,7 @@
 import { readFile, writeFile, mkdir, rename } from 'node:fs/promises'
 import { join } from 'node:path'
 
-import { createRepository, git, launchApp, press, runSuite, startFrames, stopFrames, largestScroller, scrollGesture } from './harness.mjs'
+import { createRepository, git, launchApp, press, removeLater, runSuite, startFrames, stopFrames, largestScroller, scrollGesture } from './harness.mjs'
 
 const deepAll = (selector) => `(() => {
   const found = []
@@ -121,6 +121,7 @@ const SAVE = { settleMs: 800, rendererMs: 300, mainMs: 250, longTaskMs: 120 }
 
 await runSuite('in-place-editing', async (suite, cleanup) => {
   const fixture = await createRepository('in-place-editing')
+  cleanup(removeLater(fixture))
   await mkdir(join(fixture, 'changed'), { recursive: true })
   await writeFile(join(fixture, 'notes.ts'), lines('n', 200, false))
   for (const name of ['a', 'b', 'c']) await writeFile(join(fixture, `changed/${name}.ts`), lines(name, 400, false))

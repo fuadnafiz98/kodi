@@ -11,11 +11,6 @@ export const SAMPLE_TIMEOUT_MS = 5_000
 // A sample is an IPC round trip plus `app.getAppMetrics()` in main. Waiting for
 // idle keeps it out of the frame that opens the popover.
 export const SAMPLE_IDLE_TIMEOUT_MS = 1_000
-// The collapsed badge gets one deferred reading so it can show the real working
-// set instead of an empty dash; late enough to stay out of the launch window
-// (session restore settles inside ~450 ms), early enough that the placeholder
-// never reads as a loading state.
-export const SAMPLE_PRIME_DELAY_MS = 750
 
 export type SamplingStatus = 'sampling' | 'live' | 'unavailable'
 

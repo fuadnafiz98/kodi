@@ -258,6 +258,7 @@ const repositoryApi: RepositoryApi = {
   },
   setVisibility: (visible) => ipcRenderer.invoke(IPC_CHANNELS.setVisibility, visible),
   setStartupPreferences: (preferences) => ipcRenderer.invoke(IPC_CHANNELS.setStartupPreferences, preferences),
+  reportFirstScreen: () => ipcRenderer.send(IPC_CHANNELS.firstScreenPainted),
   findInPage: (query, forward, findNext) => ipcRenderer.invoke(IPC_CHANNELS.findInPage, query, forward, findNext),
   stopFindInPage: () => ipcRenderer.invoke(IPC_CHANNELS.stopFindInPage),
   onFoundInPage: (listener) => {

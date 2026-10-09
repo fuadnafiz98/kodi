@@ -1,8 +1,8 @@
-import { mkdir, mkdtemp, readFile, readdir, stat, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { describe, expect, test } from 'bun:test'
+import { afterEach, describe, expect, test } from 'bun:test'
 
 import type { AgentRequestSubject, RepositorySnapshot } from '../shared/contracts.js'
 
@@ -17,6 +17,19 @@ import {
   writeAgentReviewBundle,
   type RememberedAgentReview
 } from './agentReviewBundle.js'
+
+// Every folder a test makes is removed after it.
+const temporaryDirectories: string[] = []
+
+async function temporaryDirectory(prefix: string): Promise<string> {
+  const path = await mkdtemp(join(tmpdir(), prefix))
+  temporaryDirectories.push(path)
+  return path
+}
+
+afterEach(async () => {
+  await Promise.all(temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true, force: true })))
+})
 
 const snapshot = (root: string): RepositorySnapshot => ({
   root,
@@ -69,7 +82,7 @@ const remembered = rememberedAgentReviewFrom({
 
 describe('writeAgentReviewBundle', () => {
   test('writes the patch beside the checkout and excludes it from git status', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'kodi-review-bundle-'))
+    const root = await temporaryDirectory('kodi-review-bundle-')
     await mkdir(join(root, '.git', 'info'), { recursive: true })
 
     const written = await writeAgentReviewBundle(root, remembered, snapshot(root))
@@ -82,8 +95,8 @@ describe('writeAgentReviewBundle', () => {
   })
 
   test('excludes .kodi from a linked gitdir used by worktrees', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'kodi-review-worktree-'))
-    const gitDir = await mkdtemp(join(tmpdir(), 'kodi-review-gitdir-'))
+    const root = await temporaryDirectory('kodi-review-worktree-')
+    const gitDir = await temporaryDirectory('kodi-review-gitdir-')
     await writeFile(join(root, '.git'), `gitdir: ${gitDir}\n`)
 
     await writeAgentReviewBundle(root, remembered, snapshot(root))
@@ -95,7 +108,7 @@ describe('writeAgentReviewBundle', () => {
 
 describe('migrateLegacyReviewDirectory', () => {
   test('moves .horus to .kodi and retargets the git exclude line', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'kodi-review-migrate-'))
+    const root = await temporaryDirectory('kodi-review-migrate-')
     await mkdir(join(root, '.horus', 'review'), { recursive: true })
     await writeFile(join(root, '.horus', 'review', 'changes.patch'), 'patch')
     await mkdir(join(root, '.git', 'info'), { recursive: true })
@@ -109,11 +122,11 @@ describe('migrateLegacyReviewDirectory', () => {
   })
 
   test('leaves a repo with no .horus, or an existing .kodi, untouched', async () => {
-    const clean = await mkdtemp(join(tmpdir(), 'kodi-review-clean-'))
+    const clean = await temporaryDirectory('kodi-review-clean-')
     await migrateLegacyReviewDirectory(clean)
     expect(await readdir(clean)).toEqual([])
 
-    const root = await mkdtemp(join(tmpdir(), 'kodi-review-both-'))
+    const root = await temporaryDirectory('kodi-review-both-')
     await mkdir(join(root, '.horus'), { recursive: true })
     await writeFile(join(root, '.horus', 'old.patch'), 'old')
     await mkdir(join(root, '.kodi'), { recursive: true })
@@ -128,7 +141,7 @@ describe('migrateLegacyReviewDirectory', () => {
 
 describe('prepareAgentReviewContext', () => {
   test('points the agent at the local patch and forbids GitHub fetches', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'kodi-review-prepare-'))
+    const root = await temporaryDirectory('kodi-review-prepare-')
     await mkdir(join(root, '.git'), { recursive: true })
 
     const context = await prepareAgentReviewContext({
@@ -211,7 +224,7 @@ describe('RememberedReviewStore', () => {
 
 describe('prepareAgentReviewContext with a patchless review', () => {
   test('writes the cached patch for a review remembered without one', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'kodi-review-patchless-'))
+    const root = await temporaryDirectory('kodi-review-patchless-')
     await mkdir(join(root, '.git'), { recursive: true })
     const cachedPatch = 'diff --git a/src/auth.py b/src/auth.py\n+from_disk\n'
 

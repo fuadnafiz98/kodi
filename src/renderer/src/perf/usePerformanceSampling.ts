@@ -6,12 +6,14 @@ import {
   SAMPLE_IDLE_TIMEOUT_MS,
   SAMPLE_INTERVAL_COLLAPSED_MS,
   SAMPLE_INTERVAL_OPEN_MS,
-  SAMPLE_PRIME_DELAY_MS,
   SAMPLE_TIMEOUT_MS,
   sameReviewMetrics,
   type SamplingStatus
 } from './performanceHudModel'
 import { getReviewMetrics, type ReviewMetrics } from '../review/reviewMetrics'
+
+// Not pointermove: a window that appears under a resting pointer gets one.
+const PRIME_EVENTS = ['pointerdown', 'keydown', 'wheel'] as const
 
 export interface PerformanceSamplingOptions {
   /** Nothing is sampled until someone asks for the numbers. */
@@ -96,6 +98,7 @@ export function usePerformanceSampling({
       if (!document.hidden) void sample()
     }
 
+    let removePrimeListeners = (): void => {}
     const startSample = (): void => {
       const begin = (): void => {
         idleHandle = null
@@ -109,17 +112,24 @@ export function usePerformanceSampling({
         idleHandle = window.requestIdleCallback(begin, { timeout: SAMPLE_IDLE_TIMEOUT_MS })
         return
       }
-      // Without a reader the badge still wants one real reading, but launch
-      // owns the machine first: the prime waits out the startup window and
-      // then takes an idle gap. `scheduleSample` will not re-arm it.
-      timeout = window.setTimeout(() => {
-        timeout = null
+      // Without a reader the badge still wants one real reading, but a launch
+      // must look finished the moment it is shown: a number appearing by itself
+      // a second later reads as the app still loading. The prime waits for the
+      // reader's first input, then takes an idle gap. `scheduleSample` will not
+      // re-arm it.
+      const prime = (): void => {
+        removePrimeListeners()
         if (typeof window.requestIdleCallback === 'function') {
           idleHandle = window.requestIdleCallback(begin, { timeout: SAMPLE_IDLE_TIMEOUT_MS })
         } else {
           void sample()
         }
-      }, SAMPLE_PRIME_DELAY_MS)
+      }
+      removePrimeListeners = () => {
+        for (const type of PRIME_EVENTS) window.removeEventListener(type, prime, true)
+        removePrimeListeners = () => {}
+      }
+      for (const type of PRIME_EVENTS) window.addEventListener(type, prime, { capture: true, passive: true })
     }
 
     document.addEventListener('visibilitychange', handleVisibilityChange)
@@ -128,6 +138,7 @@ export function usePerformanceSampling({
       disposed = true
       if (timeout != null) window.clearTimeout(timeout)
       if (idleHandle != null) window.cancelIdleCallback(idleHandle)
+      removePrimeListeners()
       document.removeEventListener('visibilitychange', handleVisibilityChange)
     }
   }, [diagnosticsOpen, enabled, popoverOpen])

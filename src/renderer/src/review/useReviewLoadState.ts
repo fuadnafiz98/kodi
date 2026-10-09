@@ -28,6 +28,7 @@ import { resetReviewFileMetrics, setLoadedReviewItemCount } from './reviewMetric
 import { worldViewCache } from './worldViewCache'
 import { countKodiMetric } from '../perf/kodiCounters'
 import { createStreamCompletion } from './streamCompletion'
+import { takeStartupReview } from './startupReview'
 
 export interface ReviewLoadState {
   items: CodeViewItem<ReviewAnnotationMetadata>[]
@@ -553,6 +554,24 @@ export function useReviewLoadState({
           paged: false
         }))
         return
+      }
+      if (isNewPathSet && !partial) {
+        // A launch asked for this patch, and highlighted its first files, while
+        // the workspace was still mounting.
+        const startup = await takeStartupReview(root, requestPaths, () => cancelled)
+        if (cancelled) return
+        if (startup != null) {
+          servedAll()
+          setFolderLoadState({
+            items: orderReviewItems(startup.items, stablePaths),
+            loadedPaths: new Set(stablePaths),
+            omittedFiles: startup.omittedFiles,
+            failedCount: 0,
+            skippedCount: Math.max(0, stablePaths.length - startup.items.length - startup.omittedFiles.length),
+            paged: false
+          })
+          return
+        }
       }
       if (isNewPathSet) {
         const requestId = crypto.randomUUID()

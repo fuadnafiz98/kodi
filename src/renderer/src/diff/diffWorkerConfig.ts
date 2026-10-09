@@ -5,15 +5,32 @@ export const DIFF_WORKER_COUNT = 1
 
 export const COMPARISON_FETCH_CONCURRENCY = 4
 
+function createDiffWorker(): Worker {
+  return new Worker(new URL('@pierre/diffs/worker/worker.js', import.meta.url), { type: 'module' })
+}
+
+let prewarmedWorker: Worker | null = null
+
+/**
+ * Starts the highlight worker's script loading from the entry chunk. The pool
+ * creates its worker only once the theme and grammars have resolved, and the
+ * worker then still has to fetch and evaluate its own bundle before the first
+ * highlight; started here, that runs alongside the boot chunk instead.
+ */
+export function prewarmDiffWorker(): void {
+  prewarmedWorker ??= createDiffWorker()
+}
+
 export const DIFF_WORKER_POOL_OPTIONS = {
   poolSize: DIFF_WORKER_COUNT,
   // This limit applies independently to file and diff AST caches. Four entries
   // preserve short reverse-scroll reuse without retaining an entire review.
   totalASTLRUCacheSize: 4,
-  workerFactory: () =>
-    new Worker(new URL('@pierre/diffs/worker/worker.js', import.meta.url), {
-      type: 'module'
-    })
+  workerFactory: (): Worker => {
+    const worker = prewarmedWorker ?? createDiffWorker()
+    prewarmedWorker = null
+    return worker
+  }
 }
 
 export const DIFF_HIGHLIGHTER_LIMITS = {

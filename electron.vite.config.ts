@@ -1,3 +1,4 @@
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 
 import react from '@vitejs/plugin-react'
@@ -284,6 +285,36 @@ function collapseCssStringsPlugin(): Plugin {
   }
 }
 
+// Chunks whose code runs on every launch before the first screen. V8 compiles a
+// function the first time it is called, on the main thread, so a launch spent
+// ~40 ms there compiling React, the workspace and the review. This magic
+// comment has V8 compile the whole chunk eagerly while it streams the script on
+// a background thread instead.
+const EAGER_COMPILE_CHUNKS = new Set((process.env.KODI_EAGER_CHUNKS ?? 'boot,vendor-react,WorkspaceRoot,MultiFileReview').split(',').filter(Boolean))
+
+function eagerCompileHintPlugin(): Plugin {
+  // After the bundle is written: the minifier drops comments and the preload
+  // helper is put at the top of a chunk later still, and the hint only counts
+  // as the file's first line. The source map gains one empty line to match.
+  return {
+    name: 'kodi:eager-compile-hint',
+    apply: 'build',
+    writeBundle(options, bundle) {
+      const directory = options.dir ?? ''
+      for (const file of Object.values(bundle)) {
+        if (file.type !== 'chunk' || !EAGER_COMPILE_CHUNKS.has(file.name)) continue
+        const path = resolve(directory, file.fileName)
+        writeFileSync(path, `//# allFunctionsCalledOnLoad\n${readFileSync(path, 'utf8')}`)
+        const mapPath = `${path}.map`
+        if (!existsSync(mapPath)) continue
+        const map = JSON.parse(readFileSync(mapPath, 'utf8')) as { mappings: string }
+        map.mappings = `;${map.mappings}`
+        writeFileSync(mapPath, JSON.stringify(map))
+      }
+    }
+  }
+}
+
 function preloadBootChunkPlugin(): Plugin {
   return {
     name: 'kodi:preload-boot',
@@ -430,6 +461,14 @@ function buildTime(): string {
   return built.toISOString()
 }
 
+// What the launch's cached editor theme (`review/startupTheme.ts`) was resolved
+// from: a different version of any of these may draw the theme differently.
+function themePackageVersions(): string {
+  return ['@pierre/diffs', '@pierre/theme', '@pierre/theming']
+    .map((name) => (JSON.parse(readFileSync(resolve('node_modules', name, 'package.json'), 'utf8')) as { version: string }).version)
+    .join('|')
+}
+
 export default defineConfig({
   main: {
     plugins: [externalizeDepsPlugin()],
@@ -441,7 +480,8 @@ export default defineConfig({
       // parsed on every cold start, so all three targets opt in explicitly.
       minify: 'esbuild',
       rollupOptions: {
-        input: resolve('src/main/index.ts')
+        // `bootstrap` turns on Node's compile cache before `index` loads.
+        input: { bootstrap: resolve('src/main/bootstrap.ts'), index: resolve('src/main/index.ts') }
       }
     }
   },
@@ -460,6 +500,9 @@ export default defineConfig({
   },
   renderer: {
     root: resolve('src/renderer'),
+    define: {
+      __KODI_THEME_PACKAGES__: JSON.stringify(themePackageVersions())
+    },
     resolve: {
       // @pierre/trees still nests theme 1.1.0. Dedupe onto the root 2.0.0 so
       // Explorer and the highlighter share one pierre-light chunk.
@@ -473,6 +516,7 @@ export default defineConfig({
       }),
       contentSecurityPolicyPlugin(),
       preloadBootChunkPlugin(),
+      eagerCompileHintPlugin(),
       dropShikiWasmPlugin(),
       trimShikiThemesPlugin(),
       lazyHighlighterEnginePlugin(),

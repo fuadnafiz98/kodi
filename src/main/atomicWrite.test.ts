@@ -1,14 +1,23 @@
-import { describe, expect, it } from 'bun:test'
-import { mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises'
+import { afterEach, describe, expect, it } from 'bun:test'
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { quarantineFile, writeFileAtomic, writeFileAtomicSync } from './atomicWrite.js'
 
+// Every folder a test makes is removed after it.
+const directories: string[] = []
+
 async function directory(): Promise<string> {
-  return mkdtemp(join(tmpdir(), 'kodi-atomic-'))
+  const path = await mkdtemp(join(tmpdir(), 'kodi-atomic-'))
+  directories.push(path)
+  return path
 }
+
+afterEach(async () => {
+  await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true, force: true })))
+})
 
 describe('writeFileAtomic', () => {
   it('leaves the file and no temp behind when the write was superseded', async () => {
